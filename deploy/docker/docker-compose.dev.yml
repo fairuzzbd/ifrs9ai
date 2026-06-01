@@ -112,10 +112,19 @@ services:
     build:
       context: ../../frontend
       dockerfile: Dockerfile
+      args:
+        # NEXT_PUBLIC_API_URL di-bake ke bundle saat build (lihat frontend/Dockerfile).
+        # Override per-environment lewat env shell sebelum build, mis:
+        #   NEXT_PUBLIC_API_URL=https://api.uat.tugure.example \
+        #     docker compose -f deploy/docker/docker-compose.dev.yml build frontend
+        # Default tetap http://localhost:8080 untuk dev lokal.
+        NEXT_PUBLIC_API_URL: "${NEXT_PUBLIC_API_URL:-http://localhost:8080}"
     container_name: blips-frontend
     restart: unless-stopped
     environment:
-      NEXT_PUBLIC_API_URL: "http://localhost:8080"
+      # Hanya relevan untuk kode yang membaca env saat runtime (mis. server components).
+      # Bundle browser sudah ter-bake dari build arg di atas; nilai disamakan agar konsisten.
+      NEXT_PUBLIC_API_URL: "${NEXT_PUBLIC_API_URL:-http://localhost:8080}"
     ports:
       - "3000:3000"
     depends_on:

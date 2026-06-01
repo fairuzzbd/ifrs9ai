@@ -67,6 +67,64 @@ docker compose -f deploy/docker/docker-compose.dev.yml down        # stop
 docker compose -f deploy/docker/docker-compose.dev.yml down -v     # stop + hapus volume data
 ```
 
+## Konfigurasi URL API frontend per-environment (build-arg)
+
+Frontend Next.js memakai `NEXT_PUBLIC_API_URL` untuk menentukan base URL backend.
+Variabel berprefix `NEXT_PUBLIC_` **di-inline ke bundle saat `next build`** — nilainya
+ter-bake permanen ke image, bukan dibaca saat container start. Karena itu URL harus
+di-set **saat build**, bukan hanya saat runtime, agar satu Dockerfile bisa menghasilkan
+image untuk dev / UAT / produksi dengan URL berbeda.
+
+`frontend/Dockerfile` menerima ini lewat `ARG NEXT_PUBLIC_API_URL` (default
+`http://localhost:8080`) yang di-promote ke `ENV` di stage builder sebelum `pnpm build`.
+
+**Build manual per-environment:**
+
+```bash
+# UAT
+docker build \
+  --build-arg NEXT_PUBLIC_API_URL=https://api.uat.tugure.example \
+  -t blips-web:uat frontend/
+
+# Produksi
+docker build \
+  --build-arg NEXT_PUBLIC_API_URL=https://api.blips.tugure.example \
+  -t blips-web:prod frontend/
+```
+
+**Lewat docker-compose** — service `frontend` meneruskan nilai via `build.args`, dengan
+default dev tetap `http://localhost:8080`. Override dengan env shell sebelum build:
+
+```bash
+# Dev (default, tanpa override)
+docker compose -f deploy/docker/docker-compose.dev.yml up -d --build
+
+# Override untuk environment lain
+NEXT_PUBLIC_API_URL=https://api.uat.tugure.example \
+  docker compose -f deploy/docker/docker-compose.dev.yml build frontend
+```
+
+Verifikasi nilai benar ter-bake (URL muncul di bundle hasil build):
+
+```bash
+# Cek bundle lokal setelah `NEXT_PUBLIC_API_URL=... pnpm build` di frontend/
+grep -r "api.uat.tugure.example" frontend/.next/static | head
+```
+
+### CORS backend harus selaras per-environment
+
+Backend (`CORS_ALLOWED_ORIGINS`, comma-separated) harus mengizinkan **origin frontend**
+di tiap environment. Pasangkan keduanya saat deploy:
+
+| Environment | Frontend `NEXT_PUBLIC_API_URL` (→ backend) | Backend `CORS_ALLOWED_ORIGINS` (origin frontend) |
+|---|---|---|
+| Dev | `http://localhost:8080` | `http://localhost:3000` |
+| UAT | `https://api.uat.tugure.example` | `https://app.uat.tugure.example` |
+| Produksi | `https://api.blips.tugure.example` | `https://app.blips.tugure.example` |
+
+Set `CORS_ALLOWED_ORIGINS` lewat env backend (lihat `backend/.env.example`). Jika tidak
+selaras, browser memblokir request lintas-origin meski URL API sudah benar.
+
 ## Kredensial default (DEV — NON-PRODUKSI)
 
 > Kredensial di bawah ini **hanya untuk dev lokal**. JANGAN dipakai di UAT/produksi.
