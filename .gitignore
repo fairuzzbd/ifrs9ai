@@ -49,3 +49,8 @@ Thumbs.db
 *~
 .idea/
 .vscode/
+
+# Local Claude Code settings + Multica hook state (machine-specific)
+.claude/settings.local.json
+.claude/.multica-issuemap/
+.claude/plans/
