@@ -1,0 +1,224 @@
+# ---------------------------------------------------------------------------
+# BLIPS IFRS9 — GitHub Actions CI
+#
+# Port from .gitlab-ci.yml (kept in repo as compatibility doc + future
+# GitLab-mirror reference). Phase 0 SKELETON.
+#
+# Akan diperluas mengikuti git-conventions.md branch protection requirements:
+#   - security-scan (gitleaks, govulncheck, npm audit, container scan)
+#   - integration (testcontainers-go + PostgreSQL/Redis/MinIO)
+#   - e2e (Playwright)
+#   - compliance gate untuk path internal/ecl, internal/eir, internal/sppi, internal/bm
+#
+# Status check names (digunakan untuk Branch Protection "Require status checks"):
+#   - backend-lint
+#   - backend-test
+#   - frontend-lint
+#   - frontend-build
+# ---------------------------------------------------------------------------
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop, "release/**", "hotfix/**"]
+
+# Cancel in-progress runs untuk PR yang sama ketika commit baru di-push.
+# Hemat runner minutes, hindari race.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Minimum permission untuk GITHUB_TOKEN (security best practice).
+# Override per-job kalau butuh more (mis. write content untuk auto-tag).
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  GO_VERSION: "1.22"
+  NODE_VERSION: "20"
+  PNPM_VERSION: "9"
+
+jobs:
+  # =========================================================================
+  # Backend — Go 1.22 / Gin / sqlx
+  # =========================================================================
+
+  backend-lint:
+    name: backend-lint
+    runs-on: ubuntu-latest
+    # BLOCKING — Phase 0 finalize sudah hapus allow_failure (lihat
+    # commit chore(ci): "enforce backend-lint blocking").
+    # Pipeline merah → MR di-block dari merge ke develop/main.
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      # Skip job kalau perubahan tidak menyentuh backend/** atau workflow file.
+      # Equivalent ke GitLab rules.changes.
+      - id: changed
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+              - '.github/workflows/ci.yml'
+
+      - uses: actions/setup-go@v5
+        if: steps.changed.outputs.backend == 'true'
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: backend/go.sum
+
+      - uses: golangci/golangci-lint-action@v6
+        if: steps.changed.outputs.backend == 'true'
+        with:
+          version: v1.55
+          working-directory: backend
+          args: ./...
+
+  backend-test:
+    name: backend-test
+    runs-on: ubuntu-latest
+    # Non-blocking selama Phase 0 (mirror allow_failure: true dari .gitlab-ci.yml).
+    # Hapus continue-on-error setelah unit test coverage di module pertama hijau.
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: changed
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+              - '.github/workflows/ci.yml'
+
+      - uses: actions/setup-go@v5
+        if: steps.changed.outputs.backend == 'true'
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: backend/go.sum
+
+      - name: Run tests with race detector + coverage
+        if: steps.changed.outputs.backend == 'true'
+        run: |
+          go test ./... -race -coverprofile=coverage.out
+          go tool cover -func=coverage.out | tee coverage.txt
+          # Extract total coverage percentage (logged + parsed by GitHub
+          # nya untuk muncul di Actions UI summary).
+          TOTAL=$(awk '/^total:/ {print $3}' coverage.txt)
+          echo "## Backend test coverage" >> "$GITHUB_STEP_SUMMARY"
+          echo "Total coverage: \`${TOTAL}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.changed.outputs.backend == 'true' && always()
+        with:
+          name: backend-coverage
+          path: |
+            backend/coverage.out
+            backend/coverage.txt
+          retention-days: 7
+
+  # =========================================================================
+  # Frontend — Next.js 14 / TypeScript / pnpm
+  # =========================================================================
+
+  frontend-lint:
+    name: frontend-lint
+    runs-on: ubuntu-latest
+    # Non-blocking selama Phase 0. Hapus continue-on-error setelah ESLint
+    # rule disepakati & legacy warning di-clear.
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: changed
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            frontend:
+              - 'frontend/**'
+              - '.github/workflows/ci.yml'
+
+      - uses: pnpm/action-setup@v4
+        if: steps.changed.outputs.frontend == 'true'
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        if: steps.changed.outputs.frontend == 'true'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        if: steps.changed.outputs.frontend == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        if: steps.changed.outputs.frontend == 'true'
+        run: pnpm lint
+
+  frontend-build:
+    name: frontend-build
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: changed
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            frontend:
+              - 'frontend/**'
+              - '.github/workflows/ci.yml'
+
+      - uses: pnpm/action-setup@v4
+        if: steps.changed.outputs.frontend == 'true'
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        if: steps.changed.outputs.frontend == 'true'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        if: steps.changed.outputs.frontend == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        if: steps.changed.outputs.frontend == 'true'
+        env:
+          # Default API URL untuk CI build. Production build di-override via
+          # build-arg saat docker build di pipeline deploy.
+          NEXT_PUBLIC_API_URL: "http://localhost:8081"
+        run: pnpm build
+
+      - uses: actions/upload-artifact@v4
+        if: steps.changed.outputs.frontend == 'true' && always()
+        with:
+          name: frontend-build
+          path: frontend/.next
+          retention-days: 1
