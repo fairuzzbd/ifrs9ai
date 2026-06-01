@@ -1,0 +1,71 @@
+# BLIPS IFRS9 — Code Owners
+#
+# GitHub auto-request review berdasarkan path saat PR dibuka.
+# Sinkron dengan tabel "Required reviewers per file path" di
+# .claude/memory/git-conventions.md.
+#
+# Sintaks (https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-security/customizing-your-repository/about-code-owners):
+#   <pattern> <user1> <user2> ...
+# Pattern matching mirip .gitignore. Pattern LAST yang match menentukan.
+#
+# Placeholder note: GitHub `@team/handle` syntax butuh organisation account.
+# Karena repo saat ini personal (fairuzzbd/ifrs9ai), pakai individual GitHub
+# username sebagai placeholder. Update saat organisation account Tugure aktif
+# dan team handle dibuat (mis. @tugu-re/ecl-eir-engineer).
+
+# ---------------------------------------------------------------------------
+# Default fallback owner — semua file yang tidak match pattern di bawah
+# ---------------------------------------------------------------------------
+*                                       @fairuzzbd
+
+# ---------------------------------------------------------------------------
+# Compliance-critical (BLOCKING — butuh ifrs9-compliance-reviewer)
+# ---------------------------------------------------------------------------
+/backend/internal/ecl/                  @fairuzzbd
+/backend/internal/eir/                  @fairuzzbd
+/backend/internal/sppi/                 @fairuzzbd
+/backend/internal/bm/                   @fairuzzbd
+
+# ---------------------------------------------------------------------------
+# Security-critical (BLOCKING — butuh security-engineer)
+# ---------------------------------------------------------------------------
+/backend/internal/auth/                 @fairuzzbd
+/backend/internal/audit/                @fairuzzbd
+/backend/internal/middleware/auth*.go   @fairuzzbd
+
+# ---------------------------------------------------------------------------
+# Database schema
+# ---------------------------------------------------------------------------
+/db/migrations/                         @fairuzzbd
+
+# ---------------------------------------------------------------------------
+# API contract
+# ---------------------------------------------------------------------------
+/api/openapi/                           @fairuzzbd
+
+# ---------------------------------------------------------------------------
+# External integrations
+# ---------------------------------------------------------------------------
+/backend/internal/integration/          @fairuzzbd
+
+# ---------------------------------------------------------------------------
+# Frontend
+# ---------------------------------------------------------------------------
+/frontend/                              @fairuzzbd
+
+# ---------------------------------------------------------------------------
+# Infra & CI
+# ---------------------------------------------------------------------------
+/deploy/                                @fairuzzbd
+/.github/workflows/                     @fairuzzbd
+/terraform/                             @fairuzzbd
+/ansible/                               @fairuzzbd
+
+# ---------------------------------------------------------------------------
+# Project tooling & convention docs
+# ---------------------------------------------------------------------------
+/.claude/                               @fairuzzbd
+/.github/                               @fairuzzbd
+/docs/runbooks/                         @fairuzzbd
+/CLAUDE.md                              @fairuzzbd
+/START_HERE.md                          @fairuzzbd
