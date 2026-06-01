@@ -27,7 +27,6 @@ variables:
 backend-lint:
   stage: lint
   image: golangci/golangci-lint:v1.55-alpine
-  allow_failure: true
   rules:
     - changes:
         - backend/**/*
