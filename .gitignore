@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+vendor/
+
+# Build output
+/bin/
+dist/
+.next/
+out/
+*.exe
+*.test
+
+# Environment & secrets (never commit)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.yaml
+secrets.yml
+
+# Coverage & profiling
+coverage/
+*.cover
+*.prof
+
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
