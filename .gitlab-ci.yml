@@ -1,0 +1,98 @@
+# ---------------------------------------------------------------------------
+# BLIPS IFRS9 — GitLab CI/CD
+#
+# Phase 0 SKELETON. Hanya stage dasar lint/test/build untuk backend (Go) & frontend (Next.js).
+# Akan diperluas (per .claude/memory/git-conventions.md branch-protection):
+#   - security-scan (gitleaks, govulncheck, npm audit, container scan)
+#   - integration (testcontainers-go + PostgreSQL/Redis/MinIO)
+#   - e2e (Playwright)
+#   - compliance gate untuk path internal/ecl, internal/eir, internal/sppi, internal/bm
+# Lihat git-conventions.md untuk required-pipeline rules per branch protected.
+#
+# Catatan: job di-set allow_failure: true selama Phase 0 karena toolchain/dependency
+# belum tentu lengkap di runner. Hapus allow_failure setelah baseline hijau & deps ter-vendor.
+# ---------------------------------------------------------------------------
+
+stages:
+  - lint
+  - test
+  - build
+
+variables:
+  GO_VERSION: "1.22"
+  NODE_VERSION: "20"
+
+# --- Backend (Go 1.22 / Gin / sqlx) ---------------------------------------
+
+backend-lint:
+  stage: lint
+  image: golangci/golangci-lint:v1.55-alpine
+  rules:
+    - changes:
+        - backend/**/*
+        - .gitlab-ci.yml
+  script:
+    - cd backend
+    - golangci-lint run ./...
+
+backend-test:
+  stage: test
+  image: golang:1.22
+  allow_failure: true
+  rules:
+    - changes:
+        - backend/**/*
+        - .gitlab-ci.yml
+  cache:
+    key: go-mod-$CI_COMMIT_REF_SLUG
+    paths:
+      - backend/.go/pkg/mod
+  variables:
+    GOPATH: "$CI_PROJECT_DIR/backend/.go"
+  script:
+    - cd backend
+    - go test ./... -race -coverprofile=coverage.out
+    - go tool cover -func=coverage.out
+  coverage: '/total:\s+\(statements\)\s+(\d+\.\d+)%/'
+
+# --- Frontend (Next.js 14 / TypeScript) -----------------------------------
+
+frontend-lint:
+  stage: lint
+  image: node:20
+  allow_failure: true
+  rules:
+    - changes:
+        - frontend/**/*
+        - .gitlab-ci.yml
+  cache:
+    key: pnpm-$CI_COMMIT_REF_SLUG
+    paths:
+      - frontend/node_modules
+  script:
+    - cd frontend
+    - corepack enable
+    - pnpm install --frozen-lockfile
+    - pnpm lint
+
+frontend-build:
+  stage: build
+  image: node:20
+  allow_failure: true
+  rules:
+    - changes:
+        - frontend/**/*
+        - .gitlab-ci.yml
+  cache:
+    key: pnpm-$CI_COMMIT_REF_SLUG
+    paths:
+      - frontend/node_modules
+  script:
+    - cd frontend
+    - corepack enable
+    - pnpm install --frozen-lockfile
+    - pnpm build
+  artifacts:
+    paths:
+      - frontend/.next
+    expire_in: 1 day

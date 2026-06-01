@@ -1,0 +1,163 @@
+# ---------------------------------------------------------------------------
+# BLIPS IFRS9 — Dev environment (Phase 0 Bootstrap)
+#
+# Stack LOCKED (DEC-001..004): PostgreSQL 18, Redis 7, MinIO, Go backend, Next.js frontend.
+# On-premise / single-tenant (DEC-002/DEC-008/DEC-023).
+#
+# CATATAN: Kredensial di file ini adalah DEFAULT DEV NON-PRODUKSI.
+# JANGAN dipakai di UAT/produksi — produksi pakai secrets manager (lihat security-baseline.md).
+#
+# Jalankan dari root repo:
+#   docker compose -f deploy/docker/docker-compose.dev.yml up -d
+#
+# Path build context & mount bersifat relatif terhadap folder file ini (deploy/docker/),
+# sehingga root repo direferensikan sebagai ../../
+# ---------------------------------------------------------------------------
+
+name: blips-ifrs9-dev
+
+services:
+  postgres:
+    image: postgres:18
+    container_name: blips-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: blips_db
+      POSTGRES_USER: blips_admin
+      POSTGRES_PASSWORD: change_me_in_production
+    ports:
+      - "5432:5432"
+    volumes:
+      # postgres:18 menyimpan data di subdirektori per-versi; mount di parent
+      # /var/lib/postgresql (BUKAN /var/lib/postgresql/data) sesuai konvensi image 18+.
+      - pgdata:/var/lib/postgresql
+      # Bootstrap schema: mount file .up.sql EKSPLISIT satu-per-satu — JANGAN mount seluruh
+      # direktori db/migrations/ karena postgres entrypoint akan mengeksekusi SEMUA file .sql
+      # secara alphabetical, termasuk .down.sql yang akan langsung DROP schema.
+      #
+      # Phase 0 bootstrap mechanism: postgres image auto-execute file di
+      # /docker-entrypoint-initdb.d/ hanya sekali saat volume data masih kosong.
+      # Urutan eksekusi dijamin alphabetical (01_ sebelum 02_).
+      #
+      # Phase 2 (Foundation Layer) akan switch ke binary cmd/migrator yang menggunakan
+      # golang-migrate/migrate/v4 untuk incremental schema changes.
+      - ../../db/migrations/000001_init_schema.up.sql:/docker-entrypoint-initdb.d/01_init_schema.sql:ro
+      - ../../db/migrations/000002_seed_data_dev.up.sql:/docker-entrypoint-initdb.d/02_seed_data_dev.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blips_admin -d blips_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - blips
+
+  redis:
+    image: redis:7-alpine
+    container_name: blips-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - blips
+
+  minio:
+    image: minio/minio:latest
+    container_name: blips-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Console
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - blips
+
+  backend:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    container_name: blips-backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgres://blips_admin:change_me_in_production@postgres:5432/blips_db?sslmode=disable"
+      REDIS_URL: "redis://redis:6379/0"
+      MINIO_ENDPOINT: "minio:9000"
+      MINIO_ACCESS_KEY: "minioadmin"
+      MINIO_SECRET_KEY: "minioadmin"
+      MINIO_USE_SSL: "false"
+      SERVER_PORT: "8081"
+      # CORS origins — gunakan ${BLIPS_WEB_ORIGIN} untuk override saat host port frontend bukan default 3001.
+      CORS_ALLOWED_ORIGINS: "${BLIPS_WEB_ORIGIN:-http://localhost:3001}"
+    ports:
+      # Host port di-parameterize agar BLIPS bisa coexist dengan project lain di host yang sama
+      # (mis. DMS/Multica sering pakai 8080/8081). Container-internal port tetap 8081.
+      # Override: BLIPS_HOST_API_PORT=8088 docker compose -f deploy/docker/docker-compose.dev.yml up -d
+      - "${BLIPS_HOST_API_PORT:-8081}:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
+    networks:
+      - blips
+
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+      args:
+        # NEXT_PUBLIC_API_URL di-bake ke bundle saat build (lihat frontend/Dockerfile).
+        # Override per-environment lewat env shell sebelum build, mis:
+        #   NEXT_PUBLIC_API_URL=https://api.uat.tugure.example \
+        #     docker compose -f deploy/docker/docker-compose.dev.yml build frontend
+        # Default tetap http://localhost:8081 untuk dev lokal.
+        NEXT_PUBLIC_API_URL: "${NEXT_PUBLIC_API_URL:-http://localhost:8081}"
+    container_name: blips-frontend
+    restart: unless-stopped
+    environment:
+      # Hanya relevan untuk kode yang membaca env saat runtime (mis. server components).
+      # Bundle browser sudah ter-bake dari build arg di atas; nilai disamakan agar konsisten.
+      NEXT_PUBLIC_API_URL: "${NEXT_PUBLIC_API_URL:-http://localhost:8081}"
+    ports:
+      # Host port di-parameterize seperti backend. Container-internal port tetap 3001.
+      # Override: BLIPS_HOST_WEB_PORT=3010 ...
+      - "${BLIPS_HOST_WEB_PORT:-3001}:3001"
+    depends_on:
+      backend:
+        condition: service_started
+    networks:
+      - blips
+
+volumes:
+  pgdata:
+    name: blips-pgdata
+  redisdata:
+    name: blips-redisdata
+  miniodata:
+    name: blips-miniodata
+
+networks:
+  blips:
+    name: blips-dev
+    driver: bridge

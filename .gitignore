@@ -1,14 +1,21 @@
 # Dependencies
 node_modules/
+frontend/node_modules/
 vendor/
 
-# Build output
+# Go build output
 /bin/
+backend/bin/
+backend/tmp/
 dist/
-.next/
-out/
 *.exe
 *.test
+
+# Node / Next.js build output
+.next/
+frontend/.next/
+out/
+frontend/out/
 
 # Environment & secrets (never commit)
 .env
@@ -18,6 +25,7 @@ out/
 *.key
 secrets.yaml
 secrets.yml
+secrets/
 
 # Coverage & profiling
 coverage/
@@ -27,6 +35,13 @@ coverage/
 # Logs
 *.log
 
+# Database dumps
+*.dump
+*.sql.gz
+
+# Microsoft Word lock files
+~$*
+
 # OS / editor
 .DS_Store
 Thumbs.db
@@ -34,3 +49,8 @@ Thumbs.db
 *~
 .idea/
 .vscode/
+
+# Local Claude Code settings + Multica hook state (machine-specific)
+.claude/settings.local.json
+.claude/.multica-issuemap/
+.claude/plans/
