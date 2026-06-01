@@ -1,6 +1,23 @@
 # Git Conventions — BLIPS IFRS9
 
-> Branching: **GitFlow** · Commit: **Conventional Commits dengan scope modul** · Tagging: **SemVer 2.0**
+> Branching: **GitFlow** · Commit: **Conventional Commits dengan scope modul** · Tagging: **SemVer 2.0** · Platform: **GitHub** (primary, `github.com/fairuzzbd/ifrs9ai`)
+
+## Platform note
+
+Primary code-hosting + CI adalah **GitHub** dengan **GitHub Actions** (`.github/workflows/ci.yml`). File `.gitlab-ci.yml` + `.gitlab/merge_request_templates/` masih ada di repo sebagai compat reference (untuk GitLab self-hosted mirror jika nantinya disetup di Tugure DC), tapi **bukan sumber kebenaran** — pipeline dieksekusi GitHub Actions.
+
+Terminology mapping yang dipakai di dokumen ini:
+| Konsep abstrak | GitHub | GitLab (legacy compat) |
+|---|---|---|
+| Code review request | **PR** (Pull Request) | MR (Merge Request) |
+| CI pipeline | GitHub Actions workflow | GitLab CI pipeline |
+| Auto-reviewer per path | `.github/CODEOWNERS` | `.gitlab/CODEOWNERS` |
+| Branch protection setup | Settings → Branches → Add rule | Settings → Repository → Protected branches |
+| Merge button options | Squash and merge / Rebase and merge / Create a merge commit | Squash commits / Merge commit (FF/no-FF) |
+| Required status check | GitHub Actions job name | GitLab CI job stage |
+| Hotfix template invoke | `?template=hotfix.md` query param | Dropdown picker |
+
+Dokumen ini default ke terminology **PR / GitHub Actions**. Konsep yang sama berlaku di GitLab — kalau Anda kebetulan ngerjain via GitLab mirror, ganti term di kepala.
 
 ## Mengapa GitFlow?
 BLIPS adalah regulated financial software dengan:
@@ -44,29 +61,46 @@ Trunk-based ditolak karena: tidak ada window untuk regression test ECL/EIR antar
 - Branch dengan space atau karakter aneh
 - Branch personal di repo utama (pakai fork untuk eksplorasi)
 
-### Branch protection rules (set di GitLab)
+### Branch protection rules (set di GitHub: Settings → Branches → Add rule)
+
+Setup detail + `gh api` reproducible script: lihat `docs/runbooks/github-branch-protection.md`.
 
 **`main`:**
-- ✅ No direct push (semua via MR)
-- ✅ Required approvers: 2 (minimum: 1 tech-lead + 1 domain-specific reviewer)
-- ✅ Required pipeline pass: lint + unit + integration + security-scan + e2e
-- ✅ Required compliance review (untuk MR yang touch APP-A/APP-C atau path `internal/ecl/`, `internal/sppi/`)
-- ✅ Required security review (untuk MR yang touch `internal/auth/`, `internal/audit/`, atau touch PII columns)
-- ✅ Force-push: forbidden
-- ✅ Delete: forbidden
-- ✅ Signed commits required
+- ✅ Require a pull request before merging (semua via PR)
+- ✅ Require approvals: **2** (minimum: 1 tech-lead + 1 domain-specific reviewer)
+- ✅ Dismiss stale pull request approvals when new commits are pushed
+- ✅ Require review from Code Owners (`.github/CODEOWNERS`)
+- ✅ Require status checks to pass before merging:
+  - `backend-lint`, `backend-test`, `frontend-lint`, `frontend-build` (Phase 0)
+  - `+ integration`, `+ security-scan`, `+ e2e`, `+ compliance` (post-Phase 2)
+- ✅ Require branches to be up to date before merging
+- ✅ Require conversation resolution before merging
+- ✅ Require signed commits
+- ✅ Require linear history (untuk main — gunakan "Create a merge commit" untuk release/hotfix → no-FF tetap counts as linear di first-parent)
+- ✅ Do not allow bypassing the above settings (no admin override)
+- ✅ Restrict pushes that create matching branches (force-push forbidden by default)
+- ✅ Restrict deletions
 
 **`develop`:**
-- ✅ No direct push (MR only)
-- ✅ Required approvers: 1
-- ✅ Required pipeline pass: lint + unit + integration + security-scan
-- ✅ Compliance review required jika touch ECL/EIR/SPPI/BM
-- ✅ Force-push: forbidden
-- ✅ Signed commits required
+- ✅ Require a pull request before merging
+- ✅ Require approvals: **1**
+- ✅ Require review from Code Owners
+- ✅ Require status checks to pass: `backend-lint` (+ rest as available)
+- ✅ Require branches to be up to date
+- ✅ Require signed commits (untuk landing commit; feature branch commits boleh unsigned)
+- ✅ Restrict force-pushes + deletions
 
-**`release/*`:**
-- ✅ Hanya tech-lead-orchestrator atau ROLE-IT-ADMIN yang boleh create.
-- ✅ Hotfix branches: hanya untuk severity ≥ HIGH dengan incident ID.
+**`release/*` dan `hotfix/*`:**
+- ✅ Sama seperti develop minimum, plus:
+  - Hanya tech-lead-orchestrator atau ROLE-IT-ADMIN yang boleh create (enforced via custom branch protection pattern + restricted push allowlist)
+  - Hotfix branches: hanya untuk severity ≥ HIGH dengan incident ID di PR description
+
+### Catatan migrasi GitLab → GitHub
+
+Repo sebelumnya didokumentasi sebagai GitLab self-hosted (`gitlab.tugu-re.com`). Sekarang primary di GitHub (`github.com/fairuzzbd/ifrs9ai`). Berarti:
+- `.gitlab-ci.yml` tidak jalan (kecuali GitLab mirror di-setup) — GitHub Actions di `.github/workflows/ci.yml` adalah yang dieksekusi
+- "MR template" di `.gitlab/merge_request_templates/` tidak auto-load di GitHub — replaced by `.github/PULL_REQUEST_TEMPLATE.md` (default) + `.github/PULL_REQUEST_TEMPLATE/hotfix.md` (variant via `?template=hotfix.md`)
+- "Protected branches" UI di GitLab tidak berlaku — pakai GitHub Branch Protection Rules (runbook: `docs/runbooks/github-branch-protection.md`)
 
 ---
 
@@ -158,7 +192,7 @@ Per PSAK 71 §5.4.1(b) interest on Stage 3 must accrue on Net Carrying
 (Gross - ECL), not Gross. Previous code used Gross which over-stated
 interest income by ~12% for Stage 3 instruments.
 
-Detected by ifrs9-compliance-reviewer on PR !245.
+Detected by ifrs9-compliance-reviewer on PR #245.
 
 Refs: BLIPS-1289
 Closes: #189
@@ -180,7 +214,7 @@ Refs: BLIPS-1450
 ❌ "Fixed ECL"                        → past tense, no scope
 ❌ "feat(app-c): added new feature."  → past tense + trailing period
 ❌ "wip"                              → not informative
-❌ "WIP: ecl stage 2"                 → use draft MR, not commit type
+❌ "WIP: ecl stage 2"                 → use draft PR, not commit type
 ❌ "feat: refactor everything"        → no scope, vague
 ```
 
@@ -188,17 +222,23 @@ Refs: BLIPS-1450
 
 ## Merge strategy
 
-| Source → Target | Strategy | Why |
-|---|---|---|
-| `feature/*` → `develop` | **Squash + merge** | Keep develop linear, 1 commit per feature |
-| `release/*` → `main` | **Merge commit (no FF)** | Preserve release branch history |
-| `release/*` → `develop` (back-merge) | **Merge commit (no FF)** | |
-| `hotfix/*` → `main` | **Merge commit (no FF)** | |
-| `hotfix/*` → `develop` (back-merge) | **Merge commit (no FF)** | |
+GitHub PR memberi 3 opsi tombol merge. Branch Protection bisa di-set "Allow only specific merge types" untuk enforce per branch.
 
-**Always** rebase feature branch on `develop` sebelum MR open jika develop sudah maju.
+| Source → Target | GitHub button | Why |
+|---|---|---|
+| `feature/*` → `develop` | **Squash and merge** | 1 commit per feature di develop, history linear |
+| `chore/*` → `develop` | **Squash and merge** | Sama |
+| `docs/*` → `develop` | **Squash and merge** | Sama |
+| `release/*` → `main` | **Create a merge commit** (no-FF) | Preserve release branch history di first-parent timeline |
+| `release/*` → `develop` (back-merge) | **Create a merge commit** | Sama |
+| `hotfix/*` → `main` | **Create a merge commit** (no-FF) | Hotfix timeline distinct di `git log --first-parent main` |
+| `hotfix/*` → `develop` (back-merge) | **Create a merge commit** | Sama |
+
+**Always** rebase feature branch on `develop` sebelum PR open jika develop sudah maju (`git fetch && git rebase origin/develop`).
 
 **No fast-forward** untuk release/hotfix supaya `git log --first-parent main` menampilkan release timeline yang clean.
+
+**Rebase and merge** opsi GitHub: **jangan dipakai default** — semantik "rebase" di GitHub berbeda dengan `git rebase` (GitHub rebase + merge tetap fast-forward, beda dengan no-FF merge commit yang punya merge-commit object). Untuk BLIPS, pilih Squash atau Create a merge commit per tabel di atas.
 
 ---
 
@@ -229,7 +269,7 @@ git config --global user.signingkey ~/.ssh/id_ed25519.pub
 git config --global commit.gpgsign true
 ```
 
-CI akan verify signature dan reject MR jika ada unsigned commit di branch target protected.
+CI akan verify signature dan reject PR jika ada unsigned commit di branch target protected.
 
 ---
 
@@ -244,7 +284,7 @@ CI akan verify signature dan reject MR jika ada unsigned commit di branch target
    ↓
 3. Fix + test minimum sufficient (unit + integration; full E2E nanti)
    ↓
-4. MR ke main:
+4. PR ke main:
    - Required approvers: 2 (1 tech-lead + 1 domain reviewer)
    - Compliance review jika ECL/SPPI/BM (mandatory, blocking)
    - Security review jika auth/PII/audit (mandatory, blocking)
@@ -256,7 +296,7 @@ CI akan verify signature dan reject MR jika ada unsigned commit di branch target
    ↓
 7. Deploy prod (ROLE-IT-ADMIN trigger via /deploy slash command)
    ↓
-8. Back-merge to develop (MR, no-FF) — supaya hotfix tidak hilang saat next release
+8. Back-merge to develop (PR, no-FF) — supaya hotfix tidak hilang saat next release
    ↓
 9. Post-mortem doc di docs/incidents/{YYYY-MM-DD}-{slug}.md
 ```
@@ -277,7 +317,7 @@ CI akan verify signature dan reject MR jika ada unsigned commit di branch target
    Generate CHANGELOG.md entry (pakai /release slash command)
    Commit: chore(repo): prepare v1.4.0
    ↓
-4. Push & MR ke main:
+4. Push & PR ke main:
    - All gates: lint + unit + integration + security-scan + e2e
    - Compliance review (mandatory)
    - Security review (mandatory)
@@ -288,7 +328,7 @@ CI akan verify signature dan reject MR jika ada unsigned commit di branch target
 6. Tag (signed): git tag -s v1.4.0 -m "release: v1.4.0"
    git push origin v1.4.0
    ↓
-7. Back-merge release/v1.4.0 → develop (MR, no-FF)
+7. Back-merge release/v1.4.0 → develop (PR, no-FF)
    ↓
 8. Delete release branch
    ↓
@@ -315,23 +355,25 @@ Pre-release tags: `v1.4.0-rc.1`, `v1.4.0-rc.2` untuk UAT cycle sebelum prod.
 
 ---
 
-## Required reviewers per file path (CODEOWNERS-equivalent)
+## Required reviewers per file path — `.github/CODEOWNERS`
 
-Karena belum ada CODEOWNERS file, sebagai konvensi MR template membutuhkan reviewer berikut berdasarkan path:
+File `.github/CODEOWNERS` (template di `docs/runbooks/github-branch-protection.md`) auto-request review berdasarkan path saat PR dibuka. Dengan Branch Protection "Require review from Code Owners" aktif, PR yang menyentuh path BLOCKING tidak bisa di-merge tanpa approval owner-nya.
 
-| Path | Required reviewers |
-|---|---|
-| `internal/ecl/**`, `internal/eir/**` | `ecl-eir-engineer` + `ifrs9-compliance-reviewer` (BLOCKING) |
-| `internal/sppi/**`, `internal/bm/**` | `business-analyst` + `ifrs9-compliance-reviewer` (BLOCKING) |
-| `internal/auth/**`, `internal/audit/**` | `security-engineer` (BLOCKING) |
-| `db/migrations/**` | `data-modeler` + `security-engineer` (jika touch `aud/sec`) |
-| `api/openapi/**` | `system-analyst` |
-| `internal/integration/**` | `integration-engineer` |
-| `web/**` | `frontend-engineer-nextjs` |
-| `deploy/**`, `.gitlab-ci.yml`, `terraform/**` | `devops-engineer` + `security-engineer` (jika destructive) |
-| `.claude/**` | `tech-lead-orchestrator` |
+Mapping path → owner (sinkronkan dengan `.github/CODEOWNERS` saat ditambah):
 
-Untuk migration ke CODEOWNERS GitLab file, lihat `.gitlab/CODEOWNERS` (akan ditambah saat ROLE-IT-ADMIN siap).
+| Path | Required reviewers | Severity |
+|---|---|---|
+| `backend/internal/ecl/**`, `backend/internal/eir/**` | `@ecl-eir-engineer` + `@ifrs9-compliance-reviewer` | **BLOCKING** |
+| `backend/internal/sppi/**`, `backend/internal/bm/**` | `@business-analyst` + `@ifrs9-compliance-reviewer` | **BLOCKING** |
+| `backend/internal/auth/**`, `backend/internal/audit/**` | `@security-engineer` | **BLOCKING** |
+| `db/migrations/**` | `@data-modeler` (+ `@security-engineer` jika touch `aud/sec`) | Standard |
+| `api/openapi/**` | `@system-analyst` | Standard |
+| `backend/internal/integration/**` | `@integration-engineer` | Standard |
+| `frontend/**` | `@frontend-engineer-nextjs` | Standard |
+| `deploy/**`, `.github/workflows/**`, `terraform/**`, `ansible/**` | `@devops-engineer` (+ `@security-engineer` jika destructive) | Standard |
+| `.claude/**` | `@tech-lead-orchestrator` | Standard |
+
+Note: GitHub team handles (`@tugu-re/ecl-eir-engineer`, dst) dipakai kalau organisation account sudah ada. Untuk personal repo `fairuzzbd/ifrs9ai`, pakai individual GitHub username (`@fairuzzbd`, atau actual reviewer username) sebagai placeholder sampai org account siap.
 
 ---
 
@@ -400,7 +442,7 @@ Auto-generated dari conventional commits via `/release` slash command. Format [K
 ### Changed
 - (db) ecl.amortisasi_schedule partition strategy switched to monthly
 
-[1.4.0]: https://gitlab.tugu-re.com/blips/blips-ifrs9/-/compare/v1.3.5...v1.4.0
+[1.4.0]: https://github.com/fairuzzbd/ifrs9ai/compare/v1.3.5...v1.4.0
 ```
 
 ---
@@ -423,7 +465,7 @@ Auto-generated dari conventional commits via `/release` slash command. Format [K
 
 ```bash
 # Lihat siapa yang touch ECL terakhir
-git log --oneline -- internal/ecl/
+git log --oneline -- backend/internal/ecl/
 
 # Cari commit yang ubah staging logic
 git log --all --grep="SICR\|staging"
@@ -436,6 +478,14 @@ git log --show-signature
 
 # Pre-commit run manual
 pre-commit run --all-files
+
+# GitHub PR helpers (gh CLI)
+gh pr list --state open                          # open PRs
+gh pr view 123 --comments                        # PR detail + comments
+gh pr checks 123                                 # status check results
+gh pr create --base develop --fill --web         # open PR (web UI fallback)
+gh pr create --base main --template hotfix.md    # PR pakai hotfix template
+gh release create v1.4.0 --notes-from-tag        # signed release tag + notes
 ```
 
 ## Citation
