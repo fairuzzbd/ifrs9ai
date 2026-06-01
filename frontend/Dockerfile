@@ -23,6 +23,14 @@ RUN corepack enable && corepack prepare pnpm@9 --activate
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
+# Base URL backend API. Variabel NEXT_PUBLIC_* di-inline ke bundle saat `next build`,
+# jadi nilainya HARUS tersedia di stage builder (bukan di runtime). Dengan ARG ini satu
+# image bisa dibangun ulang per-environment tanpa mengubah kode:
+#   docker build --build-arg NEXT_PUBLIC_API_URL=https://api.uat.tugure.example -t blips-web .
+# Default tetap http://localhost:8080 agar perilaku dev lokal tidak berubah.
+ARG NEXT_PUBLIC_API_URL=http://localhost:8080
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN pnpm build
 
