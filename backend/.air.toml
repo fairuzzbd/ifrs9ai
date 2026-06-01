@@ -1,0 +1,23 @@
+# Air hot-reload config untuk BLIPS IFRS9 backend.
+# Jalankan: `air` di dalam folder backend/ (butuh github.com/cosmtrek/air terinstal).
+
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -o ./tmp/api ./cmd/api"
+  bin = "./tmp/api"
+  full_bin = "./tmp/api"
+  include_ext = ["go", "tpl", "tmpl", "html"]
+  exclude_dir = ["tmp", "vendor", "testdata"]
+  exclude_regex = ["_test.go"]
+  delay = 1000
+  stop_on_error = true
+  send_interrupt = true
+  kill_delay = 2000
+
+[log]
+  time = true
+
+[misc]
+  clean_on_exit = true
