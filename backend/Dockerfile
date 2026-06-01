@@ -25,6 +25,6 @@ WORKDIR /app
 COPY --from=builder /out/api /app/api
 
 USER blips
-EXPOSE 8080
+EXPOSE 8081
 
 ENTRYPOINT ["/app/api"]

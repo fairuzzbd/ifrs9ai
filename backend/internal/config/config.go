@@ -46,14 +46,14 @@ func Load() *Config {
 	_ = godotenv.Load()
 
 	return &Config{
-		ServerPort:         getenv("SERVER_PORT", "8080"),
+		ServerPort:         getenv("SERVER_PORT", "8081"),
 		AppEnv:             getenv("APP_ENV", "development"),
 		DatabaseURL:        getenv("DATABASE_URL", "postgres://blips_admin:change_me_in_production@localhost:5432/blips_db?sslmode=disable"),
 		RedisURL:           getenv("REDIS_URL", "redis://localhost:6379/0"),
 		MinIOEndpoint:      getenv("MINIO_ENDPOINT", "localhost:9000"),
 		MinIOAccessKey:     getenv("MINIO_ACCESS_KEY", "minioadmin"),
 		MinIOSecretKey:     getenv("MINIO_SECRET_KEY", "minioadmin"),
-		CORSAllowedOrigins: getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000"),
+		CORSAllowedOrigins: getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3001"),
 		JWTSecret:          getenv("JWT_SECRET", "dev-only-insecure-jwt-secret-change-me"),
 	}
 }

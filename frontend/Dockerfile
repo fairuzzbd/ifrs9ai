@@ -27,8 +27,8 @@ COPY . .
 # jadi nilainya HARUS tersedia di stage builder (bukan di runtime). Dengan ARG ini satu
 # image bisa dibangun ulang per-environment tanpa mengubah kode:
 #   docker build --build-arg NEXT_PUBLIC_API_URL=https://api.uat.tugure.example -t blips-web .
-# Default tetap http://localhost:8080 agar perilaku dev lokal tidak berubah.
-ARG NEXT_PUBLIC_API_URL=http://localhost:8080
+# Default tetap http://localhost:8081 agar perilaku dev lokal tidak berubah.
+ARG NEXT_PUBLIC_API_URL=http://localhost:8081
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
 
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -40,7 +40,7 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
-ENV PORT=3000
+ENV PORT=3001
 ENV HOSTNAME=0.0.0.0
 
 RUN addgroup --system --gid 1001 nodejs \
@@ -53,6 +53,6 @@ COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 
 USER nextjs
 
-EXPOSE 3000
+EXPOSE 3001
 
 CMD ["node", "server.js"]

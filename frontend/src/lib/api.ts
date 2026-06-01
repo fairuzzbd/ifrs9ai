@@ -2,10 +2,10 @@ import type { HealthResponse } from "@/types/health";
 
 /**
  * Base URL backend API. Diambil dari env publik Next.js,
- * fallback ke localhost:8080 untuk dev lokal tanpa konfigurasi.
+ * fallback ke localhost:8081 untuk dev lokal tanpa konfigurasi.
  */
 export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8081";
 
 /**
  * Error terstruktur dari pemanggilan API.
