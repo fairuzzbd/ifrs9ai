@@ -28,7 +28,9 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # postgres:18 menyimpan data di subdirektori per-versi; mount di parent
+      # /var/lib/postgresql (BUKAN /var/lib/postgresql/data) sesuai konvensi image 18+.
+      - pgdata:/var/lib/postgresql
       # Bootstrap schema dieksekusi sekali saat volume data masih kosong.
       - ../../BLIPS_init_schema.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
     healthcheck:
