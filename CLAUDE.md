@@ -1,6 +1,6 @@
 # BLIPS IFRS9 — Claude Code Project Guide
 
-Repository ini adalah implementasi BLIPS (Bond, Loan, Investment Portfolio System) untuk Tugu Reasuransi, sesuai PSAK 71 / IFRS 9. Project ini dikelola oleh tim **13 subagent Claude Code** dengan pembagian peran yang ketat.
+Repository ini adalah implementasi BLIPS (Bond, Loan, Investment Portfolio System) untuk Tugu Reasuransi, sesuai PSAK 71 / IFRS 9. Project ini dikelola oleh tim **14 subagent Claude Code** dengan pembagian peran yang ketat.
 
 ## Konvensi project (read this first)
 
@@ -89,7 +89,7 @@ Memory files berisi domain knowledge & konvensi yang dipakai berulang oleh semua
 
 ## Tim subagent
 
-13 agent terpasang di `.claude/agents/`. Lihat `.claude/AGENT-TEAM.md` untuk peran, handoff order, dan decision rights.
+14 agent terpasang di `.claude/agents/`. Lihat `.claude/AGENT-TEAM.md` untuk peran, handoff order, dan decision rights.
 
 ### Quick reference
 | Squad | Agents |
@@ -100,11 +100,18 @@ Memory files berisi domain knowledge & konvensi yang dipakai berulang oleh semua
 | **Quality & Compliance** | qa-engineer · security-engineer · ifrs9-compliance-reviewer |
 | **Platform** | devops-engineer |
 | **Orchestration** | tech-lead-orchestrator |
+| **Governance / Oversight** | mda (Auditor Tertinggi — hanya komunikasi dengan tech-lead-orchestrator) |
 
 ### Standard flow untuk perubahan
 ```
+                          ┌─────────────────────────────────────────┐
+                          │  mda (Auditor Tertinggi)                 │
+                          │  lapor kondisi ⇄ keputusan JSON          │
+                          │  (APPROVED / REJECTED / NEED_HUMAN)      │
+                          └───────────────▲─────────────────────────┘
+                                          │ single channel
 user request
-  → tech-lead-orchestrator (plan + delegate)
+  → tech-lead-orchestrator (plan + delegate; lapor & eksekusi keputusan mda)
   → business-analyst (story + AC)
   → system-analyst (OpenAPI + state machine)
   → data-modeler (if schema)
@@ -120,6 +127,12 @@ user request
 ### Blocking veto rights
 - `ifrs9-compliance-reviewer` — BLOCKING veto untuk merge yang menyentuh ECL/EIR/SPPI/BM/klasifikasi.
 - `security-engineer` — BLOCKING veto untuk auth/PII/audit changes.
+
+### Governance layer (mda)
+- `mda` adalah **Auditor Tertinggi**: memantau `tech-lead-orchestrator`, membaca dokumen referensi/regulasi, dan memutuskan strategis (`APPROVED`/`REJECTED`/`NEED_HUMAN`) atas rekomendasi orchestrator.
+- **Single channel**: `mda` HANYA berkomunikasi dengan `tech-lead-orchestrator`. Orchestrator-lah yang meneruskan/eksekusi keputusan ke subagent lain. `mda` tidak pernah memanggil subagent lain langsung.
+- `mda` **tidak menimpa** veto BLOCKING `ifrs9-compliance-reviewer` / `security-engineer`; ia menilai di lapisan keputusan strategis, bukan menggantikan gate teknis.
+- **Ledger wajib**: setiap komunikasi MDA ⇄ orchestrator disimpan MDA ke `.claude/memory/mda-ledger.md` (append-only, satu entri per exchange). File ini sengaja **tidak** di-`@`-import (agar tidak membengkakkan context); dibaca on-demand. Hanya MDA yang menulis; orchestrator boleh membaca.
 
 ## Slash commands (.claude/commands/)
 

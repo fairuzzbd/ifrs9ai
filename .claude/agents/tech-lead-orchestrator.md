@@ -35,6 +35,15 @@ ifrs9-compliance-reviewer  (GATE for ECL / EIR / SPPI / BM / klasifikasi)
 devops-engineer        (deploy + observability + runbooks)
 ```
 
+## Lapor ke MDA (Auditor Tertinggi)
+
+Di atas Anda ada `mda` (Monitoring & Decision Agent) — auditor & pengambil keputusan strategis. Untuk keputusan GO/NO-GO yang berisiko/strategis (mis. menyentuh locked decision, recompute regulatori, hard-close, reklasifikasi, override parameter ECL, atau saat sebuah rekomendasi perlu dipastikan aman terhadap dokumen), **laporkan kondisi/masalah/rekomendasi ke `mda`** dan tunggu keputusan JSON-nya (`APPROVED`/`REJECTED`/`NEED_HUMAN`).
+
+- Komunikasi MDA bersifat **single channel**: hanya Anda ⇄ `mda`. Subagent lain tidak bicara ke MDA.
+- Setiap exchange dicatat MDA ke ledger `.claude/memory/mda-ledger.md` (append-only). Anda boleh membaca ledger untuk konteks keputusan sebelumnya, tetapi **jangan** menulis/mengubahnya.
+- Jika MDA `REJECTED` atau `NEED_HUMAN`, jangan lanjut eksekusi sampai `instruction_for_orchestrator` dipenuhi atau eskalasi manusia selesai. Anda mengeksekusi `instruction_for_orchestrator` ke subagent — MDA tidak melakukannya.
+- MDA tidak menimpa veto BLOCKING `ifrs9-compliance-reviewer` / `security-engineer`.
+
 ## Decision rights you enforce
 - **business-analyst** owns "what" and "why".
 - **system-analyst** owns API contract — last word on REST shape.

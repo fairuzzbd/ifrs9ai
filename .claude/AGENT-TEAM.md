@@ -1,6 +1,6 @@
 # BLIPS Agent Team — Peran, Handoff, & Decision Rights
 
-13 subagent terpasang di `.claude/agents/`. Dokumen ini meringkas peran, alur kolaborasi, dan hak keputusan masing-masing.
+14 subagent terpasang di `.claude/agents/`. Dokumen ini meringkas peran, alur kolaborasi, dan hak keputusan masing-masing.
 
 ---
 
@@ -49,6 +49,12 @@
 |---|---|---|
 | **tech-lead-orchestrator** | Decompose, delegate, reconcile. Entry point untuk perubahan non-trivial. Tidak menulis kode. | **opus** |
 
+### Governance / Oversight
+
+| Agent | Peran | Model |
+|---|---|---|
+| **mda** (Monitoring & Decision Agent) | Auditor & pengambil keputusan tertinggi. Memantau orchestrator, membaca dokumen/regulasi, memutuskan GO/NO-GO. Tidak menulis kode, tidak mengurus teknis subagent. Output keputusan JSON (`APPROVED`/`REJECTED`/`NEED_HUMAN`). **Hanya berkomunikasi dengan tech-lead-orchestrator.** | **opus (4.8)** |
+
 ---
 
 ## 2. Standard Handoff Flow
@@ -56,6 +62,7 @@
 ```mermaid
 flowchart TD
     U[User Request] --> O[tech-lead-orchestrator]
+    O <-->|lapor kondisi / terima keputusan JSON| MDA[mda — Auditor Tertinggi]
     O --> BA[business-analyst]
     BA --> SA[system-analyst]
     SA -->|schema change?| DM[data-modeler]
@@ -78,6 +85,10 @@ flowchart TD
     DEV --> DONE[Done]
 ```
 
+> **MDA single channel**: `mda` berada di atas alur ini sebagai lapisan governance. Ia **hanya** terhubung dua arah ke `tech-lead-orchestrator` (lapor kondisi/masalah → terima keputusan JSON). MDA tidak pernah memanggil subagent lain langsung — orchestrator yang mengeksekusi `instruction_for_orchestrator` ke dalam alur di atas.
+>
+> **Ledger wajib**: setiap exchange MDA ⇄ orchestrator dicatat MDA ke `.claude/memory/mda-ledger.md` (append-only, satu entri per exchange, skema di file tsb). Ledger ini sengaja **tidak** di-`@`-import agar tidak membengkakkan context; dibaca on-demand. Orchestrator boleh baca, hanya MDA yang menulis.
+
 ---
 
 ## 3. Decision Rights & Veto Power
@@ -91,6 +102,7 @@ flowchart TD
 | Auth, PII, audit, encryption | security-engineer (BLOCKING) | — |
 | Deployment & infra | devops-engineer | security-engineer for destructive ops |
 | Cross-cutting tie-breaks | tech-lead-orchestrator | — |
+| Keputusan strategis / GO-NO-GO atas rekomendasi orchestrator | **mda** (APPROVED/REJECTED/NEED_HUMAN, berbasis dokumen) | tidak menimpa veto BLOCKING ifrs9-compliance-reviewer / security-engineer |
 
 ---
 
@@ -110,6 +122,7 @@ flowchart TD
 | "test", "UAT", "integration test", "E2E", "Playwright", "regression", "k6" | qa-engineer |
 | "Docker", "K8s", "Helm", "Terraform", "Ansible", "GitLab CI", "Grafana", "alert", "DR", "backup" | devops-engineer |
 | "plan", "design proposal", "cross-module", "siapa yang…" | tech-lead-orchestrator |
+| "keputusan", "audit tinggi", "GO/NO-GO", "approve rekomendasi", "aman sesuai dokumen?", "eskalasi" | mda (via tech-lead-orchestrator) |
 
 ---
 
