@@ -100,18 +100,17 @@ Memory files berisi domain knowledge & konvensi yang dipakai berulang oleh semua
 | **Quality & Compliance** | qa-engineer · security-engineer · ifrs9-compliance-reviewer |
 | **Platform** | devops-engineer |
 | **Orchestration** | tech-lead-orchestrator |
-| **Governance / Oversight** | mda (Auditor Tertinggi — hanya komunikasi dengan tech-lead-orchestrator) |
+| **Governance / Oversight** | mda (entry gate + Auditor Tertinggi — default agent diload pertama; delegasi hanya ke tech-lead-orchestrator) |
 
 ### Standard flow untuk perubahan
 ```
-                          ┌─────────────────────────────────────────┐
-                          │  mda (Auditor Tertinggi)                 │
-                          │  lapor kondisi ⇄ keputusan JSON          │
-                          │  (APPROVED / REJECTED / NEED_HUMAN)      │
-                          └───────────────▲─────────────────────────┘
-                                          │ single channel
 user request
-  → tech-lead-orchestrator (plan + delegate; lapor & eksekusi keputusan mda)
+  → mda (ENTRY GATE — default agent, diload pertama)
+       · nilai terhadap dokumen + locked decisions
+       · putuskan: APPROVED / REJECTED / NEED_HUMAN
+       · catat ke ledger (.claude/memory/mda-ledger.md)
+       · jika REJECTED / NEED_HUMAN → balik ke user (stop)
+  → tech-lead-orchestrator (hanya jika APPROVED; plan + delegate; boleh lapor balik ke mda)
   → business-analyst (story + AC)
   → system-analyst (OpenAPI + state machine)
   → data-modeler (if schema)
@@ -128,11 +127,13 @@ user request
 - `ifrs9-compliance-reviewer` — BLOCKING veto untuk merge yang menyentuh ECL/EIR/SPPI/BM/klasifikasi.
 - `security-engineer` — BLOCKING veto untuk auth/PII/audit changes.
 
-### Governance layer (mda)
-- `mda` adalah **Auditor Tertinggi**: memantau `tech-lead-orchestrator`, membaca dokumen referensi/regulasi, dan memutuskan strategis (`APPROVED`/`REJECTED`/`NEED_HUMAN`) atas rekomendasi orchestrator.
-- **Single channel**: `mda` HANYA berkomunikasi dengan `tech-lead-orchestrator`. Orchestrator-lah yang meneruskan/eksekusi keputusan ke subagent lain. `mda` tidak pernah memanggil subagent lain langsung.
+### Governance layer (mda) — entry gate
+- `mda` adalah **Auditor Tertinggi + gerbang masuk (entry gate)**. Ia di-set sebagai **default agent yang diload pertama** via `.claude/settings.json` → `"agent": "mda"` (main thread sesi = MDA).
+- **Tiap request user lewat MDA dulu**: MDA membaca dokumen referensi/regulasi + locked decisions, memutuskan (`APPROVED`/`REJECTED`/`NEED_HUMAN`), mencatat ledger, lalu — bila `APPROVED` — mendelegasikan ke `tech-lead-orchestrator` via Task. Bila `REJECTED`/`NEED_HUMAN`, MDA stop di gerbang dan balas ke user (eskalasi bila perlu).
+- **Single downstream channel**: satu-satunya agent yang MDA panggil adalah `tech-lead-orchestrator`. MDA tidak pernah memanggil subagent lain langsung; orchestrator yang fan-out. Orchestrator boleh lapor balik ke MDA untuk keputusan strategis di tengah eksekusi.
+- **Batas tool MDA**: `Bash` hanya untuk read-only situational awareness (mis. `git status`/`ls`), bukan build/test/deploy. `Write`/`Edit` hanya untuk ledger. `Task` hanya untuk memanggil orchestrator.
 - `mda` **tidak menimpa** veto BLOCKING `ifrs9-compliance-reviewer` / `security-engineer`; ia menilai di lapisan keputusan strategis, bukan menggantikan gate teknis.
-- **Ledger wajib**: setiap komunikasi MDA ⇄ orchestrator disimpan MDA ke `.claude/memory/mda-ledger.md` (append-only, satu entri per exchange). File ini sengaja **tidak** di-`@`-import (agar tidak membengkakkan context); dibaca on-demand. Hanya MDA yang menulis; orchestrator boleh membaca.
+- **Ledger wajib**: setiap keputusan MDA (dari gate maupun laporan balik orchestrator) disimpan MDA ke `.claude/memory/mda-ledger.md` (append-only, satu entri per exchange). File ini sengaja **tidak** di-`@`-import (agar tidak membengkakkan context); dibaca on-demand. Hanya MDA yang menulis; orchestrator boleh membaca.
 
 ## Slash commands (.claude/commands/)
 
