@@ -575,3 +575,162 @@ Laporan dari `main Claude` (catch-all agent, disclosure eksplisit kedua kali). M
 **Catatan invokasi irregular #4:** Laporan ini diterima dari `main Claude`, bukan `tech-lead-orchestrator`. Irregular invocation keempat yang MDA terima. MDA menerima karena: (a) disclosure penuh eksplisit; (b) request menyentuh keputusan governance strategis yang memerlukan MDA sebelum eksekusi; (c) sesi ini = sesi eksekusi aktual yang memerlukan keputusan real-time. Setelah PR #6 merged, single-channel mda→tech-lead-orchestrator harus ditegakkan via general rule yang ditetapkan di decision #5.
 
 **Refs:** MDA-LEDGER-0002 (#1 final bootstrap exception, #3 boundary zero-tolerance), MDA-LEDGER-0004/0005/0006/0007/0008/0009/0010/0011 (riwayat landing PR #6). `git-conventions.md` §"Branch protection rules (develop)", §"Merge strategy". `CLAUDE.md` §"Governance layer (mda)", §"Git workflow". `.github/CODEOWNERS`. GitHub API: branch protection + commit verification + PR checks. DEC: tidak ada yang dilanggar oleh konten PR #6 maupun oleh eksekusi admin merge yang di-approve ini.
+
+
+---
+
+## MDA-LEDGER-0013 · 2026-06-02T18:30:00+07:00
+
+**Sumber (masuk):** `user` @ entry gate — "cek / cek lagi" (minta verifikasi status terkini). MDA melakukan closure-verification atas landing yang di-APPROVED di MDA-LEDGER-0012.
+
+**Temuan verifikasi (read-only):**
+- PR #6 `chore/governance-entry-gate-mda → develop` = **MERGED** (mergedAt 2026-06-02T03:27:42Z).
+- Merge method = **Squash-and-merge** (commit `5f3ac33`, single-parent) → kondisi C-A (MDA-LEDGER-0012) ✅.
+- CI: backend-lint, backend-test, frontend-lint, frontend-build = **pass** → C-C (lint/test) ✅.
+- 3 commit branch (94c0e65, 99eef63, 9979dc1) = `%G? = G` **Good signature** → klarifikasi: "no-signature" di MDA-LEDGER-0012 hanyalah artefak verifikasi (allowedSignersFile belum diset), bukan absennya signature. Commit sesungguhnya SIGNED.
+- Squash commit `5f3ac33` = `%G? = E` lokal (signed oleh GitHub web-flow; tak terverifikasi lokal tanpa kunci GitHub → tampil "Verified" di UI GitHub) → C-E ✅ (subject to konfirmasi badge UI).
+- Branch lokal sudah TIDAK ahead of origin/develop → seluruh konten landed.
+
+**Dokumen yang dirujuk:**
+- `git-conventions.md` §"Branch protection rules → develop" (require Code Owner review; approvals: 1), §"Merge strategy" (chore→develop = Squash).
+- MDA-LEDGER-0012 (kondisi C-A..C-E), MDA-LEDGER-0002 #3 + bootstrap exceptions (admin/single-maintainer Phase 0), MDA-LEDGER-0006 (disiplin: jangan erosi control permanen).
+- DEC: tidak ada DEC yang dilanggar (konten governance/.claude, non-regulated).
+
+**Keputusan:**
+
+```json
+{
+  "status": "APPROVED",
+  "verdict_scope": "Closure landing PR #6 ke develop DITERIMA sebagai SELESAI & compliant pada dimensi: merge method (Squash), signature commit branch (Good), squash commit signed GitHub web-flow, CI green. MDA-LEDGER-0012 dengan ini di-CLOSE.",
+  "deviation_logged": {
+    "what": "PR #6 di-merge saat reviewDecision=REVIEW_REQUIRED; mergedBy=author=fairuzzbd (self-merge, Code Owner / 1-approval review TIDAK tersatisfikasi).",
+    "classification": "BOOTSTRAP EXCEPTION — kelanjutan dari pola yang sudah diterima di MDA-LEDGER-0002 (repo single-maintainer fairuzzbd; secara struktural tidak ada reviewer kedua di Phase 0). BUKAN pelanggaran baru, BUKAN admin direct-push (ini PR + squash, bukan push langsung ke develop).",
+    "why_acceptable_now": "Konten non-regulated (governance/.claude tooling), tidak ada DEC dilanggar, merge method & signature benar, CI hijau. Limitasi reviewer kedua = struktural Phase 0, identik dengan exception yang sudah diaudit & diterima.",
+    "expiry_condition": "Exception ini KADALUARSA begitu reviewer kedua (Code Owner) tersedia di repo. Sejak saat itu, semua PR ke develop/main WAJIB lulus Code Owner review sebelum merge — TIDAK boleh self-merge lagi. MDA akan menolak self-merge berikutnya untuk konten apa pun di luar bootstrap."
+  },
+  "outstanding_items": [
+    "O-1: `.claude/memory/mda-ledger.md` (entri 0012 & 0013) BELUM di-commit/landed — masih di working tree. Perlu commit+PR susulan (chore/docs) agar ledger audit konsisten dengan ethos append-only & ter-version di develop.",
+    "O-2: `docs/plans/` masih untracked — putuskan: commit (bila artefak yang dikehendaki) atau gitignore."
+  ],
+  "escalation_to_human": "false untuk closure (selesai). Untuk O-1/O-2: USER eksekusi commit susulan ledger via branch baru → PR → Squash-merge (jalur P-A2(a)); MDA stand by review.",
+  "instruction_for_orchestrator": "Tidak ada dispatch eksekusi. Stand by: bila user melakukan commit susulan ledger (O-1), verifikasi method=Squash + CI green + (begitu reviewer kedua ada) Code Owner review. Lapor ke MDA untuk entri berikutnya."
+}
+```
+
+**Refs:** MDA-LEDGER-0012 (di-CLOSE), MDA-LEDGER-0002 (#3 + bootstrap exceptions), MDA-LEDGER-0006 (anti-erosi control). `git-conventions.md` §"Branch protection (develop)", §"Merge strategy". DEC: tidak ada yang dilanggar.
+
+
+---
+
+## MDA-LEDGER-0014 · 2026-06-02T18:45:00+07:00
+
+**Sumber (masuk):** `user` @ entry gate — "commit susulan ledger 0012-0013" (menutup outstanding O-1 dari MDA-LEDGER-0013: meng-version-kan entri ledger 0012 & 0013 yang masih di working tree).
+
+**Dokumen yang dirujuk:**
+- `git-conventions.md` §"Branching strategy" (`docs/{slug}` dari develop → develop, Squash, ≤3 hari), §"Merge strategy" (docs→develop = Squash-and-merge), §"Commit message" (type `docs`, scope `repo` untuk .claude/ tooling), §"Signed commits" (signing lokal kini fungsional → pakai `-S`).
+- MDA-LEDGER-0013 O-1 (ledger belum landed), MDA-LEDGER-0002 #3 (no admin direct push), MDA-LEDGER-0012 C-A..C-E.
+- DEC: tidak ada yang dilanggar (audit ledger, non-regulated).
+
+**Keputusan:**
+
+```json
+{
+  "status": "APPROVED",
+  "approval_scope": "Commit + landing ledger entri 0012, 0013, dan 0014 (entri ini) ke develop via branch docs + PR + Squash-merge. Hanya file .claude/memory/mda-ledger.md yang masuk scope; docs/plans/ (O-2) DIPUTUSKAN TERPISAH, tidak dibundel.",
+  "reason": "Konten = audit ledger MDA (non-regulated), tidak ada DEC tersentuh. Sesuai git-conventions.md: branch docs/{slug} dari develop, commit type docs(repo), Squash-merge ke develop. Boundary MDA-LEDGER-0002 #3 (no direct push) dipertahankan; landing tetap via PR.",
+  "approved_command_sequence": "USER di /home/tugure/projects/ifrs9ai: (1) git fetch origin && git checkout develop && git pull --ff-only origin develop; (2) git checkout -b docs/mda-ledger-0012-0014 (working-tree changes ledger ikut terbawa); (3) git add .claude/memory/mda-ledger.md (HANYA file ini — JANGAN add docs/plans/ atau file swap); (4) git commit -S -m 'docs(repo): record MDA-LEDGER-0012..0014 ledger entries'; (5) git push -u origin docs/mda-ledger-0012-0014; (6) gh pr create --base develop --fill; (7) pastikan backend-lint green + (bila reviewer kedua tersedia) Code Owner review; (8) Squash and merge. NO direct push develop, NO --no-verify, NO disable protection, NO force-push.",
+  "constraints": "Kondisi C-A..C-E MDA-LEDGER-0012 berlaku. Deviasi self-merge masih ditoleransi HANYA sebagai bootstrap exception (MDA-LEDGER-0013) selama belum ada reviewer kedua. docs/plans/ (O-2) tetap outstanding sampai user putuskan commit/gitignore secara terpisah.",
+  "escalation_to_human": "true — eksekusi diserahkan ke USER (P-A2(a)); rantai agen tak punya kapabilitas shell/GitHub. Setelah merge, paste output (hash, gh pr checks, git log develop) → MDA verifikasi + entri closure.",
+  "instruction_for_orchestrator": "Tidak ada dispatch eksekusi. Stand by review hasil P-A2(a)."
+}
+```
+
+**Refs:** MDA-LEDGER-0013 (O-1 ditutup), MDA-LEDGER-0012 (C-A..C-E), MDA-LEDGER-0002 #3 (boundary). `git-conventions.md` §"Branching strategy", §"Merge strategy", §"Signed commits". DEC: tidak ada yang dilanggar.
+
+
+---
+
+## MDA-LEDGER-0015 · 2026-06-02T18:55:00+07:00
+
+**Sumber (masuk):** `user` @ entry gate — "cek docs/plans/ commit atau gitignore" (menutup outstanding O-2 dari MDA-LEDGER-0013).
+
+**Temuan verifikasi (read-only):**
+- Isi: SATU file `docs/plans/PLAN-20260602-land-governance-entry-gate.md` (8KB, markdown).
+- Konten = plan governance sah dari tech-lead-orchestrator, mendokumentasikan landing MDA-LEDGER-0004 (chore/docs, non-regulated, scope `.claude/**` + `CLAUDE.md`).
+- Secret scan (password/secret/token/api-key/private-key) = BERSIH.
+- `docs/` adalah direktori tracked source-of-truth (Decision Log, BRD, FSD, README) → `docs/plans/` konsisten dgn konvensi proyek (CLAUDE.md merujuk docs/plans, docs/decisions, docs/runbooks).
+
+**Dokumen yang dirujuk:**
+- `CLAUDE.md` §"Sumber kebenaran" + referensi `docs/` (plans/decisions/runbooks/incidents).
+- `git-conventions.md` §"Commit message" (docs(repo)), §"Anti-patterns" (no secret/high-entropy commit) — terpenuhi (scan bersih).
+- MDA-LEDGER-0013 O-2, MDA-LEDGER-0014 (branch docs follow-up).
+- DEC: tidak ada yang dilanggar.
+
+**Keputusan:**
+
+```json
+{
+  "status": "APPROVED",
+  "verdict": "COMMIT — bukan gitignore.",
+  "reason": "File adalah artefak plan governance sah (audit-relevant, mendokumentasikan landing), markdown non-regulated, tanpa secret. docs/ adalah area tracked source-of-truth; docs/plans/ konsisten dengan konvensi. Meng-gitignore akan menghilangkan jejak plan dari version control — bertentangan dengan ethos audit/traceability BLIPS.",
+  "scope": "Tambahkan docs/plans/PLAN-20260602-land-governance-entry-gate.md ke branch docs yang sama (docs/mda-ledger-0012-0014) sebagai commit atomik terpisah.",
+  "approved_command_addition": "Di branch docs/mda-ledger-0012-0014 (MDA-LEDGER-0014), TAMBAH: git add docs/plans/PLAN-20260602-land-governance-entry-gate.md && git commit -S -m 'docs(repo): add governance entry-gate landing plan'. Lalu push + PR + Squash-merge bersama commit ledger. Tetap NO direct push, NO --no-verify, NO force-push.",
+  "escalation_to_human": "true — eksekusi via USER (P-A2(a)). Setelah merge, paste output → MDA verifikasi closure O-1 & O-2.",
+  "instruction_for_orchestrator": "Tidak ada dispatch eksekusi. Stand by review."
+}
+```
+
+**Refs:** MDA-LEDGER-0013 (O-2 ditutup), MDA-LEDGER-0014 (branch docs). `CLAUDE.md` §docs sources. `git-conventions.md` §"Commit message", §"Anti-patterns". DEC: tidak ada yang dilanggar.
+
+
+---
+
+## MDA-LEDGER-0016 · 2026-06-02T19:05:00+07:00
+
+**Sumber (masuk):** `user` @ entry gate — "@tech-lead-orchestrator jalankan command git" (minta MDA mendelegasikan eksekusi landing ledger 0012..0015 + plan artifact ke orchestrator via single-channel sah).
+
+**Dokumen yang dirujuk:**
+- `.claude/agents/mda.md` §"Tools & batasan" (Task hanya ke tech-lead-orchestrator), §"Batas komunikasi hilir".
+- MDA-LEDGER-0014/0015 (landing APPROVED + command sequence), MDA-LEDGER-0005/0009/0010/0011 (orchestrator-as-subagent tanpa Bash/Task → tak dapat eksekusi git).
+- DEC: tidak ada yang dilanggar.
+
+**Keputusan:**
+
+```json
+{
+  "status": "APPROVED",
+  "action": "DISPATCH ke tech-lead-orchestrator (single downstream channel) dengan keputusan APPROVED 0014/0015 + command sequence landing. Sesuai permintaan user & boundary peran MDA.",
+  "reason": "Landing sudah APPROVED bersyarat (0014/0015). User meminta routing via orchestrator — ini jalur delegasi sah satu-satunya milik MDA. MDA tidak mengeksekusi git sendiri (read-only). Catatan risiko: orchestrator-as-subagent kemungkinan tak punya kapabilitas shell (lihat 0005/0009/0010/0011); bila demikian, jalur feasible tetap P-A2(a) user-eksekusi.",
+  "constraints": "C-A..C-E MDA-LEDGER-0012 + sequence MDA-LEDGER-0014/0015. NO direct push develop, NO --no-verify, NO disable protection, NO force-push. Bila orchestrator tak bisa eksekusi → lapor balik ke MDA, jangan bypass/fabrikasi.",
+  "instruction_for_orchestrator": "Eksekusi/koordinasikan landing: branch docs/mda-ledger-0012-0014 dari develop; commit-1 signed ledger (.claude/memory/mda-ledger.md); commit-2 signed plan (docs/plans/PLAN-20260602-land-governance-entry-gate.md); push; PR --base develop; backend-lint green; Squash-merge. Jika tak punya kapabilitas shell/GitHub → JANGAN bypass; lapor balik ke MDA dengan status & rekomendasi."
+}
+```
+
+**Refs:** MDA-LEDGER-0014/0015 (APPROVED + sequence), MDA-LEDGER-0005/0009/0010/0011 (limitasi kapabilitas orchestrator). `.claude/agents/mda.md` §"Batas komunikasi hilir". DEC: tidak ada yang dilanggar.
+
+
+---
+
+## MDA-LEDGER-0017 · 2026-06-02T19:15:00+07:00
+
+**Sumber (masuk):** `tech-lead-orchestrator` (laporan balik atas dispatch MDA-LEDGER-0016) — capability-block dikonfirmasi: orchestrator-as-subagent hanya punya Read/Write/Edit/Grep/Glob; TIDAK ada Bash, TIDAK ada Task. Tidak dapat menjalankan git maupun fan-out ke devops-engineer. Eksekusi git = NOL perubahan (tidak ada branch/commit/push/PR). Tidak ada bypass, tidak ada --no-verify, tidak ada admin push, tidak ada fabrikasi. Boundary MDA-LEDGER-0002 #3 utuh. Orchestrator sudah verifikasi read-only: kedua file siap (ledger s/d 0016 + plan artifact, secret-scan bersih, non-regulated). Merekomendasikan P-A2(a). Catatan tambahan orchestrator: command sequence pakai `git add` per-path eksplisit → file governance/hook lain di working-tree tidak ikut terbawa (aman).
+
+**Dokumen yang dirujuk:**
+- MDA-LEDGER-0016 (dispatch + antisipasi capability block), 0005/0009/0010/0011 (limitasi struktural sama), 0014/0015 (sequence + scope).
+- `.claude/agents/mda.md` §"Batas komunikasi hilir" (orchestrator boleh lapor balik → exchange baru).
+- DEC: tidak ada yang dilanggar.
+
+**Keputusan:**
+
+```json
+{
+  "status": "NEED_HUMAN",
+  "verdict": "Laporan orchestrator DITERIMA & VALID. Penolakannya untuk bypass/fabrikasi = compliance benar (konsisten MDA-LEDGER-0009). Eksekusi landing DEFERRED ke USER via P-A2(a) — satu-satunya jalur feasible & fully-compliant karena rantai agen tidak punya eksekutor shell.",
+  "reason": "Dikonfirmasi (ke-5 kalinya): orchestrator-as-subagent tanpa Bash/Task tidak dapat menjalankan git/PR maupun fan-out ke devops. Bukan kegagalan jalur — limitasi struktural. Landing TETAP APPROVED (0014/0015); hanya eksekutornya berpindah ke user. Tidak ada DEC dilanggar; boundary 0002 #3 utuh.",
+  "feasible_path": "P-A2(a) — USER eksekusi command sequence MDA-LEDGER-0014/0015 (2 commit signed: ledger + plan; push; PR --base develop; backend-lint green; Squash-merge). NO direct push, NO --no-verify, NO disable protection, NO force-push.",
+  "escalation_to_human": "true — user eksekusi mandiri. Setelah merge, paste output (commit hashes, gh pr checks, git log origin/develop -3) → MDA + orchestrator verifikasi closure (signature, lint green, squash-merged, develop maju) → MDA catat entri closure.",
+  "instruction_for_orchestrator": "Stand by review. Setelah user paste output git, verifikasi closure dan lapor ke MDA. Tidak ada dispatch eksekusi baru (futile tanpa kapabilitas)."
+}
+```
+
+**Refs:** MDA-LEDGER-0016 (dispatch), 0009/0010/0011 (pola sama), 0014/0015 (sequence), 0002 #3 (boundary). `.claude/agents/mda.md`. DEC: tidak ada yang dilanggar.
