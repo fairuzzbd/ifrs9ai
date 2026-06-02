@@ -100,20 +100,12 @@ Memory files berisi domain knowledge & konvensi yang dipakai berulang oleh semua
 | **Quality & Compliance** | qa-engineer · security-engineer · ifrs9-compliance-reviewer |
 | **Platform** | devops-engineer |
 | **Orchestration** | tech-lead-orchestrator |
-| **Governance / Oversight** | mda (entry gate + Auditor Tertinggi — default agent diload pertama; delegasi ke tech-lead-orchestrator + devops-engineer langsung untuk ops infra/git/CI) |
+| **Governance / Oversight** | mda (Conformance Monitor — **advisory, non-blocking**; mengamati pekerjaan subagent terhadap dokumen, menghasilkan laporan drift via `/audit`. BUKAN entry gate, tidak memblok) |
 
 ### Standard flow untuk perubahan
 ```
 user request
-  → mda (ENTRY GATE — default agent, diload pertama)
-       · nilai terhadap dokumen + locked decisions
-       · putuskan: APPROVED / REJECTED / NEED_HUMAN
-       · catat ke ledger (.claude/memory/mda-ledger.md)
-       · jika REJECTED / NEED_HUMAN → balik ke user (stop)
-       · jika APPROVED → pilih channel hilir:
-            ├─ [perubahan fungsional/regulated] → tech-lead-orchestrator
-            └─ [ops infra/git/CI/deploy murni]  → devops-engineer (langsung)
-  → tech-lead-orchestrator (untuk perubahan fungsional; plan + delegate; boleh lapor balik ke mda)
+  → tech-lead-orchestrator (plan + delegate; entry point untuk perubahan non-trivial)
   → business-analyst (story + AC)
   → system-analyst (OpenAPI + state machine)
   → data-modeler (if schema)
@@ -121,22 +113,31 @@ user request
   → backend-engineer-go / ecl-eir-engineer / integration-engineer
   → frontend-engineer-nextjs
   → qa-engineer (tests + UAT)
-  → security-engineer (review)
+  → security-engineer (review — BLOCKING untuk auth/PII/audit)
   → ifrs9-compliance-reviewer (GATE for ECL/EIR/SPPI/BM)
   → devops-engineer (deploy)
+
+  ⟳ mda (Conformance Monitor) — berjalan PARALEL/di samping, bukan di jalur kritis:
+       dipanggil via /audit, di milestone, atau saat diminta →
+       baca diff + dokumen → tulis laporan drift (temuan + severity + saran) →
+       tim self-correct. TIDAK memblok, TIDAK menghentikan kerja.
 ```
 
-### Blocking veto rights
+### Blocking veto rights (HANYA dua — pada path regulated spesifik)
 - `ifrs9-compliance-reviewer` — BLOCKING veto untuk merge yang menyentuh ECL/EIR/SPPI/BM/klasifikasi.
 - `security-engineer` — BLOCKING veto untuk auth/PII/audit changes.
 
-### Governance layer (mda) — entry gate
-- `mda` adalah **Auditor Tertinggi + gerbang masuk (entry gate)**. Ia di-set sebagai **default agent yang diload pertama** via `.claude/settings.json` → `"agent": "mda"` (main thread sesi = MDA).
-- **Tiap request user lewat MDA dulu**: MDA membaca dokumen referensi/regulasi + locked decisions, memutuskan (`APPROVED`/`REJECTED`/`NEED_HUMAN`), mencatat ledger, lalu — bila `APPROVED` — mendelegasikan ke `tech-lead-orchestrator` via Task. Bila `REJECTED`/`NEED_HUMAN`, MDA stop di gerbang dan balas ke user (eskalasi bila perlu).
-- **Dual downstream channel**: MDA boleh memanggil **dua** agent hilir, dan hanya dua — (1) `tech-lead-orchestrator` (default, untuk SEMUA perubahan fungsional/regulated; orchestrator yang fan-out ke subagent build/quality), dan (2) `devops-engineer` **langsung** (KHUSUS ops murni infra/git/CI/branch-protection/deploy/observability yang tidak menyentuh kode aplikasi atau domain regulated). Subagent build/quality lain (BA, SA, data-modeler, builders, QA, security, compliance) **tidak pernah** dipanggil MDA langsung — selalu lewat orchestrator. Keduanya boleh lapor balik ke MDA untuk keputusan strategis di tengah eksekusi. **Guard SoD**: MDA tetap memutuskan + mencatat ledger sebelum dispatch; eksekusi git/deploy tetap di tangan `devops-engineer`, bukan MDA sendiri.
-- **Batas tool MDA**: `Bash` hanya untuk read-only situational awareness (mis. `git status`/`ls`), bukan build/test/deploy. `Write`/`Edit` hanya untuk ledger. `Task` untuk memanggil `tech-lead-orchestrator` atau `devops-engineer` (dua channel itu saja).
-- `mda` **tidak menimpa** veto BLOCKING `ifrs9-compliance-reviewer` / `security-engineer`; ia menilai di lapisan keputusan strategis, bukan menggantikan gate teknis.
-- **Ledger wajib**: setiap keputusan MDA (dari gate maupun laporan balik orchestrator) disimpan MDA ke `.claude/memory/mda-ledger.md` (append-only, satu entri per exchange). File ini sengaja **tidak** di-`@`-import (agar tidak membengkakkan context); dibaca on-demand. Hanya MDA yang menulis; orchestrator boleh membaca.
+> Hanya dua gate ini yang benar-benar memblok, dan hanya pada path regulated mereka. Selebihnya kerja jalan tanpa blocker di depan.
+
+### Governance layer (mda) — Conformance Monitor (advisory, non-blocking)
+- `mda` adalah **monitor konformansi yang advisory** — mengamati apakah pekerjaan subagent konsisten dengan dokumen sumber kebenaran (Decision Log, FSD, SoW, ERD, BRD). **Bukan** entry gate, **bukan** blocker.
+- **Tidak di jalur kritis**: request user TIDAK lewat MDA dulu. Default flow `user → tech-lead-orchestrator → subagent` jalan dengan kecepatan penuh. MDA berjalan di samping.
+- **Dipanggil berkala/on-demand**: via slash command `/audit`, di milestone (mis. setelah satu modul selesai), atau saat user/orchestrator meminta — **tidak** menyela tiap aksi subagent.
+- **Output = laporan drift, bukan verdict blocking**: MDA membaca diff + dokumen relevan → menulis `docs/audit/AUDIT-{yyyymmdd-HHMM}.md` berisi temuan (HIGH/MEDIUM/LOW) + bukti + referensi dokumen + saran perbaikan + owner. **Tidak** ada APPROVED/REJECTED yang menghentikan kerja.
+- **Tidak menggantikan gate BLOCKING**: untuk path regulated, MDA hanya **menandai** agar `ifrs9-compliance-reviewer` / `security-engineer` dipanggil — MDA sendiri tidak memblok dan tidak meng-override mereka.
+- **Eskalasi human = flag, bukan halt**: hal yang butuh otoritas manusia (recompute ECL/EIR, reopen DEC, override parameter, hard-close, reklasifikasi PSAK 71) ditandai `[NEEDS-HUMAN]` di laporan — tim eskalasi sesuai RACI; kerja lain tidak berhenti.
+- **Batas tool**: `Read`/`Grep`/`Glob` + `Bash` read-only (`git diff`/`git log`) untuk melihat perubahan. `Write`/`Edit` hanya untuk laporan audit (`docs/audit/`) + opsional jejak HIGH di `.claude/memory/mda-ledger.md`. Tidak menulis kode/skema.
+- **Velocity-first**: tujuan MDA adalah membantu aplikasi **cepat jadi & tetap sesuai dokumen** — menandai drift nyata, bukan nitpick, dan memberi kredit untuk yang sudah benar.
 
 ## Slash commands (.claude/commands/)
 
@@ -154,6 +155,7 @@ Shortcut prompt untuk trigger workflow agent. Pakai `/` di Claude Code:
 | `/uat <story>` | qa-engineer → UAT script + tests |
 | `/security <scope>` | security-engineer → checklist + remediation |
 | `/compliance <scope>` | ifrs9-compliance-reviewer → VERDICT gate |
+| `/audit <scope>` | mda → conformance audit (advisory, non-blocking) → laporan drift |
 | `/deploy <env>` | devops-engineer → IaC + pipeline + runbook |
 | `/release <version>` | Generate release notes + SemVer bump + signed tag |
 | `/standup <range>` | cross-module status dari git + plans |

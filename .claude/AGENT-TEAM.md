@@ -53,7 +53,7 @@
 
 | Agent | Peran | Model |
 |---|---|---|
-| **mda** (Monitoring & Decision Agent) | **Entry gate + Auditor & pengambil keputusan tertinggi.** Default agent yang diload pertama (main thread, `settings.json` → `agent: mda`). Menggerbangi tiap request user, membaca dokumen/regulasi, memutuskan GO/NO-GO (`APPROVED`/`REJECTED`/`NEED_HUMAN`), mencatat ledger, lalu delegasi ke tech-lead-orchestrator. Tidak menulis kode/skema, tidak memanggil subagent lain langsung. | **opus (4.8)** |
+| **mda** (Monitoring & Decision Agent) | **Conformance Monitor — advisory, NON-blocking.** Mengamati pekerjaan subagent terhadap dokumen sumber kebenaran (Decision Log, FSD, SoW, ERD, BRD). Dipanggil **on-demand** via `/audit` atau di milestone (tidak otomatis). Menghasilkan laporan drift (`docs/audit/AUDIT-*.md`): temuan + severity + saran. **Bukan** entry gate, **tidak** memblok kerja, tidak menulis kode/skema. Tidak menggantikan gate BLOCKING compliance/security — hanya menandai. | **opus (4.8)** |
 
 ---
 
@@ -61,12 +61,9 @@
 
 ```mermaid
 flowchart TD
-    U[User Request] --> MDA[mda — Auditor Tertinggi & Entry Gate]
-    MDA -->|APPROVED · perubahan fungsional/regulated| O[tech-lead-orchestrator]
-    MDA -->|APPROVED · ops infra/git/CI/deploy murni| DEV[devops-engineer]
-    O -.->|lapor balik kondisi strategis ⇄ keputusan JSON| MDA
-    DEV -.->|lapor balik hasil/masalah ops ⇄ keputusan JSON| MDA
-    MDA -->|REJECTED / NEED_HUMAN| U
+    U[User Request] --> O[tech-lead-orchestrator]
+    O -.->|on-demand: /audit atau milestone| MDA[mda — Conformance Monitor · advisory non-blocking]
+    MDA -.->|laporan drift: temuan + saran<br/>TIDAK memblok| O
     O --> BA[business-analyst]
     BA --> SA[system-analyst]
     SA -->|schema change?| DM[data-modeler]
@@ -89,9 +86,9 @@ flowchart TD
     DEV --> DONE[Done]
 ```
 
-> **MDA = entry gate (default agent, diload pertama)**: `mda` adalah main thread default (di-set via `.claude/settings.json` → `"agent": "mda"`). Setiap request user masuk ke MDA dulu. MDA menilai terhadap dokumen, memutuskan (`APPROVED`/`REJECTED`/`NEED_HUMAN`), mencatat ke ledger, lalu — jika `APPROVED` — mendelegasikan ke channel hilir yang sesuai. **Dual downstream channel**: MDA boleh memanggil **dua** agent hilir, dan hanya dua — (1) `tech-lead-orchestrator` (default, untuk semua perubahan fungsional/regulated; orchestrator yang fan-out ke subagent build/quality), dan (2) `devops-engineer` **langsung** (khusus ops murni infra/git/CI/branch-protection/deploy/observability yang tidak menyentuh kode aplikasi/domain regulated). Subagent build/quality lain tidak pernah dipanggil MDA langsung — selalu lewat orchestrator. Keduanya boleh lapor balik ke MDA untuk keputusan strategis di tengah eksekusi. **Guard SoD**: MDA tetap memutuskan + mencatat ledger sebelum dispatch; eksekusi git/deploy di tangan `devops-engineer`, bukan MDA sendiri (Bash MDA tetap read-only).
+> **MDA = Conformance Monitor (advisory, non-blocking)**: `mda` **bukan** entry gate dan **tidak** di jalur kritis. Default flow `user → tech-lead-orchestrator → subagent` jalan penuh; MDA mengamati dari samping. MDA dipanggil **on-demand** — (a) via slash command `/audit`, atau (b) di milestone bila orchestrator/user menilai perlu. **Tidak otomatis** di akhir run (sengaja, demi velocity). MDA membaca diff + dokumen sumber kebenaran → menulis laporan drift di `docs/audit/AUDIT-{yyyymmdd-HHMM}.md` (temuan HIGH/MEDIUM/LOW + bukti + referensi dokumen + saran + owner). **Tidak ada verdict yang menghentikan kerja** — tim self-correct dari laporan. MDA tidak menggantikan gate BLOCKING `ifrs9-compliance-reviewer`/`security-engineer`; ia hanya menandai bila path regulated tersentuh.
 >
-> **Ledger wajib**: setiap keputusan MDA (dari request user di gate maupun laporan balik orchestrator) dicatat MDA ke `.claude/memory/mda-ledger.md` (append-only, satu entri per exchange, skema di file tsb). Ledger ini sengaja **tidak** di-`@`-import agar tidak membengkakkan context; dibaca on-demand. Orchestrator boleh baca, hanya MDA yang menulis.
+> **Laporan audit**: output utama MDA adalah file di `docs/audit/`. Opsional, temuan HIGH yang perlu jejak permanen bisa diringkas ke `.claude/memory/mda-ledger.md` (append-only). Tidak ada kewajiban ledger-per-aksi — itu model lama yang sudah ditinggalkan demi velocity.
 
 ---
 
@@ -126,8 +123,7 @@ flowchart TD
 | "test", "UAT", "integration test", "E2E", "Playwright", "regression", "k6" | qa-engineer |
 | "Docker", "K8s", "Helm", "Terraform", "Ansible", "GitLab CI", "Grafana", "alert", "DR", "backup" | devops-engineer |
 | "plan", "design proposal", "cross-module", "siapa yang…" | tech-lead-orchestrator |
-| (semua request user — masuk lebih dulu ke gerbang) | **mda** (entry gate; lalu delegasi ke tech-lead-orchestrator) |
-| "keputusan", "audit tinggi", "GO/NO-GO", "approve rekomendasi", "aman sesuai dokumen?", "eskalasi" | mda |
+| "audit", "konformansi", "drift dari dokumen", "cek sesuai FSD/SoW/DEC?", "review kepatuhan" | **mda** (advisory monitor; on-demand via `/audit` atau di milestone) |
 
 ---
 
