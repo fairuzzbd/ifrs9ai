@@ -62,8 +62,10 @@
 ```mermaid
 flowchart TD
     U[User Request] --> MDA[mda — Auditor Tertinggi & Entry Gate]
-    MDA -->|APPROVED → delegate via Task| O[tech-lead-orchestrator]
+    MDA -->|APPROVED · perubahan fungsional/regulated| O[tech-lead-orchestrator]
+    MDA -->|APPROVED · ops infra/git/CI/deploy murni| DEV[devops-engineer]
     O -.->|lapor balik kondisi strategis ⇄ keputusan JSON| MDA
+    DEV -.->|lapor balik hasil/masalah ops ⇄ keputusan JSON| MDA
     MDA -->|REJECTED / NEED_HUMAN| U
     O --> BA[business-analyst]
     BA --> SA[system-analyst]
@@ -87,7 +89,7 @@ flowchart TD
     DEV --> DONE[Done]
 ```
 
-> **MDA = entry gate (default agent, diload pertama)**: `mda` adalah main thread default (di-set via `.claude/settings.json` → `"agent": "mda"`). Setiap request user masuk ke MDA dulu. MDA menilai terhadap dokumen, memutuskan (`APPROVED`/`REJECTED`/`NEED_HUMAN`), mencatat ke ledger, lalu — jika `APPROVED` — mendelegasikan ke `tech-lead-orchestrator` via Task. **Single downstream channel**: satu-satunya agent yang MDA panggil adalah orchestrator; MDA tidak pernah memanggil subagent lain langsung. Orchestrator boleh lapor balik ke MDA untuk keputusan strategis di tengah eksekusi.
+> **MDA = entry gate (default agent, diload pertama)**: `mda` adalah main thread default (di-set via `.claude/settings.json` → `"agent": "mda"`). Setiap request user masuk ke MDA dulu. MDA menilai terhadap dokumen, memutuskan (`APPROVED`/`REJECTED`/`NEED_HUMAN`), mencatat ke ledger, lalu — jika `APPROVED` — mendelegasikan ke channel hilir yang sesuai. **Dual downstream channel**: MDA boleh memanggil **dua** agent hilir, dan hanya dua — (1) `tech-lead-orchestrator` (default, untuk semua perubahan fungsional/regulated; orchestrator yang fan-out ke subagent build/quality), dan (2) `devops-engineer` **langsung** (khusus ops murni infra/git/CI/branch-protection/deploy/observability yang tidak menyentuh kode aplikasi/domain regulated). Subagent build/quality lain tidak pernah dipanggil MDA langsung — selalu lewat orchestrator. Keduanya boleh lapor balik ke MDA untuk keputusan strategis di tengah eksekusi. **Guard SoD**: MDA tetap memutuskan + mencatat ledger sebelum dispatch; eksekusi git/deploy di tangan `devops-engineer`, bukan MDA sendiri (Bash MDA tetap read-only).
 >
 > **Ledger wajib**: setiap keputusan MDA (dari request user di gate maupun laporan balik orchestrator) dicatat MDA ke `.claude/memory/mda-ledger.md` (append-only, satu entri per exchange, skema di file tsb). Ledger ini sengaja **tidak** di-`@`-import agar tidak membengkakkan context; dibaca on-demand. Orchestrator boleh baca, hanya MDA yang menulis.
 
