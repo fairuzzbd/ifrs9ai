@@ -734,3 +734,200 @@ Laporan dari `main Claude` (catch-all agent, disclosure eksplisit kedua kali). M
 ```
 
 **Refs:** MDA-LEDGER-0016 (dispatch), 0009/0010/0011 (pola sama), 0014/0015 (sequence), 0002 #3 (boundary). `.claude/agents/mda.md`. DEC: tidak ada yang dilanggar.
+
+
+---
+
+## MDA-LEDGER-0018 · 2026-06-02T19:25:00+07:00
+
+**Sumber (masuk):** `user` @ entry gate — "panggil devops-engineer langsung untuk eksekusi git" (minta MDA men-dispatch devops-engineer langsung untuk menjalankan landing ledger 0012..0017 + plan).
+
+**Dokumen yang dirujuk:**
+- `.claude/agents/mda.md` §"Tools & batasan" ("Task — hanya untuk mendelegasikan ke tech-lead-orchestrator. JANGAN dispatch subagent lain langsung"); §"Batas komunikasi hilir (single downstream channel)".
+- `CLAUDE.md` §"Governance layer (mda)" ("Single downstream channel: satu-satunya agent yang MDA panggil adalah tech-lead-orchestrator. MDA tidak pernah memanggil subagent lain langsung").
+- MDA-LEDGER-0010/0011 (identik: MDA menolak dispatch devops langsung; dalam single-thread MDA-default, @-mention user pun mendarat di MDA), 0006 (disiplin anti-erosi control), 0017 (capability block orchestrator).
+- DEC: tidak ada yang dilanggar.
+
+**Keputusan:**
+
+```json
+{
+  "status": "REJECTED",
+  "reject_scope": "DITOLAK: MDA men-dispatch devops-engineer langsung. Landing TETAP APPROVED (0014/0015/0017) — yang ditolak hanya MDA sebagai pemanggil langsung devops.",
+  "reason": "single downstream channel (.claude/agents/mda.md + CLAUDE.md §Governance layer): MDA HANYA memanggil tech-lead-orchestrator, tidak pernah subagent lain langsung. Fan-out ke specialist (devops) adalah wewenang orchestrator, bukan MDA. Dalam setup single-thread dengan MDA sebagai default agent, semua pesan user mendarat di MDA; agar devops jalan MDA harus memanggilnya via Task — tepat yang dilarang. Konsisten penuh dengan MDA-LEDGER-0010/0011. Menahan line ini = disiplin governance yang sama (0006).",
+  "feasible_paths_remaining": [
+    "P-A2(a) — USER eksekusi command sequence MDA-LEDGER-0014/0015/0017 sendiri di terminal. SATU-SATUNYA jalur feasible & fully-compliant dalam thread ini. Tercepat (~30 detik).",
+    "P-A2(c) — USER membuka sesi/konteks TERPISAH (di luar gerbang MDA, di mana default agent BUKAN mda) lalu memanggil devops-engineer yang ber-Bash untuk menjalankan command sequence yang sudah MDA-APPROVED. Bukan sesuatu yang dapat MDA inisiasi dari thread ini."
+  ],
+  "escalation_to_human": "true — user tempuh P-A2(a) atau P-A2(c). Setelah eksekusi, paste output git → MDA verifikasi + entri closure.",
+  "instruction_for_orchestrator": "Tidak ada dispatch. Stand by review hasil bila user paste output git."
+}
+```
+
+**Refs:** MDA-LEDGER-0010/0011 (pola identik), 0006 (anti-erosi), 0014/0015/0017 (APPROVED + sequence). `.claude/agents/mda.md` §"Batas komunikasi hilir". `CLAUDE.md` §"Governance layer (mda)". DEC: tidak ada yang dilanggar.
+
+
+---
+
+## MDA-LEDGER-0019 · 2026-06-02T19:45:00+07:00
+
+**Sumber (masuk):** `user` @ entry gate — "sudah dijalankan" (klaim landing ledger/plan selesai). MDA closure-verification (read-only).
+
+**Temuan verifikasi (git/gh, read-only):**
+- Branch `docs/mda-ledger-0012-0014` DIBUAT & DI-PUSH ke origin (HEAD 8f6e420). 2 commit: db893e1 + 8f6e420 (signed). ✓
+- PR **#7** `docs/mda-ledger-0012-0014 → develop` = **OPEN**, `mergeable: MERGEABLE`, `mergeStateStatus: BLOCKED`, `reviewDecision: REVIEW_REQUIRED`. CI **4/4 PASS** (backend-lint/test, frontend-lint/build). **BELUM MERGED.**
+- `origin/develop` TOP tetap `5f3ac33` (PR #6) — konten ledger/plan **belum mendarat** di develop.
+- File ter-track di branch: `.claude/memory/mda-ledger.md` (s/d entri 0017 di commit) + `docs/plans/PLAN-20260602-land-governance-entry-gate.md` (O-2 ✓ ter-commit) + BARU `docs/decisions/EXC-20260602-pr6-admin-merge.md` (2193B).
+- Blocker = identik PR #6: solo-dev structural impossibility (author tak bisa self-approve; CODEOWNERS semua → @fairuzzbd; tak ada reviewer kedua).
+- CATATAN INTEGRITAS: commit message db893e1 menarasikan "Direct signed commit to develop ... merge-langsung not PR" — namun secara aktual commit ada di PR #7 (branch), BUKAN di develop. Narasi commit tidak match aksi git (aksi nyata = PR, yang JUSTRU compliant). Blemish wording, bukan pelanggaran aksi.
+
+**Dokumen yang dirujuk:**
+- `git-conventions.md` §"Branch protection (develop)" (require review/CODEOWNER, signed, backend-lint), §"Merge strategy" (Squash).
+- Canonical MDA-LEDGER-0012 (precedent solo-dev admin-merge exception PR #6) + `docs/decisions/EXC-20260602-pr6-admin-merge.md`.
+- MDA-LEDGER-0013 (expiry rule exception), 0014/0015 (scope landing). DEC-001..029 (non-regulated → tak tersentuh).
+
+**Keputusan:**
+
+```json
+{
+  "status": "APPROVED",
+  "verdict_status_eksekusi": "PARTIAL — PR #7 dibuat+push+CI green, TAPI BELUM MERGED (BLOCKED REVIEW_REQUIRED). develop belum menerima konten. 'Sudah dijalankan' = belum closed.",
+  "verdict_unblock": "DIIZINKAN admin Squash-merge PR #7 sebagai KELANJUTAN solo-dev bootstrap exception yang sudah terdokumentasi (precedent PR #6 / EXC-20260602). Semua gate substantif terpenuhi: commit signed+verified, CI 4/4 green, konten NON-regulated (ledger+plan+exc doc, scope governance), MDA-pre-approved (0014/0015). HANYA review-count yang di-bypass — itu structurally impossible (single maintainer).",
+  "conditions": [
+    "Merge via Squash-and-merge pada PR #7 (bukan raw direct push ke develop). Boleh pakai admin override review-count (gh pr merge 7 --squash --admin) — INILAH exception-nya.",
+    "Verifikasi pasca-merge: develop maju ke squash commit baru, signed/Verified (GitHub web-flow), 4/4 check green.",
+    "NO --no-verify, NO disable branch protection permanen, NO force-push.",
+    "PERBAIKAN narasi: untuk commit berikutnya, message harus match aksi nyata (jangan tulis 'direct to develop' bila aslinya via PR)."
+  ],
+  "exception_boundary_reaffirmed": "Exception admin-merge HANYA untuk konten NON-regulated + solo-dev + semua gate lain hijau. KADALUARSA begitu CODEOWNER kedua tersedia. Konten REGULATED (ECL/EIR/SPPI/BM/klasifikasi/audit/PII) TIDAK PERNAH memenuhi syarat — wajib review independen riil, tanpa kecuali.",
+  "escalation_to_human": "true — USER (admin) eksekusi Squash-merge PR #7 (gh pr merge 7 --squash --admin), atau tambah reviewer kedua lalu merge normal. Setelah merge, paste output → MDA entri closure.",
+  "instruction_for_orchestrator": "Stand by review hasil merge PR #7. Tidak ada dispatch eksekusi (rantai agen tanpa shell)."
+}
+```
+
+**Refs:** canonical MDA-LEDGER-0012 + `docs/decisions/EXC-20260602-pr6-admin-merge.md` (precedent), MDA-LEDGER-0013 (expiry), 0014/0015 (scope). `git-conventions.md` §"Branch protection (develop)", §"Merge strategy". DEC: tidak ada yang dilanggar.
+
+
+---
+
+## MDA-LEDGER-0020 · 2026-06-02T20:00:00+07:00
+
+**Sumber (masuk):** `user` @ entry gate — "gh pr merge 7 --squash --admin" (minta eksekusi admin Squash-merge PR #7). BERSAMAAN: `CLAUDE.md` diubah (intentional, dikonfirmasi sistem) — model governance MDA kini DUAL downstream channel.
+
+**Perubahan governance yang dirujuk (CLAUDE.md, baris 103 & 113-116):**
+- Sebelumnya: "Single downstream channel — MDA hanya memanggil tech-lead-orchestrator."
+- Sekarang: MDA APPROVED → pilih channel: (a) perubahan fungsional/regulated → tech-lead-orchestrator; (b) ops infra/git/CI/deploy murni → **devops-engineer (langsung)**.
+
+**Dokumen yang dirujuk:**
+- `CLAUDE.md` (updated) §"Quick reference" baris 103, §"Standard flow" baris 113-116 — otorisasi dual-channel.
+- Instruction priority: user CLAUDE.md = prioritas tertinggi → MENGGANTI batasan single-channel.
+- MDA-LEDGER-0019 (admin Squash-merge PR #7 SUDAH APPROVED sebagai solo-dev exception), 0010/0011/0018 (penolakan lama dispatch devops — kini ter-supersede oleh perubahan CLAUDE.md).
+- INKONSISTENSI: `.claude/agents/mda.md` §"Tools & batasan" MASIH menyatakan "Task hanya ke tech-lead-orchestrator; JANGAN dispatch subagent lain". Bertentangan dgn CLAUDE.md baru.
+
+**Keputusan:**
+
+```json
+{
+  "status": "APPROVED",
+  "governance_change_ack": "Model dual-channel di CLAUDE.md DITERIMA sebagai instruksi user prioritas tertinggi. Penolakan MDA-LEDGER-0010/0011/0018 (dispatch devops langsung) dengan ini TER-SUPERSEDE untuk kategori ops infra/git/CI/deploy murni. CATATAN: ini perubahan deliberate oleh human owner via source-of-truth doc, BUKAN erosi-demi-kenyamanan.",
+  "action": "DISPATCH langsung ke devops-engineer (channel ops baru) untuk eksekusi admin Squash-merge PR #7 — aksi yang sudah di-APPROVED di MDA-LEDGER-0019.",
+  "reason": "Merge PR #7 = ops git/CI murni (non-fungsional, non-regulated) → cocok channel devops-engineer per CLAUDE.md baru. Aksi admin-squash sudah pre-approved (0019) sebagai solo-dev bootstrap exception: signed+verified commits, CI 4/4 green, konten governance non-regulated, hanya review-count (structurally impossible) yang di-override.",
+  "constraints": [
+    "Eksekusi PERSIS: gh pr merge 7 --squash --admin (override review-count saja).",
+    "JANGAN disable branch protection permanen, JANGAN force-push, JANGAN --no-verify.",
+    "Verifikasi pasca: origin/develop maju ke squash commit baru (Verified), state PR=MERGED, 4/4 check green.",
+    "Lapor balik ke MDA dengan output untuk entri closure."
+  ],
+  "auditor_recommendations": [
+    "REKOMENDASI-1: Selaraskan `.claude/agents/mda.md` §'Tools & batasan' & §'Batas komunikasi hilir' dengan model dual-channel CLAUDE.md (saat ini bertentangan). Sampai diselaraskan, MDA mengikuti CLAUDE.md (prioritas lebih tinggi).",
+    "REKOMENDASI-2: Ratifikasi perubahan governance ini di jalur formal (RFC/Decision Log) agar ada jejak supersede yang sah, bukan hanya edit CLAUDE.md.",
+    "REKOMENDASI-3: Pertahankan disiplin: channel devops HANYA untuk ops murni; SEMUA konten regulated (ECL/EIR/SPPI/BM/klasifikasi/audit/PII) WAJIB lewat tech-lead-orchestrator + gate compliance/security — tanpa kecuali."
+  ],
+  "escalation_to_human": "false (eksekusi via devops channel). Closure dicatat setelah devops lapor balik.",
+  "instruction_for_devops": "Jalankan: gh pr merge 7 --squash --admin. Lalu verifikasi & lapor: (a) PR #7 state=MERGED, (b) git log origin/develop -3 dgn signature, (c) gh pr checks 7, (d) develop maju. Patuhi constraints di atas."
+}
+```
+
+**Refs:** `CLAUDE.md` (updated, dual-channel), MDA-LEDGER-0019 (admin-merge PR #7 APPROVED), 0010/0011/0018 (ter-supersede utk ops murni), EXC-20260602 (precedent). DEC: tidak ada yang dilanggar.
+
+
+---
+
+## MDA-LEDGER-0021 · 2026-06-02T20:15:00+07:00
+
+**Sumber (masuk):** `devops-engineer` (laporan balik atas dispatch MDA-LEDGER-0020) — eksekusi `gh pr merge 7 --squash --admin` selesai. MDA verifikasi independen (read-only).
+
+**Verifikasi MDA (cocok dengan laporan devops):**
+- `origin/develop` TOP = `54ccfae` "docs/mda ledger 0012 0014 (#7)" (squash) — maju dari `5f3ac33`. ✓
+- PR #7 `state=MERGED`, mergedAt 2026-06-02T03:49:31Z, mergeCommit 54ccfae. ✓
+- Konten mendarat di develop: `.claude/memory/mda-ledger.md`, `docs/plans/PLAN-20260602-land-governance-entry-gate.md` (O-2 ✓), `docs/decisions/EXC-20260602-pr6-admin-merge.md`. ✓ → O-1 (ledger s/d ~0017) & O-2 (plan) DITUTUP.
+- CI 4/4 green (devops confirmed). Squash commit signed (GPG fairuzzbd; GitHub-verified saat merge melewati proteksi signed-commit). `E` lokal = expected (keyring devops/MDA tak punya public key).
+- Batasan dipatuhi: Squash-merge, NO force-push, NO --no-verify, NO disable protection permanen, NO raw direct push. Hanya review-count yang di-override (solo-dev exception terdokumentasi).
+
+**Keputusan:**
+
+```json
+{
+  "status": "APPROVED",
+  "verdict": "CLOSURE CONFIRMED — PR #7 sukses Squash-merged ke develop via channel devops (model dual-channel CLAUDE.md). O-1 (ledger) & O-2 (plan) DITUTUP. Eksekusi devops compliant penuh dengan constraints MDA-LEDGER-0020. Channel devops-engineer terbukti berfungsi sebagai eksekutor ops git (mengatasi capability-block orchestrator MDA-LEDGER-0005..0017).",
+  "outstanding_baru": [
+    "O-3: Perubahan governance dual-channel masih UNCOMMITTED di working tree: CLAUDE.md (M), .claude/AGENT-TEAM.md (M), .claude/agents/mda.md (M). Ini perubahan MODEL governance — butuh landing tersendiri + idealnya ratifikasi RFC/Decision Log (REKOMENDASI-2 MDA-LEDGER-0020).",
+    "O-4: Ledger tail 0018..0021 uncommitted (recursion inheren — ledger selalu beberapa entri di depan commit). Sweep di landing berikutnya."
+  ],
+  "auditor_note": "REKOMENDASI-1 (selaraskan .claude/agents/mda.md dgn dual-channel) tampaknya sedang dikerjakan (mda.md = M). Verifikasi konsistensi saat landing O-3. Tegaskan ulang: channel devops HANYA ops murni; konten regulated WAJIB via orchestrator + gate compliance/security.",
+  "escalation_to_human": "false untuk closure PR #7. Untuk O-3/O-4: bila user mau land perubahan governance dual-channel, MDA nilai sebagai exchange baru (kemungkinan butuh RFC + Decision Log supersede karena ini perubahan model, bukan sekadar tooling).",
+  "instruction_for_orchestrator": "N/A (closure). Untuk O-3 (perubahan model governance) — kemungkinan masuk channel orchestrator + RFC, bukan devops-ops murni; akan dinilai saat diajukan."
+}
+```
+
+**Refs:** MDA-LEDGER-0019/0020 (APPROVED + dispatch), 0014/0015 (scope O-1/O-2), `CLAUDE.md` (dual-channel), EXC-20260602 (precedent). DEC: tidak ada yang dilanggar.
+
+
+---
+
+## MDA-LEDGER-0022 · 2026-06-02T20:35:00+07:00
+
+**Sumber (masuk):** `user` @ entry gate — "land O-3 dan O-4 sampai selesai" (land perubahan model governance dual-channel + ledger tail).
+
+**Audit konten (MDA review penuh diff, read-only):**
+- File tersentuh: `CLAUDE.md`, `.claude/AGENT-TEAM.md`, `.claude/agents/mda.md`, `.claude/memory/mda-ledger.md` — HANYA governance docs + ledger. TIDAK ada kode aplikasi, schema, DEC-001..029, migration, atau PII.
+- Perubahan = adopsi **dual downstream channel** MDA (orchestrator default + devops-engineer langsung utk ops murni). Konsisten lintas 3 dokumen.
+- Kontrol inti DIPERTAHANKAN: (a) build/quality subagent TETAP hanya via orchestrator; (b) devops dibatasi ops infra/git/CI/deploy yang TIDAK menyentuh path BLOCKING (ecl/eir/sppi/bm/auth/audit/db-migration regulated); (c) SoD — MDA putuskan+catat dulu, devops eksekusi, MDA Bash read-only; (d) veto BLOCKING ifrs9-compliance-reviewer & security-engineer tidak ditimpa.
+- Istilah regulated di diff = prosa penegasan ("domain regulated WAJIB lewat orchestrator"), bukan perubahan logika regulated.
+
+**Dokumen yang dirujuk:**
+- `CLAUDE.md` (updated), `.claude/AGENT-TEAM.md` (updated), `.claude/agents/mda.md` (updated) — semua diff direview.
+- `git-conventions.md` §"Merge strategy" (Squash), §"Branch protection (develop)"; `.github/CODEOWNERS` (.claude/** → tech-lead-orchestrator).
+- MDA-LEDGER-0020/0021 (dual-channel ack + REKOMENDASI-1/2/3), 0019 (solo-dev exception), EXC-20260602 (precedent).
+- DEC: tidak ada yang dilanggar.
+
+**Keputusan:**
+
+```json
+{
+  "status": "APPROVED",
+  "audit_verdict_konten": "Perubahan model dual-channel SOUND & control-preserving. Non-regulated, internally consistent, semua guardrail inti utuh. MDA (Auditor Tertinggi) telah me-review diff penuh — INI audit-nya; tidak butuh gate compliance/security (tidak ada path BLOCKING tersentuh).",
+  "ratifikasi": "Entri ledger ini berfungsi sebagai RATIFIKASI MDA atas model dual-channel. Penolakan dispatch-devops-langsung di MDA-LEDGER-0010/0011/0018 RESMI ter-supersede oleh model baru (untuk kategori ops murni).",
+  "routing": "Landing O-3+O-4 = pekerjaan git ops murni (konten sudah authored & non-regulated; sisa kerja = stage/commit/push/PR/merge). Dispatch ke devops-engineer (channel ops).",
+  "execution_plan": {
+    "branch": "chore/governance-dual-channel (dari develop terbaru)",
+    "commit_1": "stage CLAUDE.md + .claude/AGENT-TEAM.md + .claude/agents/mda.md → 'docs(repo): adopt MDA dual downstream channel (orchestrator + devops ops)'",
+    "commit_2": "stage .claude/memory/mda-ledger.md → 'docs(repo): record MDA-LEDGER-0018..0022 ledger entries' (O-4)",
+    "land": "push → gh pr create --base develop --fill → CI 4/4 green → gh pr merge <n> --squash --admin (solo-dev exception, sama seperti PR #7)"
+  },
+  "constraints": [
+    "Squash-merge only. NO force-push, NO --no-verify, NO disable branch protection permanen.",
+    "Hanya 4 file di scope (3 governance docs + ledger). JANGAN add file lain (no .swo, no untracked lain).",
+    "Commit message match aksi nyata (pelajaran dari MDA-LEDGER-0019 blemish db893e1).",
+    "Verifikasi pasca: develop maju, PR=MERGED, 4/4 green, signature OK."
+  ],
+  "auditor_recommendations": [
+    "REKOMENDASI: untuk traceability formal perubahan MODEL governance, buat catatan ringkas di docs/decisions/ (mis. RFC-governance-dual-channel) pada landing berikutnya. Ledger 0022 sudah jadi audit record otoritatif; docs/decisions = pelengkap discoverable. Tidak mem-block landing ini.",
+    "Tegaskan ulang (REKOMENDASI-3 0020): channel devops HANYA ops murni; SEMUA konten regulated WAJIB orchestrator + gate compliance/security — tanpa kecuali."
+  ],
+  "escalation_to_human": "false (eksekusi via devops channel).",
+  "instruction_for_devops": "Eksekusi execution_plan di atas (branch chore/governance-dual-channel, 2 commit atomik, push, PR --base develop, CI green, admin squash-merge). Patuhi constraints. Lapor balik output (PR state, git log origin/develop, gh pr checks) ke MDA untuk closure."
+}
+```
+
+**Refs:** MDA-LEDGER-0020/0021 (dual-channel ack), 0019 (solo-dev exception), 0010/0011/0018 (ter-supersede utk ops murni), EXC-20260602. `CLAUDE.md`/`AGENT-TEAM.md`/`mda.md` (updated). DEC: tidak ada yang dilanggar.
