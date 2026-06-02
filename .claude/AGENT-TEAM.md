@@ -53,7 +53,7 @@
 
 | Agent | Peran | Model |
 |---|---|---|
-| **mda** (Monitoring & Decision Agent) | Auditor & pengambil keputusan tertinggi. Memantau orchestrator, membaca dokumen/regulasi, memutuskan GO/NO-GO. Tidak menulis kode, tidak mengurus teknis subagent. Output keputusan JSON (`APPROVED`/`REJECTED`/`NEED_HUMAN`). **Hanya berkomunikasi dengan tech-lead-orchestrator.** | **opus (4.8)** |
+| **mda** (Monitoring & Decision Agent) | **Entry gate + Auditor & pengambil keputusan tertinggi.** Default agent yang diload pertama (main thread, `settings.json` → `agent: mda`). Menggerbangi tiap request user, membaca dokumen/regulasi, memutuskan GO/NO-GO (`APPROVED`/`REJECTED`/`NEED_HUMAN`), mencatat ledger, lalu delegasi ke tech-lead-orchestrator. Tidak menulis kode/skema, tidak memanggil subagent lain langsung. | **opus (4.8)** |
 
 ---
 
@@ -61,8 +61,10 @@
 
 ```mermaid
 flowchart TD
-    U[User Request] --> O[tech-lead-orchestrator]
-    O <-->|lapor kondisi / terima keputusan JSON| MDA[mda — Auditor Tertinggi]
+    U[User Request] --> MDA[mda — Auditor Tertinggi & Entry Gate]
+    MDA -->|APPROVED → delegate via Task| O[tech-lead-orchestrator]
+    O -.->|lapor balik kondisi strategis ⇄ keputusan JSON| MDA
+    MDA -->|REJECTED / NEED_HUMAN| U
     O --> BA[business-analyst]
     BA --> SA[system-analyst]
     SA -->|schema change?| DM[data-modeler]
@@ -85,9 +87,9 @@ flowchart TD
     DEV --> DONE[Done]
 ```
 
-> **MDA single channel**: `mda` berada di atas alur ini sebagai lapisan governance. Ia **hanya** terhubung dua arah ke `tech-lead-orchestrator` (lapor kondisi/masalah → terima keputusan JSON). MDA tidak pernah memanggil subagent lain langsung — orchestrator yang mengeksekusi `instruction_for_orchestrator` ke dalam alur di atas.
+> **MDA = entry gate (default agent, diload pertama)**: `mda` adalah main thread default (di-set via `.claude/settings.json` → `"agent": "mda"`). Setiap request user masuk ke MDA dulu. MDA menilai terhadap dokumen, memutuskan (`APPROVED`/`REJECTED`/`NEED_HUMAN`), mencatat ke ledger, lalu — jika `APPROVED` — mendelegasikan ke `tech-lead-orchestrator` via Task. **Single downstream channel**: satu-satunya agent yang MDA panggil adalah orchestrator; MDA tidak pernah memanggil subagent lain langsung. Orchestrator boleh lapor balik ke MDA untuk keputusan strategis di tengah eksekusi.
 >
-> **Ledger wajib**: setiap exchange MDA ⇄ orchestrator dicatat MDA ke `.claude/memory/mda-ledger.md` (append-only, satu entri per exchange, skema di file tsb). Ledger ini sengaja **tidak** di-`@`-import agar tidak membengkakkan context; dibaca on-demand. Orchestrator boleh baca, hanya MDA yang menulis.
+> **Ledger wajib**: setiap keputusan MDA (dari request user di gate maupun laporan balik orchestrator) dicatat MDA ke `.claude/memory/mda-ledger.md` (append-only, satu entri per exchange, skema di file tsb). Ledger ini sengaja **tidak** di-`@`-import agar tidak membengkakkan context; dibaca on-demand. Orchestrator boleh baca, hanya MDA yang menulis.
 
 ---
 
@@ -122,7 +124,8 @@ flowchart TD
 | "test", "UAT", "integration test", "E2E", "Playwright", "regression", "k6" | qa-engineer |
 | "Docker", "K8s", "Helm", "Terraform", "Ansible", "GitLab CI", "Grafana", "alert", "DR", "backup" | devops-engineer |
 | "plan", "design proposal", "cross-module", "siapa yang…" | tech-lead-orchestrator |
-| "keputusan", "audit tinggi", "GO/NO-GO", "approve rekomendasi", "aman sesuai dokumen?", "eskalasi" | mda (via tech-lead-orchestrator) |
+| (semua request user — masuk lebih dulu ke gerbang) | **mda** (entry gate; lalu delegasi ke tech-lead-orchestrator) |
+| "keputusan", "audit tinggi", "GO/NO-GO", "approve rekomendasi", "aman sesuai dokumen?", "eskalasi" | mda |
 
 ---
 
@@ -133,7 +136,7 @@ Di Claude Code (interactive):
 > "Tolong implementasi penempatan deposito modul APP-B dengan workflow Maker-Reviewer-Approver"
 ```
 
-Claude Code akan otomatis routing ke `tech-lead-orchestrator` (karena lintas modul + workflow), yang lalu memanggil agent lain via Task tool. Atau panggil langsung:
+Karena `.claude/settings.json` men-set `"agent": "mda"`, main thread sesi adalah **mda** (entry gate). Request Anda dinilai MDA dulu (cek dokumen + locked decisions, catat ledger), lalu — bila `APPROVED` — didelegasikan ke `tech-lead-orchestrator`, yang fan-out ke specialist via Task tool. Anda tetap bisa memanggil agent tertentu langsung:
 
 ```
 > "@business-analyst tolong tulis user story untuk amandemen kontrak deposito"
