@@ -137,6 +137,12 @@ paths:
   # GET /jobs/{id}/stream — SSE live update
   # Client subscribe ini, server push event setiap ada perubahan progress.
   # Fallback ke polling jika SSE tidak supported.
+  #
+  # SECURITY NOTE (enforced oleh security-engineer):
+  #   JWT di query param (?token=...) DILARANG — bocor ke Traefik/proxy access log,
+  #   browser history, dan Referer header. Token ini bisa dipakai untuk approve ECL
+  #   parameter dan hard-close periode buku.
+  #   Gunakan Authorization: Bearer header via fetch-based SSE (lihat description).
   # -----------------------------------------------------------------------
   /jobs/{id}/stream:
     get:
@@ -144,31 +150,99 @@ paths:
       summary: SSE stream — live job progress update
       description: |
         Server-Sent Events stream untuk live progress update.
-        Client: pakai EventSource API. Fallback polling 2 detik jika SSE error.
 
-        Event types:
+        ## Auth — WAJIB Authorization header (BUKAN query param)
+
+        Endpoint ini mewajibkan `Authorization: Bearer <jwt>` di header.
+        Query param `?token=` DILARANG dan ditolak dengan 400 BAD_SSE_TOKEN_IN_QUERY.
+
+        ### Implementasi frontend — HARUS fetch-based SSE (bukan `EventSource` API)
+
+        Browser native `EventSource` API tidak mendukung custom header.
+        Frontend WAJIB menggunakan `fetch()` + `ReadableStream` sebagai gantinya:
+
+        ```typescript
+        const response = await fetch(`/api/v1/jobs/${jobId}/stream`, {
+          headers: {
+            "Authorization": `Bearer ${accessToken}`,
+            "Accept": "text/event-stream",
+            "Cache-Control": "no-cache",
+          },
+          signal: controller.signal,  // AbortController untuk cleanup
+        });
+
+        if (!response.ok) {
+          // handle 401/403/404 di sini, SEBELUM subscribe stream
+          const err = await response.json();
+          throw new SseAuthError(err);
+        }
+
+        const reader = response.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          // parse SSE chunks dari buffer (split on "\n\n")
+          const events = parseSseChunks(buffer);
+          for (const event of events.parsed) {
+            handleSseEvent(event);
+          }
+          buffer = events.remaining;
+        }
+        ```
+
+        Catatan: `fetch()`-based SSE tidak auto-reconnect. Implementasikan reconnect
+        manual dengan backoff jika `reader.read()` throw atau stream ditutup sebelum
+        event terminal diterima. Fallback ke polling GET /api/v1/jobs/{id} tiap 2 detik
+        jika `response.body` tidak tersedia (browser lama atau CORS issue).
+
+        ### Fallback sekunder — SSE ticket (hanya jika fetch-based tidak bisa)
+
+        Jika environment tidak support fetch-based SSE dengan header (mis. legacy
+        mobile WebView), gunakan `POST /api/v1/auth/sse-ticket` untuk mendapatkan
+        short-lived single-use ticket, lalu `?sse_ticket=<ticket>` di URL ini.
+        Lihat `auth.yaml` `POST /auth/sse-ticket` untuk detail.
+        Ini BUKAN default — hanya fallback terakhir.
+
+        ## Event types
+
         - `progress`: {"progress": 47, "currentStep": "...", "estimatedCompletionAt": "..."}
         - `completed`: {"status": "completed", "result": {...}}
         - `failed`: {"status": "failed", "error": {...}}
         - `cancelled`: {"status": "cancelled"}
-        - `keepalive`: {} — setiap 15 detik supaya proxy tidak timeout
+        - `keepalive`: {} — setiap 15 detik supaya Traefik/proxy tidak timeout
 
-        Stream ditutup oleh server setelah event completed/failed/cancelled.
-        Client HARUS close EventSource setelah menerima event terminal.
+        Stream ditutup oleh server setelah event terminal (completed/failed/cancelled).
+        Client HARUS cancel fetch / abort reader setelah menerima event terminal.
 
-        Authorization: bearer token di query param `token` (EventSource API
-        tidak support custom header — workaround standar).
+        ## Konsistensi dengan UX patterns §3.2
+
+        202 Accepted dari resource endpoint return `streamUrl` tanpa query param.
+        Frontend append Authorization header — JANGAN append `?token=` ke streamUrl.
       tags: [jobs]
+      security:
+        - bearerAuth: []
+        - sseTicket: []
       parameters:
         - $ref: "#/components/parameters/jobIdParam"
-        - name: token
+        - name: sse_ticket
           in: query
-          required: true
+          required: false
           schema:
             type: string
+            minLength: 32
+            maxLength: 128
           description: |
-            JWT access token (karena EventSource tidak support Authorization header).
-            Backend validate sama seperti Bearer token. TTL tetap 15 menit.
+            FALLBACK SEKUNDER SAJA. Single-use SSE ticket dari POST /auth/sse-ticket.
+            TTL 30 detik, hanya berlaku sekali. Dipakai hanya jika fetch-based SSE
+            tidak bisa (legacy WebView, dll.). Jika ticket sudah dipakai atau expired,
+            return 401 SSE_TICKET_INVALID.
+            JANGAN kirim `Authorization` header bersamaan dengan `sse_ticket` — ambiguous.
+            Backend pilih: header dulu, fallback ke ticket. Jika keduanya ada dan berbeda
+            user → return 400 BAD_SSE_AUTH_CONFLICT.
       responses:
         "200":
           description: SSE stream
@@ -202,12 +276,56 @@ paths:
                   event: close
                   data: {}
                   ```
-        "401":
-          description: Token tidak valid
+        "400":
+          description: |
+            Token di query param terdeteksi, atau auth conflict (header + ticket bersamaan
+            dari user berbeda).
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                tokenInQuery:
+                  summary: JWT di query param — ditolak
+                  value:
+                    error:
+                      code: BAD_SSE_TOKEN_IN_QUERY
+                      message: "JWT tidak boleh dikirim via query param. Gunakan Authorization: Bearer header atau SSE ticket."
+                      details: []
+                      traceId: "01HXY..."
+                authConflict:
+                  summary: Header + ticket dari user berbeda
+                  value:
+                    error:
+                      code: BAD_SSE_AUTH_CONFLICT
+                      message: "Authorization header dan SSE ticket menunjuk user berbeda."
+                      details: []
+                      traceId: "01HXY..."
+        "401":
+          description: JWT tidak valid / expired, atau SSE ticket tidak valid / sudah dipakai / expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                unauthorized:
+                  summary: JWT tidak valid
+                  value:
+                    error:
+                      code: UNAUTHORIZED
+                      message: "Token JWT tidak valid atau sudah expired"
+                      details: []
+                      traceId: "01HXY..."
+                sseTicketInvalid:
+                  summary: SSE ticket tidak valid atau sudah terpakai
+                  value:
+                    error:
+                      code: SSE_TICKET_INVALID
+                      message: "SSE ticket tidak valid, sudah dipakai, atau sudah expired (TTL 30 detik)"
+                      details: []
+                      traceId: "01HXY..."
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/JobNotFound"
 
@@ -305,6 +423,16 @@ components:
       scheme: bearer
       bearerFormat: JWT
 
+    sseTicket:
+      type: apiKey
+      in: query
+      name: sse_ticket
+      description: |
+        FALLBACK SEKUNDER — short-lived single-use SSE ticket dari POST /auth/sse-ticket.
+        TTL 30 detik, dipakai tepat sekali. Hanya boleh dipakai di /jobs/{id}/stream
+        jika fetch-based SSE dengan Authorization header tidak bisa digunakan.
+        BUKAN default auth method untuk SSE. Default: Authorization: Bearer header.
+
   parameters:
     jobIdParam:
       name: id
@@ -388,7 +516,10 @@ components:
           example: "/api/v1/jobs/01JXYZ..."
         streamUrl:
           type: string
-          description: "URL SSE stream: GET /api/v1/jobs/{jobId}/stream?token=..."
+          description: |
+            URL SSE stream: GET /api/v1/jobs/{jobId}/stream
+            JANGAN append ?token= ke URL ini. Auth dilakukan via
+            Authorization: Bearer header menggunakan fetch-based SSE.
           example: "/api/v1/jobs/01JXYZ.../stream"
         estimatedDurationSeconds:
           type: integer

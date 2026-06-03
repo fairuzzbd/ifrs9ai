@@ -250,6 +250,10 @@ components:
         - STEP_UP_EXPIRED            # 403 — step-up token sudah > 5 menit
         - JOB_NOT_CANCELLABLE        # 422 — job tidak bisa di-cancel di state ini
         - JOB_NOT_FOUND              # 404 — job ID tidak ditemukan
+        # SSE-specific (security hardening)
+        - BAD_SSE_TOKEN_IN_QUERY    # 400 — JWT di ?token= query param terdeteksi dan ditolak
+        - BAD_SSE_AUTH_CONFLICT     # 400 — Authorization header + SSE ticket dari user berbeda
+        - SSE_TICKET_INVALID        # 401 — SSE ticket tidak valid, sudah dipakai, atau expired
 
     # ---- Timestamps -------------------------------------------------------
     TimestampISO:

@@ -152,6 +152,112 @@ paths:
           $ref: "#/components/responses/InternalError"
 
   # -----------------------------------------------------------------------
+  # SSE ticket — FALLBACK SEKUNDER untuk SSE stream di /jobs/{id}/stream.
+  #
+  # DEFAULT auth untuk SSE: fetch()-based dengan Authorization: Bearer header.
+  # Gunakan endpoint ini HANYA jika lingkungan tidak mendukung fetch-based SSE
+  # dengan custom header (mis. legacy mobile WebView, embedded browser).
+  #
+  # SECURITY properties:
+  # - Single-use: setelah dipakai sekali di stream endpoint → langsung invalidate
+  # - TTL 30 detik sejak issued → auto-expire
+  # - Bound to: (user_id, job_id) — ticket tidak berlaku untuk job lain
+  # - Stored as: hashed (SHA-256) di sys.sse_ticket — plain ticket tidak persisted
+  # - Access log masking: Traefik config WAJIB mask ?sse_ticket=* dari access log
+  #   (lihat deploy/traefik/middleware-mask-sse-ticket.yaml)
+  # -----------------------------------------------------------------------
+  /auth/sse-ticket:
+    post:
+      operationId: authIssueSseTicket
+      summary: Issue short-lived SSE ticket (fallback sekunder)
+      description: |
+        Issue single-use SSE ticket untuk dipakai di `GET /api/v1/jobs/{jobId}/stream`
+        sebagai fallback jika fetch-based SSE dengan Authorization header tidak tersedia.
+
+        ## Kapan menggunakan endpoint ini
+
+        HANYA gunakan jika:
+        1. Browser/runtime tidak mendukung `fetch()` dengan custom header + streaming
+        2. Legacy mobile WebView yang tidak bisa set Authorization header di EventSource
+
+        Untuk environment modern (Chrome 80+, Firefox 80+, Safari 14+, Node 18+),
+        gunakan fetch-based SSE (Authorization: Bearer header) — TIDAK perlu endpoint ini.
+
+        ## Properties keamanan
+
+        - **Single-use**: satu ticket dipakai tepat sekali. Setelah stream `/jobs/{jobId}/stream`
+          menerima koneksi dan memvalidasi ticket, ticket langsung di-mark `used` di DB.
+          Koneksi kedua dengan ticket yang sama → `SSE_TICKET_INVALID`.
+        - **TTL 30 detik**: jika tidak dipakai dalam 30 detik sejak issued → expired.
+          Client harus buka koneksi SSE segera setelah menerima ticket.
+        - **Scope terbatas**: ticket hanya valid untuk `jobId` yang dispesifikasikan.
+          Tidak bisa dipakai di job lain.
+        - **Hash stored**: plain ticket tidak disimpan di DB. Hanya SHA-256(ticket) yang
+          disimpan di `sys.sse_ticket`. Jika DB bocor, plain ticket tidak terekspos.
+        - **Access log masking**: `?sse_ticket=` WAJIB di-mask di Traefik middleware.
+          Ticket bocor ke log = keamanan yang sama dengan `?token=` biasa (dilarang).
+
+        ## Rate limit
+
+        5 ticket per user per menit. Abuse → `RATE_LIMITED` 429.
+
+        Idempotency-Key wajib (seperti semua mutating endpoint).
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID v4. Replay same key → return same ticket (jika belum dipakai/expired).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SseTicketRequest"
+      responses:
+        "201":
+          description: |
+            SSE ticket berhasil issued. Gunakan dalam 30 detik.
+            Buka koneksi SSE stream segera setelah menerima response ini.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SseTicketResponse"
+              example:
+                data:
+                  ticket: "sset_a1b2c3d4e5f6..."
+                  jobId: "01JXYZ..."
+                  expiresAt: "2026-06-03T10:30:30+07:00"
+                  streamUrl: "/api/v1/jobs/01JXYZ.../stream?sse_ticket=sset_a1b2c3d4e5f6..."
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Job tidak ditemukan atau user tidak berhak mengakses job ini
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: JOB_NOT_FOUND
+                  message: "Job tidak ditemukan atau Anda tidak memiliki akses"
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # -----------------------------------------------------------------------
   # Logout — revoke refresh token (session invalidation).
   # -----------------------------------------------------------------------
   /auth/logout:
@@ -235,6 +341,50 @@ components:
           format: uri
           description: Redirect URI yang sama dipakai saat authorization request
           example: "https://blips.tugu-re.com/auth/callback"
+
+    SseTicketRequest:
+      type: object
+      required: [jobId]
+      properties:
+        jobId:
+          type: string
+          description: |
+            Job ID yang akan di-stream. Ticket hanya berlaku untuk job ini.
+            User harus merupakan creator job ATAU ROLE-IT-ADMIN.
+          example: "01JXYZ..."
+
+    SseTicketResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          required: [ticket, jobId, expiresAt, streamUrl]
+          properties:
+            ticket:
+              type: string
+              description: |
+                Plain SSE ticket. Prefix `sset_` + 32-char random hex.
+                Single-use, TTL 30 detik. Gunakan segera.
+                JANGAN log, cache, atau simpan lebih lama dari yang diperlukan.
+              example: "sset_a1b2c3d4e5f6789012345678901234ab"
+            jobId:
+              type: string
+              description: Job ID yang di-bind ke ticket ini
+              example: "01JXYZ..."
+            expiresAt:
+              type: string
+              format: date-time
+              description: Timestamp expiry ticket (30 detik dari issued)
+              example: "2026-06-03T10:30:30+07:00"
+            streamUrl:
+              type: string
+              description: |
+                Convenience URL lengkap dengan sse_ticket sudah di-append.
+                Langsung pakai URL ini untuk buka koneksi SSE.
+                PERINGATAN: URL ini mengandung ticket — jangan log/share.
+              example: "/api/v1/jobs/01JXYZ.../stream?sse_ticket=sset_a1b2c3..."
+        meta:
+          $ref: "#/components/schemas/ResponseMeta"
 
     StepUpRequest:
       type: object
