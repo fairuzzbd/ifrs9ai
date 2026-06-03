@@ -86,7 +86,7 @@ jobs:
       - uses: golangci/golangci-lint-action@v6
         if: steps.changed.outputs.backend == 'true'
         with:
-          version: v1.55
+          version: v1.59.1
           working-directory: backend
           args: ./...
           # skip-cache: prevents golangci-lint-action from restoring its own

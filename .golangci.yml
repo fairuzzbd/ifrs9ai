@@ -4,8 +4,8 @@
 # Phase 0 baseline config. Pragmatic set — noise-heavy style linters
 # intentionally excluded (see bottom of file). Expand as codebase matures.
 #
-# Target linter version: golangci-lint v1.55 (golangci/golangci-lint:v1.55-alpine)
-# CI job: backend-lint in .gitlab-ci.yml
+# Target linter version: golangci-lint v1.59.1 (golangci/golangci-lint:v1.59.1-alpine)
+# CI job: backend-lint in .github/workflows/ci.yml
 # Convention reference: .claude/memory/git-conventions.md
 # ---------------------------------------------------------------------------
 
@@ -159,7 +159,7 @@ issues:
 
   # Max line length: 140 characters. Accommodates long SQL query strings common
   # in a data-heavy financial backend, without being overly permissive.
-  # Note: golangci-lint v1.55 enforces line length via gocritic/revive rules;
+  # Note: golangci-lint v1.59.1 enforces line length via gocritic/revive rules;
   # the explicit cap is documented here as policy reference.
 
 # ---------------------------------------------------------------------------
