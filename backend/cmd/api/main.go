@@ -34,6 +34,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/config"
 	"blips-ifrs9.tugu-re.com/internal/document"
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
+	"blips-ifrs9.tugu-re.com/internal/master/pdpefindo"
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
 )
@@ -264,6 +265,27 @@ func main() {
 	mataUangSvc := matauang.NewService(mataUangRepo, auditWriter, logger)
 	mataUangHandler := matauang.NewHandler(mataUangSvc, wfHandler)
 	matauang.RegisterRoutes(v1, mataUangHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — PD Pefindo (APP-A ECL Param, MSTR-PDPefindo)
+	// 6-eyes workflow: ROLE-RISK → ROLE-AKUN-CTL → ROLE-ALCO × 2
+	// Both approve + approve2 require step-up MFA (DEC-027).
+	// Routes: GET/POST /api/v1/master/pd-pefindo
+	//         POST     /api/v1/master/pd-pefindo/upload-xlsx
+	//         GET      /api/v1/master/pd-pefindo/upload-jobs/:jobId
+	//         GET/PATCH/DELETE /api/v1/master/pd-pefindo/:id
+	//         POST     /api/v1/master/pd-pefindo/:id/{submit,review,approve,approve2,reject}
+	//         GET      /api/v1/master/pd-pefindo/:id/{history,workflow}
+	// -----------------------------------------------------------------------
+	pdPefindoRepo := pdpefindo.NewDBRepository(db)
+	pdPefindoSvc := pdpefindo.NewService(pdPefindoRepo, auditWriter, logger)
+	pdPefindoUploadSvc := pdpefindo.NewUploadService(pdPefindoRepo, auditWriter, logger)
+	pdPefindoHandler := pdpefindo.NewHandler(pdPefindoSvc, pdPefindoUploadSvc, wfHandler, nil /* asynq: nil = sync fallback in dev */)
+	pdpefindo.RegisterRoutes(v1, pdPefindoHandler)
+
+	// Register EntityHook so workflow transitions sync mst.pd_pefindo.workflow_status.
+	pdPefindoHook := pdpefindo.NewWorkflowHook(pdPefindoSvc)
+	wfService.RegisterEntityHook("PD_PEFINDO", pdPefindoHook)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,

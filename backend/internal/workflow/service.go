@@ -14,6 +14,32 @@ import (
 	domainerrors "blips-ifrs9.tugu-re.com/internal/common/errors"
 )
 
+// EntityHook is called after a successful workflow transition commit.
+// It allows entity modules (e.g., mst.pd_pefindo) to keep their own
+// workflow_status column in sync with sys.workflow_instance without
+// requiring the workflow package to know about entity-specific tables.
+//
+// OnTransition is called with:
+//   - ctx: the original request context (JWT claims propagated)
+//   - entityID: the entity UUID that transitioned
+//   - newState: the new workflow state string (e.g. "PENDING_REVIEW")
+//   - action: the action performed (e.g. "SUBMIT", "APPROVE")
+//
+// If OnTransition returns an error, the transition itself has already committed
+// (workflow.Service commits before invoking hooks). Errors are logged as warnings
+// but do NOT roll back the workflow commit.
+type EntityHook interface {
+	OnTransition(ctx context.Context, entityID uuid.UUID, newState string, action string) error
+}
+
+// HookEvent contains the data passed to registered EntityHooks after a transition.
+type HookEvent struct {
+	EntityType string
+	EntityID   uuid.UUID
+	NewState   string
+	Action     string
+}
+
 // Service is the workflow service layer. It owns the transaction boundary:
 //   - loads the instance
 //   - calls engine.Transition (pure business logic, no DB)
@@ -25,6 +51,20 @@ type Service struct {
 	repo        Repository
 	auditWriter *audit.Writer
 	logger      *slog.Logger
+	// entityHooks maps upper-cased entity types to their registered hooks.
+	entityHooks map[string]EntityHook
+}
+
+// RegisterEntityHook registers an EntityHook for a given entity type.
+// entityType should match the value stored in sys.workflow_instance.entity_type
+// (upper-cased, e.g. "PD_PEFINDO", "LGD_BASEL").
+// Must be called before the first workflow transition for that entity type.
+// Not goroutine-safe for concurrent registration — call at startup only.
+func (s *Service) RegisterEntityHook(entityType string, hook EntityHook) {
+	if s.entityHooks == nil {
+		s.entityHooks = make(map[string]EntityHook)
+	}
+	s.entityHooks[strings.ToUpper(entityType)] = hook
 }
 
 // NewService constructs a Service.
@@ -37,6 +77,7 @@ func NewService(engine *Engine, repo Repository, auditWriter *audit.Writer, logg
 		repo:        repo,
 		auditWriter: auditWriter,
 		logger:      logger,
+		entityHooks: make(map[string]EntityHook),
 	}
 }
 
@@ -309,7 +350,9 @@ func (s *Service) performTransition(ctx context.Context, p transitionParams) (*A
 		}
 	}
 
-	return &ActionResult{
+	// Invoke entity hook (post-commit). Errors are non-fatal: the transition
+	// has already committed. Hook failure is logged at warning level.
+	actionResult := &ActionResult{
 		EntityID:        inst.EntityID,
 		EntityType:      inst.EntityType,
 		PreviousState:   result.PreviousState,
@@ -321,7 +364,21 @@ func (s *Service) performTransition(ctx context.Context, p transitionParams) (*A
 		SignatureMethod: result.SignatureMethod,
 		NextActions:     result.NextActions,
 		WorkflowEyes:    inst.Eyes,
-	}, nil
+	}
+
+	if hook, ok := s.entityHooks[strings.ToUpper(p.entityType)]; ok {
+		if hookErr := hook.OnTransition(ctx, inst.EntityID, string(result.NewState), string(p.action)); hookErr != nil {
+			s.logger.WarnContext(ctx, "workflow entity hook failed (non-fatal — transition already committed)",
+				"entityType", p.entityType,
+				"entityID", p.entityID,
+				"action", p.action,
+				"newState", result.NewState,
+				"error", hookErr,
+			)
+		}
+	}
+
+	return actionResult, nil
 }
 
 // applyActorToUpdate sets the actor + timestamp fields on StateUpdate based on action.

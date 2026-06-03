@@ -42,6 +42,9 @@ const (
 	CodeSystemCurrencyProtected Code = "SYSTEM_CURRENCY_PROTECTED"
 	CodeEntityInUse             Code = "ENTITY_IN_USE"
 	CodeMasterApprovedNoEdit    Code = "MASTER_APPROVED_NO_EDIT"
+	// ECL parameter module codes (mst.pd_pefindo, mst.lgd_basel, etc.)
+	CodePDMonotonicityViolated Code = "PD_MONOTONICITY_VIOLATED"
+	CodePDPeriodOverlap        Code = "PD_PERIOD_OVERLAP"
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
@@ -66,7 +69,8 @@ func (c Code) HTTPStatus() int {
 	case CodeIdempotencyReplay:
 		return http.StatusOK // replay: return original status
 	case CodeIdempotencyMismatch, CodeWorkflowInvalidTransition,
-		CodeSPPITestIncomplete, CodeBMAssessmentRequired, CodeJobNotCancellable:
+		CodeSPPITestIncomplete, CodeBMAssessmentRequired, CodeJobNotCancellable,
+		CodePDMonotonicityViolated, CodePDPeriodOverlap:
 		return http.StatusUnprocessableEntity
 	case CodePeriodeClosed, CodeECLParamFrozen:
 		return 423 // Locked
