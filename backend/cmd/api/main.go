@@ -33,6 +33,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/common/middleware"
 	"blips-ifrs9.tugu-re.com/internal/config"
 	"blips-ifrs9.tugu-re.com/internal/document"
+	"blips-ifrs9.tugu-re.com/internal/master/bobotskenario"
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
@@ -264,6 +265,26 @@ func main() {
 	mataUangSvc := matauang.NewService(mataUangRepo, auditWriter, logger)
 	mataUangHandler := matauang.NewHandler(mataUangSvc, wfHandler)
 	matauang.RegisterRoutes(v1, mataUangHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Bobot Skenario (APP-C ECL Parameter, DEC-010)
+	// Routes: GET/POST /api/v1/master/bobot-skenario
+	//         POST /api/v1/master/bobot-skenario/seed-default
+	//         GET  /api/v1/master/bobot-skenario/export
+	//         GET/PATCH/DELETE /api/v1/master/bobot-skenario/:id
+	//         POST /api/v1/master/bobot-skenario/:id/{submit,review,approve,approve2,reject}
+	//         GET  /api/v1/master/bobot-skenario/:id/{history,workflow}
+	// -----------------------------------------------------------------------
+	bobotSkenarioRepo := bobotskenario.NewDBRepository(db)
+	bobotSkenarioSvc := bobotskenario.NewService(bobotSkenarioRepo, auditWriter, logger)
+	bobotSkenarioHandler := bobotskenario.NewHandler(bobotSkenarioSvc, wfHandler)
+	bobotskenario.RegisterRoutes(v1, bobotSkenarioHandler)
+
+	// Wire entity hook: runs inside workflow tx before commit.
+	// Enforces DEC-010 sum=1.0 invariant atomically on approve2 → APPROVED,
+	// and syncs mst.bobot_skenario.workflow_status in the same transaction (BLOCKER 1+2 fix).
+	bobotSkenarioHook := bobotskenario.NewWorkflowHook(bobotSkenarioSvc, bobotSkenarioRepo)
+	wfService.RegisterEntityHook("BOBOT_SKENARIO", bobotSkenarioHook)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,
