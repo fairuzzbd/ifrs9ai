@@ -33,6 +33,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/common/middleware"
 	"blips-ifrs9.tugu-re.com/internal/config"
 	"blips-ifrs9.tugu-re.com/internal/document"
+	"blips-ifrs9.tugu-re.com/internal/master/lpscoverage"
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
@@ -264,6 +265,22 @@ func main() {
 	mataUangSvc := matauang.NewService(mataUangRepo, auditWriter, logger)
 	mataUangHandler := matauang.NewHandler(mataUangSvc, wfHandler)
 	matauang.RegisterRoutes(v1, mataUangHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — LPS Coverage (APP-A, DEC-014)
+	// Routes: GET/POST /api/v1/master/lps-coverage
+	//         GET/PUT/DELETE /api/v1/master/lps-coverage/:id
+	//         GET /api/v1/master/lps-coverage/export
+	//         POST /api/v1/master/lps-coverage/:id/{submit,review,approve,approve2,reject}
+	//         GET  /api/v1/master/lps-coverage/:id/{history,workflow}
+	// Workflow: 6-eyes (LPS_COVERAGE config), both APPROVE steps require step-up MFA.
+	// -----------------------------------------------------------------------
+	lpsCoverageRepo := lpscoverage.NewDBRepository(db)
+	lpsCoverageSvc := lpscoverage.NewService(lpsCoverageRepo, auditWriter, logger)
+	lpsCoverageHook := lpscoverage.NewWorkflowHook(lpsCoverageRepo)
+	wfService.RegisterEntityHook("LPS_COVERAGE", lpsCoverageHook)
+	lpsCoverageHandler := lpscoverage.NewHandler(lpsCoverageSvc, wfHandler)
+	lpscoverage.RegisterRoutes(v1, lpsCoverageHandler)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,

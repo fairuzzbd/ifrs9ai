@@ -42,6 +42,8 @@ const (
 	CodeSystemCurrencyProtected Code = "SYSTEM_CURRENCY_PROTECTED"
 	CodeEntityInUse             Code = "ENTITY_IN_USE"
 	CodeMasterApprovedNoEdit    Code = "MASTER_APPROVED_NO_EDIT"
+	// LPS Coverage module codes
+	CodeLPSPeriodOverlap Code = "LPS_PERIOD_OVERLAP"
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
@@ -66,7 +68,8 @@ func (c Code) HTTPStatus() int {
 	case CodeIdempotencyReplay:
 		return http.StatusOK // replay: return original status
 	case CodeIdempotencyMismatch, CodeWorkflowInvalidTransition,
-		CodeSPPITestIncomplete, CodeBMAssessmentRequired, CodeJobNotCancellable:
+		CodeSPPITestIncomplete, CodeBMAssessmentRequired, CodeJobNotCancellable,
+		CodeLPSPeriodOverlap:
 		return http.StatusUnprocessableEntity
 	case CodePeriodeClosed, CodeECLParamFrozen:
 		return 423 // Locked

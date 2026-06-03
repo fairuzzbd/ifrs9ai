@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -14,6 +15,25 @@ import (
 	domainerrors "blips-ifrs9.tugu-re.com/internal/common/errors"
 )
 
+// EntityHook is called by the workflow service inside the transition
+// transaction, AFTER state+signature+audit are written but BEFORE commit.
+// Implementations may perform additional same-tx writes (e.g. sync
+// mst.*.workflow_status) or invariant checks. Returning a non-nil error
+// rolls back the entire transition atomically.
+type EntityHook interface {
+	BeforeCommit(ctx context.Context, tx *sql.Tx, evt HookEvent) error
+}
+
+// HookEvent carries the in-transition state to EntityHook implementations.
+type HookEvent struct {
+	EntityType string
+	EntityID   uuid.UUID
+	Action     Action
+	NewState   State
+	OldState   State
+	ActorID    uuid.UUID
+}
+
 // Service is the workflow service layer. It owns the transaction boundary:
 //   - loads the instance
 //   - calls engine.Transition (pure business logic, no DB)
@@ -25,6 +45,7 @@ type Service struct {
 	repo        Repository
 	auditWriter *audit.Writer
 	logger      *slog.Logger
+	entityHooks map[string][]EntityHook
 }
 
 // NewService constructs a Service.
@@ -37,7 +58,18 @@ func NewService(engine *Engine, repo Repository, auditWriter *audit.Writer, logg
 		repo:        repo,
 		auditWriter: auditWriter,
 		logger:      logger,
+		entityHooks: make(map[string][]EntityHook),
 	}
+}
+
+// RegisterEntityHook attaches a hook to be called inside the workflow
+// transaction for transitions on the given entity type. Multiple hooks per
+// entity type are supported and called in registration order.
+func (s *Service) RegisterEntityHook(entityType string, hook EntityHook) {
+	if hook == nil {
+		return
+	}
+	s.entityHooks[entityType] = append(s.entityHooks[entityType], hook)
 }
 
 // SubmitInput is the request payload for Submit.
@@ -300,6 +332,24 @@ func (s *Service) performTransition(ctx context.Context, p transitionParams) (*A
 				"action", p.action,
 			)
 			// Non-fatal per audit.writer.go comment, but we log it.
+		}
+	}
+
+	// Run entity-specific hooks inside the same transaction (BEFORE commit).
+	// A hook error rolls back the entire transition via defer.
+	if hooks, ok := s.entityHooks[p.entityType]; ok {
+		for _, h := range hooks {
+			if hookErr := h.BeforeCommit(ctx, tx, HookEvent{
+				EntityType: p.entityType,
+				EntityID:   inst.EntityID,
+				Action:     p.action,
+				NewState:   result.NewState,
+				OldState:   result.PreviousState,
+				ActorID:    userUUID,
+			}); hookErr != nil {
+				err = hookErr
+				return nil, hookErr
+			}
 		}
 	}
 
