@@ -73,7 +73,7 @@ Per `docs/runbooks/phase-0-smoke-test.md` §7, semua 5 quality gate Phase 0 → 
 | 1. Seed data loaded — `sec.role` = 10 | `SELECT count(*) FROM sec.role` → 10 | ✅ PASS |
 | 2. Backend `/healthz` HTTP 200 + JSON valid | `{"service":"blips-api","status":"ok","timestamp":"...","version":"0.1.0"}` | ✅ PASS |
 | 3. Frontend cross-origin fetch | OPTIONS preflight 204 + `Access-Control-Allow-Origin: http://localhost:3001`; bundle baked `http://localhost:8088` (override scenario); frontend HTTP 200 | ✅ PASS |
-| 4. CI pipeline green | `backend-lint` adalah satu-satunya BLOCKING job di GitHub Actions (`.github/workflows/ci.yml`). MDA APPROVED (#2) sebagai SATISFIED setelah hijau di PR Phase 2 pertama. Lihat §0.3. | ⏳ PENDING first Phase 2 PR |
+| 4. CI pipeline green | `backend-lint` adalah satu-satunya BLOCKING job di GitHub Actions (`.github/workflows/ci.yml`). MDA APPROVED (#2) sebagai SATISFIED setelah hijau di PR Phase 2 pertama. Lihat §0.3. | ✅ **PASS** — PR #10, run 26857636744 (backend-lint + backend-test + frontend-lint + frontend-build semua hijau, 2026-06-03) |
 | 5. First commit baseline di Git | Branch `feat/phase-1-parameterize-next-public-api-url` ahead of `develop` by 7 commit (1 pre-existing + 6 finalize) | ✅ PASS |
 
 **Smoke test runtime evidence**: postgres healthy 8 sec setelah boot; backend siap <8 sec; frontend build + serve <20 sec dengan parametrize port (`BLIPS_HOST_API_PORT=8088 BLIPS_HOST_WEB_PORT=3001`). Stack BLIPS bisa coexist dengan Multica (8080/3000) + DMS (8081) di host yang sama.
@@ -152,9 +152,9 @@ Per MDA APPROVED #5, 3 prasyarat ini WAJIB satisfied. Tech-lead-orchestrator har
 
 | # | Item | Owner | Effort |
 |---|---|---|---|
-| **P0-1** | **GPG atau SSH signing key setup di workspace** — develop branch protection mensyaratkan signed commits per `github-branch-protection.md` §3.2. Tanpa ini, `git push origin <feature-branch>` masih bisa (feature branch tidak strict signed), TAPI saat PR merge ke develop tidak akan landing tanpa signed merge commit. Setup: `git config commit.gpgsign true` + `git config user.signingkey <key>` (lihat `git-conventions.md` §"Signed commits → Setup GPG/SSH") | per-developer | 10 menit GPG / 2 menit SSH |
-| **P0-2** | **Task #7 — GitHub merge button policy** — Settings → General → Pull Requests: enable Squash merging (feature/chore→develop), enable Create merge commit (release/hotfix), DISABLE Rebase merging, enable "Automatically delete head branches" | user (ROLE-IT-ADMIN) | 5 menit web UI |
-| **P0-3** | **CI workflow first run** — `backend-lint` job hijau di PR Phase 2 pertama → Gate 4 SATISFIED, handoff §1 di-update dari PENDING ke PASS | auto (CI) + tech-lead-orchestrator (update doc) | auto |
+| **P0-1** ✅ **RESOLVED 2026-06-02** | **GPG atau SSH signing key setup di workspace** — develop branch protection mensyaratkan signed commits per `github-branch-protection.md` §3.2. **DONE via SSH signing**: `~/.ssh/id_ed25519` generated + public key di-upload ke GitHub sebagai *Signing Key*; repo-local `.git/config` di-set (`gpg.format=ssh`, `user.signingkey=/home/tugure/.ssh/id_ed25519.pub`, `commit.gpgsign=true`, `tag.gpgsign=true`); identity tetap `fairuzzbd@gmail.com` (debt #7 sengaja tidak diubah, per user). Verified: signed empty commit sukses + `git log --show-signature` = "Good signature". Plan: `docs/plans/PLAN-20260602-p0-1-signed-commits.md`. | per-developer | 2 menit SSH (selesai) |
+| **P0-2** ✅ **RESOLVED 2026-06-02** | **Task #7 — GitHub merge button policy** — **DONE** via `gh repo edit fairuzzbd/ifrs9ai`: Squash merging ON, Create merge commit ON, Rebase merging OFF, auto-delete head branch ON. Confirmed: "Edited repository fairuzzbd/ifrs9ai". Plan: `docs/plans/PLAN-20260602-p0-2-p0-3.md`. | user (ROLE-IT-ADMIN) | selesai |
+| **P0-3** ✅ **RESOLVED 2026-06-03** | **CI workflow first run** — `backend-lint` job **hijau** di PR Phase 2 pertama (PR #10, run 26857636744). Gate 4 SATISFIED, §1 di-update PENDING→PASS. Catatan: butuh fix toolchain (go.mod 1.25→1.22, golangci-lint v1.55→v1.59.1) + config v1.59 (skip-dirs→issues.exclude-*) + 62 lint finding dibereskan. | auto (CI) + tech-lead-orchestrator (update doc) | selesai |
 
 ### 4b. Non-blocking debts (parking lot, kerjakan saat ketemu)
 

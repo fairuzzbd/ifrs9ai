@@ -1,7 +1,8 @@
 # ---------------------------------------------------------------------------
-# BLIPS IFRS9 — Dev environment (Phase 0 Bootstrap)
+# BLIPS IFRS9 — Dev environment (Phase 2 Foundation)
 #
-# Stack LOCKED (DEC-001..004): PostgreSQL 18, Redis 7, MinIO, Go backend, Next.js frontend.
+# Stack LOCKED (DEC-001..006): PostgreSQL 18, Redis 7, MinIO, Go backend,
+# Next.js frontend, Keycloak 26 (DEC-006 SSO Hub SAML 2.0/OIDC + LDAP federation).
 # On-premise / single-tenant (DEC-002/DEC-008/DEC-023).
 #
 # CATATAN: Kredensial di file ini adalah DEFAULT DEV NON-PRODUKSI.
@@ -9,6 +10,19 @@
 #
 # Jalankan dari root repo:
 #   docker compose -f deploy/docker/docker-compose.dev.yml up -d
+#
+# Port assignment (hindari bentrok dengan DMS:8081 dan Multica:8080/3000):
+#   PostgreSQL     : 5432  (fixed)
+#   Redis          : 6379  (fixed)
+#   MinIO S3 API   : 9000  (fixed)
+#   MinIO Console  : 9001  (fixed)
+#   Keycloak HTTP  : ${BLIPS_HOST_KEYCLOAK_PORT:-8082}  (default 8082)
+#   Backend API    : ${BLIPS_HOST_API_PORT:-8081}
+#   Frontend       : ${BLIPS_HOST_WEB_PORT:-3001}
+#
+# JWT public key dari Keycloak (untuk backend JWT_PUBLIC_KEY_PEM):
+#   curl http://localhost:8082/realms/blips/protocol/openid-connect/certs
+#   Atau gunakan helper: scripts/keycloak-get-pubkey.sh
 #
 # Path build context & mount bersifat relatif terhadap folder file ini (deploy/docker/),
 # sehingga root repo direferensikan sebagai ../../
@@ -91,6 +105,60 @@ services:
     networks:
       - blips
 
+  # ---------------------------------------------------------------------------
+  # Keycloak — DEC-006 SSO Hub (OIDC/SAML 2.0 + LDAP federation)
+  #
+  # Image: quay.io/keycloak/keycloak:26 (direkomendasikan sebagai versi LTS stabil).
+  # Mode: start-dev (embedded H2 DB) — cukup untuk dev lokal.
+  # Realm blips di-import otomatis via /opt/keycloak/data/import/ pada startup.
+  #
+  # ISSUER URL (dalam jaringan Docker): http://keycloak:8080/realms/blips
+  # ISSUER URL (dari host/browser):     http://localhost:${BLIPS_HOST_KEYCLOAK_PORT:-8082}/realms/blips
+  #
+  # Mendapatkan JWT public key (RSA-2048) untuk JWT_PUBLIC_KEY_PEM:
+  #   1. curl http://localhost:8082/realms/blips/protocol/openid-connect/certs | jq '.keys[0]'
+  #   2. Atau pakai skrip helper: bash scripts/keycloak-get-pubkey.sh
+  #   3. Atau ambil langsung PEM dari endpoint:
+  #      curl http://localhost:8082/realms/blips | jq -r '.public_key' | \
+  #        awk 'BEGIN{print "-----BEGIN PUBLIC KEY-----"} {print} END{print "-----END PUBLIC KEY-----"}'
+  #
+  # PENTING: secret KC_BOOTSTRAP_ADMIN_PASSWORD HANYA untuk dev.
+  #          Produksi wajib via Vault/KMS. Lihat security-baseline.md.
+  # ---------------------------------------------------------------------------
+  keycloak:
+    image: quay.io/keycloak/keycloak:26
+    container_name: blips-keycloak
+    restart: unless-stopped
+    command: ["start-dev", "--import-realm"]
+    environment:
+      # Bootstrap admin — DEV ONLY. JANGAN pakai di UAT/prod.
+      KC_BOOTSTRAP_ADMIN_USERNAME: "admin"
+      KC_BOOTSTRAP_ADMIN_PASSWORD: "admin"
+      # HTTP port internal (tetap 8080 di dalam container; host port di-parameterize).
+      KC_HTTP_PORT: "8080"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+      KC_HTTP_ENABLED: "true"
+      # Health endpoints aktif untuk Docker healthcheck.
+      KC_HEALTH_ENABLED: "true"
+      # Log level: INFO di dev, WARNING di UAT.
+      KC_LOG_LEVEL: "INFO"
+    ports:
+      # Host port di-parameterize: default 8082 menghindari bentrok DMS (8081) + Multica (8080).
+      # Override: BLIPS_HOST_KEYCLOAK_PORT=8090 docker compose ...
+      - "${BLIPS_HOST_KEYCLOAK_PORT:-8082}:8080"
+    volumes:
+      # Realm export di-mount ke direktori import Keycloak — auto-import saat start-dev.
+      - ../../deploy/keycloak/realm-blips-dev.json:/opt/keycloak/data/import/realm-blips-dev.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/health/ready || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - blips
+
   backend:
     build:
       context: ../../backend
@@ -107,6 +175,11 @@ services:
       SERVER_PORT: "8081"
       # CORS origins — gunakan ${BLIPS_WEB_ORIGIN} untuk override saat host port frontend bukan default 3001.
       CORS_ALLOWED_ORIGINS: "${BLIPS_WEB_ORIGIN:-http://localhost:3001}"
+      # JWT config — Keycloak issuer URL dari dalam Docker network (service name "keycloak").
+      # JWT_PUBLIC_KEY_PEM di-fetch runtime via skrip atau di-set manual setelah Keycloak up.
+      # Di dev, boleh kosong (JWT verification disabled, lihat main.go); isi untuk E2E auth testing.
+      JWT_ISSUER: "http://keycloak:8080/realms/blips"
+      JWT_PUBLIC_KEY_PEM: "${BLIPS_JWT_PUBLIC_KEY_PEM:-}"
     ports:
       # Host port di-parameterize agar BLIPS bisa coexist dengan project lain di host yang sama
       # (mis. DMS/Multica sering pakai 8080/8081). Container-internal port tetap 8081.
@@ -119,6 +192,8 @@ services:
         condition: service_started
       minio:
         condition: service_started
+      keycloak:
+        condition: service_healthy
     networks:
       - blips
 

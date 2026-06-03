@@ -1,0 +1,746 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — Job Management Endpoints
+  version: "1.0.0"
+  description: |
+    Long-running job management: status polling, SSE stream, cancel.
+    Setiap mutating endpoint yang menghasilkan operasi > 2 detik harus return 202
+    dengan jobId + statusUrl + streamUrl, lalu client subscribe SSE di sini.
+
+    Operasi yang menggunakan pattern ini:
+    - ECL calc run
+    - EIR re-estimation bulk
+    - File upload feeds (Pefindo, IBPA, KSEI, BEI)
+    - Export > 10k rows
+    - Materialized view refresh
+    - Batch journal posting
+    - Reklasifikasi bulk
+
+    DEC-007: Asynq sebagai job queue.
+    UX patterns §3 (ux-patterns.md): SSE stream + fallback polling 2s.
+
+servers:
+  - url: /api/v1
+    description: BLIPS REST API v1
+
+tags:
+  - name: jobs
+    description: Long-running job management (Asynq-backed)
+
+paths:
+  # -----------------------------------------------------------------------
+  # GET /jobs — list semua job milik user (ROLE-IT-ADMIN bisa lihat semua)
+  # -----------------------------------------------------------------------
+  /jobs:
+    get:
+      operationId: listJobs
+      summary: List jobs (cursor pagination)
+      description: |
+        List jobs. Default: job milik user yang sedang login.
+        ROLE-IT-ADMIN: semua job (filter by created_by opsional).
+        Cursor pagination, sort + filter per UX patterns §1.
+      tags: [jobs]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/cursor"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/sortParam"
+        - name: filter[status]
+          in: query
+          schema:
+            type: string
+            enum: [queued, running, completed, failed, cancelled]
+          description: Filter by status
+        - name: filter[type]
+          in: query
+          schema:
+            type: string
+          description: "Filter by job type, mis. ECL_CALC_RUN"
+        - name: filter[created_at]
+          in: query
+          schema:
+            type: string
+          description: "Format: gte:2026-06-01 atau between:2026-06-01,2026-06-30"
+        - name: filter[created_by]
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: "Hanya ROLE-IT-ADMIN yang bisa filter by user lain"
+      responses:
+        "200":
+          description: List jobs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # -----------------------------------------------------------------------
+  # GET /jobs/{id} — status polling endpoint
+  # -----------------------------------------------------------------------
+  /jobs/{id}:
+    get:
+      operationId: getJob
+      summary: Get job status (polling)
+      description: |
+        Primary untuk polling fallback (jika SSE error).
+        Juga dipakai saat client ingin single snapshot tanpa subscribe SSE.
+
+        Field canCancel: true jika job bisa di-cancel di state ini.
+        Field result: diisi hanya jika status=completed.
+        Field error: diisi hanya jika status=failed.
+      tags: [jobs]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/jobIdParam"
+      responses:
+        "200":
+          description: Job detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobDetailResponse"
+              example:
+                data:
+                  jobId: "01JXYZ..."
+                  type: "ECL_CALC_RUN"
+                  status: "running"
+                  progress: 47
+                  currentStep: "Menghitung Stage 2 instruments (1234 dari 2600)"
+                  startedAt: "2026-06-02T10:30:00+07:00"
+                  estimatedCompletionAt: "2026-06-02T10:35:00+07:00"
+                  result: null
+                  error: null
+                  canCancel: true
+                  createdBy: "550e8400-e29b-41d4-a716-446655440001"
+                  createdAt: "2026-06-02T10:29:50+07:00"
+                meta:
+                  traceId: "01HXY..."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/JobNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # -----------------------------------------------------------------------
+  # GET /jobs/{id}/stream — SSE live update
+  # Client subscribe ini, server push event setiap ada perubahan progress.
+  # Fallback ke polling jika SSE tidak supported.
+  #
+  # SECURITY NOTE (enforced oleh security-engineer):
+  #   JWT di query param (?token=...) DILARANG — bocor ke Traefik/proxy access log,
+  #   browser history, dan Referer header. Token ini bisa dipakai untuk approve ECL
+  #   parameter dan hard-close periode buku.
+  #   Gunakan Authorization: Bearer header via fetch-based SSE (lihat description).
+  # -----------------------------------------------------------------------
+  /jobs/{id}/stream:
+    get:
+      operationId: streamJobProgress
+      summary: SSE stream — live job progress update
+      description: |
+        Server-Sent Events stream untuk live progress update.
+
+        ## Auth — WAJIB Authorization header (BUKAN query param)
+
+        Endpoint ini mewajibkan `Authorization: Bearer <jwt>` di header.
+        Query param `?token=` DILARANG dan ditolak dengan 400 BAD_SSE_TOKEN_IN_QUERY.
+
+        ### Implementasi frontend — HARUS fetch-based SSE (bukan `EventSource` API)
+
+        Browser native `EventSource` API tidak mendukung custom header.
+        Frontend WAJIB menggunakan `fetch()` + `ReadableStream` sebagai gantinya:
+
+        ```typescript
+        const response = await fetch(`/api/v1/jobs/${jobId}/stream`, {
+          headers: {
+            "Authorization": `Bearer ${accessToken}`,
+            "Accept": "text/event-stream",
+            "Cache-Control": "no-cache",
+          },
+          signal: controller.signal,  // AbortController untuk cleanup
+        });
+
+        if (!response.ok) {
+          // handle 401/403/404 di sini, SEBELUM subscribe stream
+          const err = await response.json();
+          throw new SseAuthError(err);
+        }
+
+        const reader = response.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          // parse SSE chunks dari buffer (split on "\n\n")
+          const events = parseSseChunks(buffer);
+          for (const event of events.parsed) {
+            handleSseEvent(event);
+          }
+          buffer = events.remaining;
+        }
+        ```
+
+        Catatan: `fetch()`-based SSE tidak auto-reconnect. Implementasikan reconnect
+        manual dengan backoff jika `reader.read()` throw atau stream ditutup sebelum
+        event terminal diterima. Fallback ke polling GET /api/v1/jobs/{id} tiap 2 detik
+        jika `response.body` tidak tersedia (browser lama atau CORS issue).
+
+        ### Fallback sekunder — SSE ticket (hanya jika fetch-based tidak bisa)
+
+        Jika environment tidak support fetch-based SSE dengan header (mis. legacy
+        mobile WebView), gunakan `POST /api/v1/auth/sse-ticket` untuk mendapatkan
+        short-lived single-use ticket, lalu `?sse_ticket=<ticket>` di URL ini.
+        Lihat `auth.yaml` `POST /auth/sse-ticket` untuk detail.
+        Ini BUKAN default — hanya fallback terakhir.
+
+        ## Event types
+
+        - `progress`: {"progress": 47, "currentStep": "...", "estimatedCompletionAt": "..."}
+        - `completed`: {"status": "completed", "result": {...}}
+        - `failed`: {"status": "failed", "error": {...}}
+        - `cancelled`: {"status": "cancelled"}
+        - `keepalive`: {} — setiap 15 detik supaya Traefik/proxy tidak timeout
+
+        Stream ditutup oleh server setelah event terminal (completed/failed/cancelled).
+        Client HARUS cancel fetch / abort reader setelah menerima event terminal.
+
+        ## Konsistensi dengan UX patterns §3.2
+
+        202 Accepted dari resource endpoint return `streamUrl` tanpa query param.
+        Frontend append Authorization header — JANGAN append `?token=` ke streamUrl.
+      tags: [jobs]
+      security:
+        - bearerAuth: []
+        - sseTicket: []
+      parameters:
+        - $ref: "#/components/parameters/jobIdParam"
+        - name: sse_ticket
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 32
+            maxLength: 128
+          description: |
+            FALLBACK SEKUNDER SAJA. Single-use SSE ticket dari POST /auth/sse-ticket.
+            TTL 30 detik, hanya berlaku sekali. Dipakai hanya jika fetch-based SSE
+            tidak bisa (legacy WebView, dll.). Jika ticket sudah dipakai atau expired,
+            return 401 SSE_TICKET_INVALID.
+            JANGAN kirim `Authorization` header bersamaan dengan `sse_ticket` — ambiguous.
+            Backend pilih: header dulu, fallback ke ticket. Jika keduanya ada dan berbeda
+            user → return 400 BAD_SSE_AUTH_CONFLICT.
+      responses:
+        "200":
+          description: SSE stream
+          headers:
+            Content-Type:
+              schema:
+                type: string
+                enum: ["text/event-stream"]
+            Cache-Control:
+              schema:
+                type: string
+                enum: ["no-cache"]
+            X-Accel-Buffering:
+              schema:
+                type: string
+                enum: ["no"]
+              description: Disable Nginx/Traefik buffering untuk SSE
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  SSE format:
+                  ```
+                  event: progress
+                  data: {"progress":47,"currentStep":"..."}
+
+                  event: completed
+                  data: {"status":"completed","result":{...}}
+
+                  event: close
+                  data: {}
+                  ```
+        "400":
+          description: |
+            Token di query param terdeteksi, atau auth conflict (header + ticket bersamaan
+            dari user berbeda).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                tokenInQuery:
+                  summary: JWT di query param — ditolak
+                  value:
+                    error:
+                      code: BAD_SSE_TOKEN_IN_QUERY
+                      message: "JWT tidak boleh dikirim via query param. Gunakan Authorization: Bearer header atau SSE ticket."
+                      details: []
+                      traceId: "01HXY..."
+                authConflict:
+                  summary: Header + ticket dari user berbeda
+                  value:
+                    error:
+                      code: BAD_SSE_AUTH_CONFLICT
+                      message: "Authorization header dan SSE ticket menunjuk user berbeda."
+                      details: []
+                      traceId: "01HXY..."
+        "401":
+          description: JWT tidak valid / expired, atau SSE ticket tidak valid / sudah dipakai / expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                unauthorized:
+                  summary: JWT tidak valid
+                  value:
+                    error:
+                      code: UNAUTHORIZED
+                      message: "Token JWT tidak valid atau sudah expired"
+                      details: []
+                      traceId: "01HXY..."
+                sseTicketInvalid:
+                  summary: SSE ticket tidak valid atau sudah terpakai
+                  value:
+                    error:
+                      code: SSE_TICKET_INVALID
+                      message: "SSE ticket tidak valid, sudah dipakai, atau sudah expired (TTL 30 detik)"
+                      details: []
+                      traceId: "01HXY..."
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/JobNotFound"
+
+  # -----------------------------------------------------------------------
+  # POST /jobs/{id}/cancel
+  # -----------------------------------------------------------------------
+  /jobs/{id}/cancel:
+    post:
+      operationId: cancelJob
+      summary: Cancel job yang sedang queued atau running
+      description: |
+        Cancel job. Hanya bisa jika:
+        - status ∈ {queued, running}
+        - canCancel = true
+        - User adalah creator job ATAU ROLE-IT-ADMIN
+
+        Worker akan check context cancellation dan stop gracefully.
+        Status setelah cancel: "cancelled" (tidak "failed").
+
+        Idempotency-Key wajib.
+        Jika job sudah tidak bisa di-cancel → JOB_NOT_CANCELLABLE 422.
+      tags: [jobs]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/jobIdParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 500
+                  description: Alasan cancel (opsional, untuk audit log)
+      responses:
+        "200":
+          description: Cancel berhasil atau sudah terminal (idempotent)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      jobId:
+                        type: string
+                        format: uuid
+                      status:
+                        type: string
+                        enum: [cancelled]
+                  meta:
+                    type: object
+                    properties:
+                      traceId:
+                        type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/JobNotFound"
+        "422":
+          description: Job tidak bisa di-cancel di state ini
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: JOB_NOT_CANCELLABLE
+                  message: "Job tidak bisa di-cancel karena sudah selesai (status: completed)"
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+# -----------------------------------------------------------------------
+# Pattern 202 — untuk endpoint yang trigger long-running job.
+# Tidak di-define di sini (di masing-masing resource endpoint),
+# tapi schema JobAcceptedResponse di-define di sini untuk di-$ref.
+# -----------------------------------------------------------------------
+# Contoh penggunaan di resource endpoint lain:
+# POST /api/v1/ecl/calc-runs → 202 { data: JobAcceptedResponse }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+    sseTicket:
+      type: apiKey
+      in: query
+      name: sse_ticket
+      description: |
+        FALLBACK SEKUNDER — short-lived single-use SSE ticket dari POST /auth/sse-ticket.
+        TTL 30 detik, dipakai tepat sekali. Hanya boleh dipakai di /jobs/{id}/stream
+        jika fetch-based SSE dengan Authorization header tidak bisa digunakan.
+        BUKAN default auth method untuk SSE. Default: Authorization: Bearer header.
+
+  parameters:
+    jobIdParam:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: "Job ID (ULID atau UUID, format dari Asynq)"
+
+    cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+
+    limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+
+    sortParam:
+      name: sort
+      in: query
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    # ---- Job status -------------------------------------------------------
+    JobStatus:
+      type: string
+      enum: [queued, running, completed, failed, cancelled]
+      description: |
+        queued: Masuk Asynq queue, belum diambil worker.
+        running: Worker sedang proses.
+        completed: Selesai sukses — result tersedia.
+        failed: Error — error tersedia.
+        cancelled: Di-cancel oleh user atau sistem.
+
+    JobType:
+      type: string
+      enum:
+        - ECL_CALC_RUN
+        - EIR_REESTIMATION
+        - PEFINDO_IMPORT
+        - IBPA_IMPORT
+        - KSEI_NAB_IMPORT
+        - BEI_PRICE_IMPORT
+        - EXPORT_CSV
+        - EXPORT_XLSX
+        - MV_REFRESH
+        - JURNAL_BATCH_POST
+        - REKLASIFIKASI_BULK
+        - CKPN_ROLL_FORWARD
+        - AUDIT_HASH_VERIFY
+      description: Stable job type identifier
+
+    # ---- 202 Accepted response (dipakai resource endpoint lain) ----------
+    JobAcceptedResponse:
+      type: object
+      description: |
+        Return ini dari endpoint yang trigger long-running job (202 Accepted).
+        Client simpan jobId, subscribe SSE di streamUrl.
+      required: [jobId, type, statusUrl, streamUrl]
+      properties:
+        jobId:
+          type: string
+          description: "Job identifier (ULID). Persistent di sys.job."
+          example: "01JXYZ..."
+        type:
+          $ref: "#/components/schemas/JobType"
+        statusUrl:
+          type: string
+          description: "URL untuk polling: GET /api/v1/jobs/{jobId}"
+          example: "/api/v1/jobs/01JXYZ..."
+        streamUrl:
+          type: string
+          description: |
+            URL SSE stream: GET /api/v1/jobs/{jobId}/stream
+            JANGAN append ?token= ke URL ini. Auth dilakukan via
+            Authorization: Bearer header menggunakan fetch-based SSE.
+          example: "/api/v1/jobs/01JXYZ.../stream"
+        estimatedDurationSeconds:
+          type: integer
+          nullable: true
+          description: Estimasi durasi berdasarkan history (opsional, dari EMA job sebelumnya)
+          example: 300
+
+    # ---- Job detail -------------------------------------------------------
+    JobDetail:
+      type: object
+      required:
+        - jobId
+        - type
+        - status
+        - createdBy
+        - createdAt
+        - canCancel
+      properties:
+        jobId:
+          type: string
+        type:
+          $ref: "#/components/schemas/JobType"
+        status:
+          $ref: "#/components/schemas/JobStatus"
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
+          description: Persentase selesai. null jika status=queued.
+        currentStep:
+          type: string
+          nullable: true
+          description: Deskripsi langkah saat ini
+          example: "Menghitung Stage 2 instruments (1234 dari 2600)"
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+        estimatedCompletionAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: ETA — diperbarui berkala oleh worker
+        result:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: |
+            Populated hanya jika status=completed.
+            Isi tergantung job type:
+            - ECL_CALC_RUN: {calcRunId, totalECL, totalInstruments, periodeId}
+            - EXPORT_*: {downloadUrl, rowCount, filename, expiresAt}
+            - PEFINDO_IMPORT: {rowsImported, rowsRejected, batchId}
+        error:
+          type: object
+          nullable: true
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object
+          description: Populated hanya jika status=failed
+        canCancel:
+          type: boolean
+          description: "true jika job bisa di-cancel sekarang"
+        createdBy:
+          type: string
+          format: uuid
+          description: User UUID yang trigger job
+        createdAt:
+          type: string
+          format: date-time
+        payload:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: |
+            Input payload job (read-only, untuk debugging).
+            PII di-mask sebelum disimpan di sys.job.
+            Hanya ditampilkan untuk creator atau ROLE-IT-ADMIN.
+
+    # ---- Response wrappers -----------------------------------------------
+    JobDetailResponse:
+      type: object
+      properties:
+        data:
+          $ref: "#/components/schemas/JobDetail"
+        meta:
+          type: object
+          properties:
+            traceId:
+              type: string
+
+    JobListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/JobDetail"
+        pagination:
+          type: object
+          properties:
+            nextCursor:
+              type: string
+              nullable: true
+            hasMore:
+              type: boolean
+            totalEstimate:
+              type: integer
+              nullable: true
+            limit:
+              type: integer
+        meta:
+          type: object
+          properties:
+            traceId:
+              type: string
+
+    # ---- SSE event payloads (documenting, not enforced by OAS) -----------
+    SseProgressEvent:
+      type: object
+      description: "SSE event type: progress"
+      properties:
+        progress:
+          type: integer
+        currentStep:
+          type: string
+        estimatedCompletionAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    SseCompletedEvent:
+      type: object
+      description: "SSE event type: completed"
+      properties:
+        status:
+          type: string
+          enum: [completed]
+        result:
+          type: object
+          additionalProperties: true
+
+    SseFailedEvent:
+      type: object
+      description: "SSE event type: failed"
+      properties:
+        status:
+          type: string
+          enum: [failed]
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details, traceId]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object
+            traceId:
+              type: string
+
+  responses:
+    Unauthorized:
+      description: JWT tidak valid
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Forbidden:
+      description: Permission tidak terpenuhi
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    JobNotFound:
+      description: Job tidak ditemukan
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: JOB_NOT_FOUND
+              message: "Job dengan ID tersebut tidak ditemukan atau tidak ada akses"
+              details: []
+              traceId: "01HXY..."
+    RateLimited:
+      description: Too many requests
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"

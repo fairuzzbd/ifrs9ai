@@ -1,0 +1,351 @@
+{
+  "id": "blips",
+  "realm": "blips",
+  "displayName": "BLIPS IFRS9",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+  "accessTokenLifespan": 900,
+  "accessTokenLifespanForImplicitFlow": 900,
+  "ssoSessionIdleTimeout": 900,
+  "ssoSessionMaxLifespan": 28800,
+  "offlineSessionIdleTimeout": 2592000,
+  "smtpServer": {},
+  "loginTheme": "keycloak",
+  "internationalizationEnabled": false,
+  "defaultLocale": "en",
+
+  "roles": {
+    "realm": [
+      { "name": "ROLE-MAKER-TR",  "description": "Treasury Maker — membuat transaksi penempatan" },
+      { "name": "ROLE-APPR-TR",   "description": "Treasury Approver/Reviewer — review dan approve transaksi" },
+      { "name": "ROLE-RISK",      "description": "Risk Officer — review klasifikasi PSAK 71, ECL parameter preview" },
+      { "name": "ROLE-AKUN",      "description": "Akuntansi — mapping jurnal, upload feed, FX manual" },
+      { "name": "ROLE-AKUN-CTL",  "description": "Finance Controller — approve jurnal, periode soft-close (MFA wajib)" },
+      { "name": "ROLE-CFO",       "description": "CFO — hard-close periode buku (MFA wajib + step-up)" },
+      { "name": "ROLE-AUDIT",     "description": "Internal Auditor — read-only seluruh schema, export audit log" },
+      { "name": "ROLE-IT-ADMIN",  "description": "IT Admin — user management, integrasi config, DLQ (MFA wajib)" },
+      { "name": "ROLE-KOMITE",    "description": "Komite Investasi — approve klasifikasi PSAK 71 6-eyes (MFA wajib)" },
+      { "name": "ROLE-ALCO",      "description": "Asset-Liability Committee — approve parameter ECL (MFA wajib + step-up)" }
+    ]
+  },
+
+  "clients": [
+    {
+      "clientId": "blips-backend",
+      "name": "BLIPS Backend (resource server)",
+      "description": "Resource server yang memverifikasi JWT; tidak melakukan login flow sendiri.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "bearerOnly": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "blips-backend-dev-secret-change-in-prod",
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "standardFlowEnabled": false
+    },
+    {
+      "clientId": "blips-frontend",
+      "name": "BLIPS Frontend (SPA)",
+      "description": "Next.js SPA — melakukan Authorization Code + PKCE flow.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:3001/*",
+        "http://localhost:3000/*"
+      ],
+      "webOrigins": [
+        "http://localhost:3001",
+        "http://localhost:3000"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      }
+    }
+  ],
+
+  "clientScopes": [
+    {
+      "name": "blips-roles",
+      "description": "Scope yang memetakan realm roles dan permissions ke JWT claims",
+      "protocol": "openid-connect",
+      "attributes": {
+        "display.on.consent.screen": "false",
+        "include.in.token.scope": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "realm-roles-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "roles",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "multivalued": "true"
+          }
+        },
+        {
+          "name": "tenant-id-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "tenant_id",
+            "claim.value": "TUGURE",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false"
+          }
+        },
+        {
+          "name": "permissions-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "permissions",
+            "user.attribute": "blips_permissions",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false",
+            "multivalued": "true",
+            "aggregate.attrs": "true"
+          }
+        },
+        {
+          "name": "mfa-verified-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "mfa_verified",
+            "claim.value": "false",
+            "jsonType.label": "boolean",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+
+  "defaultDefaultClientScopes": [
+    "profile",
+    "email",
+    "roles",
+    "blips-roles"
+  ],
+
+  "users": [
+    {
+      "username": "maker.treasury",
+      "email": "maker.treasury@dev.blips.local",
+      "firstName": "Ahmad",
+      "lastName": "Treasury Maker",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        { "type": "password", "value": "Blips@Dev123", "temporary": false }
+      ],
+      "realmRoles": ["ROLE-MAKER-TR"],
+      "attributes": {
+        "blips_permissions": [
+          "instrumen.create", "instrumen.read",
+          "penempatan.create", "penempatan.read", "penempatan.submit",
+          "transaksi.create", "transaksi.read", "transaksi.submit",
+          "document.create", "document.read"
+        ]
+      }
+    },
+    {
+      "username": "approver.treasury",
+      "email": "approver.treasury@dev.blips.local",
+      "firstName": "Budi",
+      "lastName": "Treasury Approver",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        { "type": "password", "value": "Blips@Dev123", "temporary": false }
+      ],
+      "realmRoles": ["ROLE-APPR-TR"],
+      "attributes": {
+        "blips_permissions": [
+          "instrumen.read", "instrumen.review",
+          "penempatan.read", "penempatan.review", "penempatan.approve", "penempatan.reject",
+          "transaksi.read", "transaksi.review", "transaksi.approve", "transaksi.reject"
+        ]
+      }
+    },
+    {
+      "username": "risk.officer",
+      "email": "risk.officer@dev.blips.local",
+      "firstName": "Citra",
+      "lastName": "Risk Officer",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        { "type": "password", "value": "Blips@Dev123", "temporary": false }
+      ],
+      "realmRoles": ["ROLE-RISK"],
+      "attributes": {
+        "blips_permissions": [
+          "instrumen.read", "sppi_test.read", "sppi_test.review",
+          "bm_assessment.read", "bm_assessment.review",
+          "klasifikasi.read", "klasifikasi.review",
+          "ecl_run.create", "ecl_run.read",
+          "ecl_parameter.read"
+        ]
+      }
+    },
+    {
+      "username": "akuntansi",
+      "email": "akuntansi@dev.blips.local",
+      "firstName": "Dewi",
+      "lastName": "Akuntansi",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        { "type": "password", "value": "Blips@Dev123", "temporary": false }
+      ],
+      "realmRoles": ["ROLE-AKUN"],
+      "attributes": {
+        "blips_permissions": [
+          "jurnal.read", "jurnal.create",
+          "fx_rate.create", "fx_rate.read",
+          "document.create", "document.read"
+        ]
+      }
+    },
+    {
+      "username": "finance.controller",
+      "email": "finance.controller@dev.blips.local",
+      "firstName": "Eko",
+      "lastName": "Finance Controller",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        { "type": "password", "value": "Blips@Dev123", "temporary": false }
+      ],
+      "realmRoles": ["ROLE-AKUN-CTL"],
+      "attributes": {
+        "blips_permissions": [
+          "jurnal.read", "jurnal.approve", "jurnal.post",
+          "periode.read", "periode.softclose",
+          "fx_rate.read"
+        ]
+      }
+    },
+    {
+      "username": "cfo",
+      "email": "cfo@dev.blips.local",
+      "firstName": "Farida",
+      "lastName": "CFO",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        { "type": "password", "value": "Blips@Dev123", "temporary": false }
+      ],
+      "realmRoles": ["ROLE-CFO"],
+      "attributes": {
+        "blips_permissions": [
+          "periode.read", "periode.softclose", "periode.hardclose",
+          "jurnal.read",
+          "ecl_run.read"
+        ]
+      }
+    },
+    {
+      "username": "auditor",
+      "email": "auditor@dev.blips.local",
+      "firstName": "Gunawan",
+      "lastName": "Auditor",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        { "type": "password", "value": "Blips@Dev123", "temporary": false }
+      ],
+      "realmRoles": ["ROLE-AUDIT"],
+      "attributes": {
+        "blips_permissions": [
+          "audit_log.read",
+          "instrumen.read", "penempatan.read", "transaksi.read",
+          "ecl_run.read", "jurnal.read", "periode.read",
+          "instrumen.export", "ecl_run.export", "audit_log.export"
+        ]
+      }
+    },
+    {
+      "username": "it.admin",
+      "email": "it.admin@dev.blips.local",
+      "firstName": "Hendra",
+      "lastName": "IT Admin",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        { "type": "password", "value": "Blips@Dev123", "temporary": false }
+      ],
+      "realmRoles": ["ROLE-IT-ADMIN"],
+      "attributes": {
+        "blips_permissions": [
+          "user.create", "user.read", "user.update",
+          "role.read", "role.update"
+        ]
+      }
+    },
+    {
+      "username": "komite",
+      "email": "komite@dev.blips.local",
+      "firstName": "Indah",
+      "lastName": "Komite Investasi",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        { "type": "password", "value": "Blips@Dev123", "temporary": false }
+      ],
+      "realmRoles": ["ROLE-KOMITE"],
+      "attributes": {
+        "blips_permissions": [
+          "klasifikasi.read", "klasifikasi.approve",
+          "instrumen.read"
+        ]
+      }
+    },
+    {
+      "username": "alco",
+      "email": "alco@dev.blips.local",
+      "firstName": "Joko",
+      "lastName": "ALCO Member",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        { "type": "password", "value": "Blips@Dev123", "temporary": false }
+      ],
+      "realmRoles": ["ROLE-ALCO"],
+      "attributes": {
+        "blips_permissions": [
+          "ecl_parameter.read", "ecl_parameter.approve",
+          "ecl_run.read", "ecl_run.seal"
+        ]
+      }
+    }
+  ]
+}

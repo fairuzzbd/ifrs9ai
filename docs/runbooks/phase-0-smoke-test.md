@@ -324,7 +324,7 @@ Centang setiap item setelah diverifikasi. Submit checklist ini ke tech-lead-orch
 - [ ] PostgreSQL DDL execute clean (tidak ada baris ERROR/FATAL di log postgres, 9 schema terbentuk)
 - [ ] Backend `/healthz` return HTTP 200 dengan JSON valid (`status`, `service`, `version`, `timestamp` hadir)
 - [ ] Frontend bisa fetch `/healthz` cross-origin (header `Access-Control-Allow-Origin: http://localhost:3000` hadir + UI render kartu health)
-- [ ] CI pipeline green (cek GitLab pipeline untuk branch aktif — semua stage lint, test-unit, security-scan pass)
+- [ ] CI pipeline green (cek GitHub Actions workflow untuk branch aktif — job `backend-lint` dan `backend-test` pass; lihat tab Actions di repo)
 - [ ] First commit di Git (konfirmasi `git log --oneline -5` menampilkan commit baseline Phase 0)
 
 ---
