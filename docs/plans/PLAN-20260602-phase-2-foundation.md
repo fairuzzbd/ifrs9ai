@@ -131,7 +131,10 @@ devops-engineer       → Keycloak compose (DEC-006), /readyz real check (debt #
       - Decision B: virus PENDING block via `DOCUMENT_BLOCK_PENDING_DOWNLOAD` (default true)
 - [x] BUG FIX (orchestrator catch): `aud.audit_log` writer column mismatch (event_id/before_jsonb/ip vs id/before_value/ip_address) → align ke skema 0001. Silent audit-gap dicegah (DEC-018).
 - [ ] devops: Keycloak compose, /readyz real, runbook §7 fix, pre-commit
-- [ ] Commit + PR#1 → `backend-lint` hijau → tutup P0-3 + flip Gate 4
+- [x] Commit + PR#10 → `backend-lint` HIJAU (run 26857636744) → **P0-3 CLOSED** + Gate 4 PENDING→PASS
+      - 7 commit foundation + 3 commit toolchain/lint fix (go.mod 1.25→1.22, golangci v1.55→v1.59.1, config v1.59 migration, 62 lint finding→0)
+      - semua 4 CI check hijau: backend-lint, backend-test, frontend-lint, frontend-build
+- [ ] **Merge PR #10** — butuh human approval (CODEOWNERS + 1 approver develop). Security gate sudah APPROVED. Tidak di-merge oleh orchestrator.
 - [ ] Integration test run di CI/infra ber-docker (coverage 6 paket akan ≥80% saat live)
 
 ### Backlog (security MEDIUM/LOW — pre-production, non-merge-blocking)
