@@ -33,6 +33,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/common/middleware"
 	"blips-ifrs9.tugu-re.com/internal/config"
 	"blips-ifrs9.tugu-re.com/internal/document"
+	"blips-ifrs9.tugu-re.com/internal/master/lgdbasel"
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
 	"blips-ifrs9.tugu-re.com/internal/master/periodebuku"
 	"blips-ifrs9.tugu-re.com/internal/notification"
@@ -268,18 +269,20 @@ func main() {
 
 	// -----------------------------------------------------------------------
 	// Master Data — Periode Buku (APP-D-MSTR-001)
-	// Routes: GET/POST /api/v1/master/periode-buku
-	//         POST /api/v1/master/periode-buku/generate
-	//         GET  /api/v1/master/periode-buku/export
-	//         GET/PATCH/DELETE /api/v1/master/periode-buku/:id
-	//         POST /api/v1/master/periode-buku/:id/{submit,review,approve,reject}
-	//         GET  /api/v1/master/periode-buku/:id/{history,workflow}
-	// Note: softclose/hardclose/reopen endpoints belong to APP-D Phase 5 (out of scope here).
 	// -----------------------------------------------------------------------
 	periodeBukuRepo := periodebuku.NewDBRepository(db)
 	periodeBukuSvc := periodebuku.NewService(periodeBukuRepo, auditWriter, logger)
 	periodeBukuHandler := periodebuku.NewHandler(periodeBukuSvc, wfHandler)
 	periodebuku.RegisterRoutes(v1, periodeBukuHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — LGD Basel (APP-C-MSTR-ECL-001)
+	// ECL parameter: 6-eyes workflow, both approve + approve2 require step-up MFA.
+	// -----------------------------------------------------------------------
+	lgdBaselRepo := lgdbasel.NewDBRepository(db)
+	lgdBaselSvc := lgdbasel.NewService(lgdBaselRepo, auditWriter, logger)
+	lgdBaselHandler := lgdbasel.NewHandler(lgdBaselSvc, wfHandler)
+	lgdbasel.RegisterRoutes(v1, lgdBaselHandler)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,
