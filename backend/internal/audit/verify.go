@@ -20,10 +20,10 @@ type VerifyResult struct {
 
 // RangeResult adalah hasil verifikasi hash chain untuk semua entity dalam range waktu.
 type RangeResult struct {
-	StartDate   time.Time
-	EndDate     time.Time
-	TotalEvents int
-	ValidEvents int
+	StartDate    time.Time
+	EndDate      time.Time
+	TotalEvents  int
+	ValidEvents  int
 	BrokenChains []VerifyResult
 	IsValid      bool
 }
@@ -95,14 +95,15 @@ func VerifyHashChain(ctx context.Context, db *sql.DB, start, end time.Time) (*Ra
 	// Group by entity_type + entity_id.
 	type entityKey struct{ typ, id string }
 	groups := make(map[entityKey][]eventRow)
-	for _, e := range events {
-		k := entityKey{e.EntityType, e.EntityID}
-		groups[k] = append(groups[k], e)
+	for i := range events {
+		k := entityKey{events[i].EntityType, events[i].EntityID}
+		groups[k] = append(groups[k], events[i])
 	}
 
 	for _, entityEvents := range groups {
 		var prevHash []byte
-		for _, e := range entityEvents {
+		for i := range entityEvents {
+			e := &entityEvents[i]
 			canonicalJSON := buildCanonicalJSON(map[string]any{
 				"event_id":    e.EventID,
 				"event_time":  e.Timestamp.Format(time.RFC3339Nano),

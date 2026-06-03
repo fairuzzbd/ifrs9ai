@@ -3,7 +3,6 @@ package workflow
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -36,10 +35,10 @@ type Repository interface {
 
 // StateUpdate captures the fields to mutate in a single workflow transition.
 type StateUpdate struct {
-	WorkflowID    uuid.UUID
-	NewState      State
-	UpdatedBy     uuid.UUID
-	RowVersion    int64 // expected current row_version (optimistic lock applied at DB level too)
+	WorkflowID uuid.UUID
+	NewState   State
+	UpdatedBy  uuid.UUID
+	RowVersion int64 // expected current row_version (optimistic lock applied at DB level too)
 	// Conditionally-set actor IDs (nil = no change)
 	ReviewerID    *uuid.UUID
 	Approver1ID   *uuid.UUID
@@ -48,11 +47,11 @@ type StateUpdate struct {
 	RejectComment *string
 	RejectStep    *string
 	// Timestamps — set the one corresponding to the action
-	SubmittedAt   *time.Time
-	ReviewedAt    *time.Time
-	Approved1At   *time.Time
-	Approved2At   *time.Time
-	RejectedAt    *time.Time
+	SubmittedAt *time.Time
+	ReviewedAt  *time.Time
+	Approved1At *time.Time
+	Approved2At *time.Time
+	RejectedAt  *time.Time
 }
 
 // -----------------------------------------------------------------------
@@ -119,19 +118,31 @@ func getInstanceWhere(ctx context.Context, db *sql.DB, where string, args ...any
 	}
 
 	if reviewerID.Valid {
-		id, _ := uuid.Parse(reviewerID.String)
+		id, err := uuid.Parse(reviewerID.String)
+		if err != nil {
+			return nil, fmt.Errorf("workflow repo: parse reviewer_id %q: %w", reviewerID.String, err)
+		}
 		inst.ReviewerID = &id
 	}
 	if approver1ID.Valid {
-		id, _ := uuid.Parse(approver1ID.String)
+		id, err := uuid.Parse(approver1ID.String)
+		if err != nil {
+			return nil, fmt.Errorf("workflow repo: parse approver1_id %q: %w", approver1ID.String, err)
+		}
 		inst.Approver1ID = &id
 	}
 	if approver2ID.Valid {
-		id, _ := uuid.Parse(approver2ID.String)
+		id, err := uuid.Parse(approver2ID.String)
+		if err != nil {
+			return nil, fmt.Errorf("workflow repo: parse approver2_id %q: %w", approver2ID.String, err)
+		}
 		inst.Approver2ID = &id
 	}
 	if rejectedBy.Valid {
-		id, _ := uuid.Parse(rejectedBy.String)
+		id, err := uuid.Parse(rejectedBy.String)
+		if err != nil {
+			return nil, fmt.Errorf("workflow repo: parse rejected_by %q: %w", rejectedBy.String, err)
+		}
 		inst.RejectedBy = &id
 	}
 
@@ -237,7 +248,7 @@ func uuidPtrToNullable(u *uuid.UUID) any {
 }
 
 // -----------------------------------------------------------------------
-// DBConfigLoader — reads WorkflowConfig from sys.config
+// DBConfigLoader — reads Config from sys.config
 // -----------------------------------------------------------------------
 
 // DBConfigLoader implements ConfigLoader by querying sys.config.
@@ -251,7 +262,7 @@ func NewDBConfigLoader(db *sql.DB) *DBConfigLoader {
 }
 
 // Load reads and parses the WORKFLOW_CONFIG_{ENTITY} row from sys.config.
-func (l *DBConfigLoader) Load(entityType string) (*WorkflowConfig, error) {
+func (l *DBConfigLoader) Load(entityType string) (*Config, error) {
 	key := configKey(entityType)
 	var raw string
 	err := l.db.QueryRowContext(
@@ -259,7 +270,7 @@ func (l *DBConfigLoader) Load(entityType string) (*WorkflowConfig, error) {
 		`SELECT config_value FROM sys.config WHERE config_key = $1`, key,
 	).Scan(&raw)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("WorkflowConfig not found for entity type %q (key: %s)", entityType, key)
+		return nil, fmt.Errorf("Config not found for entity type %q (key: %s)", entityType, key)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("DBConfigLoader: query sys.config: %w", err)
@@ -274,7 +285,7 @@ func (l *DBConfigLoader) Load(entityType string) (*WorkflowConfig, error) {
 // InMemoryRepository is a thread-unsafe in-memory repository for unit tests.
 // Mark integration tests that require actual DB separately.
 type InMemoryRepository struct {
-	instances  map[string]*Instance  // key = entityType+":"+entityID.String()
+	instances  map[string]*Instance // key = entityType+":"+entityID.String()
 	signatures []SignatureRecord
 }
 
@@ -311,7 +322,8 @@ func (r *InMemoryRepository) GetByID(_ context.Context, id uuid.UUID) (*Instance
 }
 
 func (r *InMemoryRepository) UpdateState(_ context.Context, _ *sql.Tx, u StateUpdate) error {
-	for k, inst := range r.instances {
+	for k := range r.instances {
+		inst := r.instances[k]
 		if inst.ID == u.WorkflowID {
 			if inst.RowVersion != u.RowVersion {
 				return fmt.Errorf("optimistic lock: expected row_version %d, got %d", u.RowVersion, inst.RowVersion)
@@ -351,9 +363,9 @@ func (r *InMemoryRepository) InsertSignature(_ context.Context, _ *sql.Tx, sig *
 
 func (r *InMemoryRepository) ListSignatures(_ context.Context, workflowID uuid.UUID) ([]SignatureRecord, error) {
 	var sigs []SignatureRecord
-	for _, s := range r.signatures {
-		if s.WorkflowID == workflowID {
-			sigs = append(sigs, s)
+	for i := range r.signatures {
+		if r.signatures[i].WorkflowID == workflowID {
+			sigs = append(sigs, r.signatures[i])
 		}
 	}
 	return sigs, nil
@@ -367,14 +379,4 @@ func (r *InMemoryRepository) BeginTx(_ context.Context) (*sql.Tx, error) {
 // GetSignatures returns all recorded signatures (test helper).
 func (r *InMemoryRepository) GetSignatures() []SignatureRecord {
 	return r.signatures
-}
-
-// -----------------------------------------------------------------------
-// Helpers
-// -----------------------------------------------------------------------
-
-// marshalJSON is a helper used in audit before/after payloads.
-func marshalJSON(v any) json.RawMessage {
-	b, _ := json.Marshal(v)
-	return b
 }

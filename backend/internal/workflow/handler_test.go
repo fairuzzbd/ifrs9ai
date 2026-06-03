@@ -75,7 +75,7 @@ func jsonBody(t *testing.T, v any) *bytes.Buffer {
 
 func TestHandler_Submit_Success(t *testing.T) {
 	cfg := cfg4Eyes(false)
-	svc, repo := buildTestService(map[string]*WorkflowConfig{cfg.EntityType: cfg})
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
 
 	mUUID := uuid.New()
 	inst := seedWorkflow(repo, cfg, mUUID)
@@ -106,7 +106,7 @@ func TestHandler_Submit_Success(t *testing.T) {
 
 func TestHandler_Submit_InvalidUUID(t *testing.T) {
 	cfg := cfg4Eyes(false)
-	svc, _ := buildTestService(map[string]*WorkflowConfig{cfg.EntityType: cfg})
+	svc, _ := buildTestService(map[string]*Config{cfg.EntityType: cfg})
 
 	mUUID := uuid.New()
 	r := buildTestRouterWithClaims(svc, mUUID, "maker", "penempatan.submit")
@@ -125,7 +125,7 @@ func TestHandler_Submit_InvalidUUID(t *testing.T) {
 
 func TestHandler_Submit_MissingPermission(t *testing.T) {
 	cfg := cfg4Eyes(false)
-	svc, repo := buildTestService(map[string]*WorkflowConfig{cfg.EntityType: cfg})
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
 
 	mUUID := uuid.New()
 	inst := seedWorkflow(repo, cfg, mUUID)
@@ -147,7 +147,7 @@ func TestHandler_Submit_MissingPermission(t *testing.T) {
 
 func TestHandler_Submit_NoClaims(t *testing.T) {
 	cfg := cfg4Eyes(false)
-	svc, repo := buildTestService(map[string]*WorkflowConfig{cfg.EntityType: cfg})
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
 
 	inst := seedWorkflow(repo, cfg, uuid.New())
 	// No claims injected
@@ -172,7 +172,7 @@ func TestHandler_Submit_NoClaims(t *testing.T) {
 
 func TestHandler_Reject_ShortComment(t *testing.T) {
 	cfg := cfg4Eyes(false)
-	svc, repo := buildTestService(map[string]*WorkflowConfig{cfg.EntityType: cfg})
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
 
 	mUUID := uuid.New()
 	rUUID := uuid.New()
@@ -199,7 +199,7 @@ func TestHandler_Reject_ShortComment(t *testing.T) {
 
 func TestHandler_Reject_ValidComment(t *testing.T) {
 	cfg := cfg4Eyes(false)
-	svc, repo := buildTestService(map[string]*WorkflowConfig{cfg.EntityType: cfg})
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
 
 	mUUID := uuid.New()
 	rUUID := uuid.New()
@@ -231,7 +231,7 @@ func TestHandler_Reject_ValidComment(t *testing.T) {
 
 func TestHandler_GetStatus_Success(t *testing.T) {
 	cfg := cfg4Eyes(false)
-	svc, repo := buildTestService(map[string]*WorkflowConfig{cfg.EntityType: cfg})
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
 
 	mUUID := uuid.New()
 	inst := seedWorkflow(repo, cfg, mUUID)
@@ -256,7 +256,7 @@ func TestHandler_GetStatus_Success(t *testing.T) {
 
 func TestHandler_GetStatus_NotFound(t *testing.T) {
 	cfg := cfg4Eyes(false)
-	svc, _ := buildTestService(map[string]*WorkflowConfig{cfg.EntityType: cfg})
+	svc, _ := buildTestService(map[string]*Config{cfg.EntityType: cfg})
 
 	mUUID := uuid.New()
 	r := buildTestRouterWithClaims(svc, mUUID, "maker", "penempatan.read")
@@ -319,7 +319,7 @@ func TestParseSignatureMethod(t *testing.T) {
 
 func TestHandler_FullFourEyesFlow_HTTP(t *testing.T) {
 	cfg := cfg4Eyes(false)
-	svc, repo := buildTestService(map[string]*WorkflowConfig{cfg.EntityType: cfg})
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
 
 	mUUID := uuid.New()
 	rUUID := uuid.New()

@@ -148,7 +148,10 @@ func Logger(logger *slog.Logger) gin.HandlerFunc {
 func slogAttrs(kv []any) []slog.Attr {
 	attrs := make([]slog.Attr, 0, len(kv)/2)
 	for i := 0; i+1 < len(kv); i += 2 {
-		key, _ := kv[i].(string)
+		key, ok := kv[i].(string)
+		if !ok {
+			continue
+		}
 		attrs = append(attrs, slog.Any(key, kv[i+1]))
 	}
 	return attrs

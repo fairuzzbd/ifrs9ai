@@ -19,15 +19,15 @@ func makeUUID(seed string) uuid.UUID {
 }
 
 var (
-	makerID    = makeUUID("00000000-0000-0000-0000-000000000001")
-	reviewerID = makeUUID("00000000-0000-0000-0000-000000000002")
-	approverID = makeUUID("00000000-0000-0000-0000-000000000003")
+	makerID     = makeUUID("00000000-0000-0000-0000-000000000001")
+	reviewerID  = makeUUID("00000000-0000-0000-0000-000000000002")
+	approverID  = makeUUID("00000000-0000-0000-0000-000000000003")
 	approver2ID = makeUUID("00000000-0000-0000-0000-000000000004")
-	entityID   = makeUUID("aaaaaaaa-0000-0000-0000-000000000001")
+	entityID    = makeUUID("aaaaaaaa-0000-0000-0000-000000000001")
 )
 
-func cfg4Eyes(retractable bool) *WorkflowConfig {
-	return &WorkflowConfig{
+func cfg4Eyes(retractable bool) *Config {
+	return &Config{
 		EntityType:  "PENEMPATAN",
 		Eyes:        4,
 		Retractable: retractable,
@@ -46,8 +46,8 @@ func cfg4Eyes(retractable bool) *WorkflowConfig {
 	}
 }
 
-func cfg6Eyes() *WorkflowConfig {
-	return &WorkflowConfig{
+func cfg6Eyes() *Config {
+	return &Config{
 		EntityType:  "KLASIFIKASI",
 		Eyes:        6,
 		Retractable: false,
@@ -67,13 +67,13 @@ func cfg6Eyes() *WorkflowConfig {
 	}
 }
 
-func cfg6EyesStepUpApprove() *WorkflowConfig {
+func cfg6EyesStepUpApprove() *Config {
 	cfg := cfg6Eyes()
 	cfg.StepUpRequired["approve"] = true
 	return cfg
 }
 
-func draftInstance(cfg *WorkflowConfig) *Instance {
+func draftInstance(cfg *Config) *Instance {
 	return &Instance{
 		ID:                uuid.New(),
 		EntityType:        cfg.EntityType,
@@ -89,8 +89,8 @@ func draftInstance(cfg *WorkflowConfig) *Instance {
 	}
 }
 
-func buildEngine(cfg *WorkflowConfig) *Engine {
-	loader := NewInMemoryConfigLoader(map[string]*WorkflowConfig{
+func buildEngine(cfg *Config) *Engine {
+	loader := NewInMemoryConfigLoader(map[string]*Config{
 		cfg.EntityType: cfg,
 	})
 	return NewEngine(loader)
@@ -100,12 +100,6 @@ func defaultActionRequest() ActionRequest {
 	return ActionRequest{
 		SignatureMethod: SignatureMethodJWTStandard,
 	}
-}
-
-func withRowVersion(rv int64) ActionRequest {
-	req := defaultActionRequest()
-	req.RowVersion = &rv
-	return req
 }
 
 // -----------------------------------------------------------------------
@@ -396,7 +390,7 @@ func TestEngine_OptimisticLock_Mismatch(t *testing.T) {
 	wrongVersion := int64(999)
 	req := ActionRequest{
 		SignatureMethod: SignatureMethodJWTStandard,
-		RowVersion:     &wrongVersion,
+		RowVersion:      &wrongVersion,
 	}
 
 	_, err := eng.Transition(TransitionInput{
@@ -415,7 +409,7 @@ func TestEngine_OptimisticLock_Match(t *testing.T) {
 	rv := int64(1)
 	req := ActionRequest{
 		SignatureMethod: SignatureMethodJWTStandard,
-		RowVersion:     &rv,
+		RowVersion:      &rv,
 	}
 
 	_, err := eng.Transition(TransitionInput{
@@ -638,7 +632,7 @@ func TestState_IsPending(t *testing.T) {
 // -----------------------------------------------------------------------
 
 func TestCachedConfigLoader_Cache(t *testing.T) {
-	inner := NewInMemoryConfigLoader(map[string]*WorkflowConfig{
+	inner := NewInMemoryConfigLoader(map[string]*Config{
 		"PENEMPATAN": cfg4Eyes(false),
 	})
 	cached := NewCachedConfigLoaderWithTTL(inner, 1*time.Hour)
@@ -658,7 +652,7 @@ func TestCachedConfigLoader_Cache(t *testing.T) {
 }
 
 func TestCachedConfigLoader_Invalidate(t *testing.T) {
-	inner := NewInMemoryConfigLoader(map[string]*WorkflowConfig{
+	inner := NewInMemoryConfigLoader(map[string]*Config{
 		"PENEMPATAN": cfg4Eyes(false),
 	})
 	cached := NewCachedConfigLoaderWithTTL(inner, 1*time.Hour)

@@ -6,8 +6,9 @@ import (
 	"strings"
 	"time"
 
-	domainerrors "blips-ifrs9.tugu-re.com/internal/common/errors"
 	"github.com/google/uuid"
+
+	domainerrors "blips-ifrs9.tugu-re.com/internal/common/errors"
 )
 
 // validTransitions defines allowed (fromState, action) pairs and the target state
@@ -45,7 +46,7 @@ var retractTransition = transitionSpec{
 }
 
 // Engine is the generic config-driven state machine engine.
-// It has NO knowledge of specific entities — all domain rules are encoded in WorkflowConfig.
+// It has NO knowledge of specific entities — all domain rules are encoded in Config.
 type Engine struct {
 	configs ConfigLoader
 }
@@ -63,10 +64,10 @@ type TransitionInput struct {
 	CurrentUsername string
 	CurrentRole     string
 	// StepUpFresh is true when X-Step-Up-Token header is valid and < 5 min old.
-	StepUpFresh    bool
-	Request        ActionRequest
+	StepUpFresh bool
+	Request     ActionRequest
 	// For reject: comment is required and validated before calling Transition.
-	RejectComment  *string
+	RejectComment *string
 }
 
 // TransitionResult is what the engine returns when a transition succeeds.
@@ -74,7 +75,7 @@ type TransitionResult struct {
 	PreviousState   State
 	NewState        State
 	SignatureHash   string
-	SignatureMethod  SignatureMethod
+	SignatureMethod SignatureMethod
 	NextActions     []string
 }
 
@@ -82,7 +83,7 @@ type TransitionResult struct {
 // It does NOT write to DB — that is the responsibility of the service/repo layer.
 //
 // Order of checks (per workflow-state-machine.md §6.3):
-//  1. Load + validate WorkflowConfig
+//  1. Load + validate Config
 //  2. Check entity not terminal (APPROVED/REJECTED)
 //  3. Check valid transition for (currentState, action, eyes)
 //  4. Check permission guard (caller must inject claims)
@@ -173,7 +174,7 @@ func (e *Engine) Transition(input TransitionInput) (*TransitionResult, error) {
 		PreviousState:   inst.CurrentState,
 		NewState:        newState,
 		SignatureHash:   sigHash,
-		SignatureMethod:  input.Request.SignatureMethod,
+		SignatureMethod: input.Request.SignatureMethod,
 		NextActions:     nextActions(newState, cfg),
 	}, nil
 }
@@ -181,7 +182,7 @@ func (e *Engine) Transition(input TransitionInput) (*TransitionResult, error) {
 // computeTargetState resolves (currentState, action) → targetState using the
 // config's eyes value to determine APPROVE branching. Returns
 // WORKFLOW_INVALID_TRANSITION if the transition is not allowed.
-func computeTargetState(current State, action Action, cfg *WorkflowConfig) (State, error) {
+func computeTargetState(current State, action Action, cfg *Config) (State, error) {
 	// Build the allowed transitions for this config.
 	specs := make([]transitionSpec, 0, len(baseTransitions)+len(sixEyesTransitions)+1)
 	for _, t := range baseTransitions {
@@ -219,7 +220,7 @@ func computeTargetState(current State, action Action, cfg *WorkflowConfig) (Stat
 // checkSoD enforces Segregation of Duties per DEC-017.
 // Rules are always enforced regardless of sodRules config flags — config is
 // read only for approver2NotAnyPrevious.
-func checkSoD(inst *Instance, action Action, currentUserID string, cfg *WorkflowConfig) error {
+func checkSoD(inst *Instance, action Action, currentUserID string, cfg *Config) error {
 	switch action {
 	case ActionReview:
 		// reviewer ≠ maker (always enforced)
@@ -309,7 +310,7 @@ func checkSoD(inst *Instance, action Action, currentUserID string, cfg *Workflow
 
 // nextActions returns the list of valid action names from the given state,
 // empty if terminal.
-func nextActions(state State, cfg *WorkflowConfig) []string {
+func nextActions(state State, cfg *Config) []string {
 	if state.IsTerminal() {
 		return []string{}
 	}
@@ -362,21 +363,21 @@ func NewSignatureRecord(
 	method SignatureMethod,
 	comment *string,
 ) *SignatureRecord {
-	t, _ := time.Parse(time.RFC3339Nano, signedAt)
-	if t.IsZero() {
+	t, err := time.Parse(time.RFC3339Nano, signedAt)
+	if err != nil || t.IsZero() {
 		t = time.Now()
 	}
 	return &SignatureRecord{
-		ID:             uuid.New(),
-		WorkflowID:     workflowID,
-		Action:         action,
-		UserID:         userID,
-		Username:       username,
-		RoleAtTime:     roleAtTime,
-		SignedAt:       t,
-		SignatureHash:  sigHash,
+		ID:              uuid.New(),
+		WorkflowID:      workflowID,
+		Action:          action,
+		UserID:          userID,
+		Username:        username,
+		RoleAtTime:      roleAtTime,
+		SignedAt:        t,
+		SignatureHash:   sigHash,
 		SignatureMethod: method,
-		Comment:        comment,
-		TenantID:       tenantID,
+		Comment:         comment,
+		TenantID:        tenantID,
 	}
 }

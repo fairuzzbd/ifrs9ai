@@ -25,11 +25,11 @@ type SuccessEnvelope struct {
 
 // ListEnvelope adalah struktur response list (dengan pagination).
 type ListEnvelope struct {
-	Data          any            `json:"data"`
+	Data          any             `json:"data"`
 	Pagination    *PaginationMeta `json:"pagination"`
-	AppliedSort   []SortApplied  `json:"appliedSort,omitempty"`
-	AppliedFilter map[string]any `json:"appliedFilter,omitempty"`
-	Meta          Meta           `json:"meta"`
+	AppliedSort   []SortApplied   `json:"appliedSort,omitempty"`
+	AppliedFilter map[string]any  `json:"appliedFilter,omitempty"`
+	Meta          Meta            `json:"meta"`
 }
 
 // PaginationMeta adalah metadata pagination cursor-based (DEC-022).
@@ -53,10 +53,10 @@ type ErrorEnvelope struct {
 
 // ErrorBody adalah isi dari error envelope.
 type ErrorBody struct {
-	Code    string                  `json:"code"`
-	Message string                  `json:"message"`
-	Details []domainerrors.Detail   `json:"details"`
-	TraceID string                  `json:"traceId"`
+	Code    string                `json:"code"`
+	Message string                `json:"message"`
+	Details []domainerrors.Detail `json:"details"`
+	TraceID string                `json:"traceId"`
 }
 
 // traceIDKey adalah key context untuk trace ID di Gin.

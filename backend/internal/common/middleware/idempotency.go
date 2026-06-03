@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -145,10 +146,15 @@ func Idempotency(db *sql.DB) gin.HandlerFunc {
 		if len(responseBody) > 0 {
 			userID := ""
 			if uid, ok := c.Get("userId"); ok {
-				userID, _ = uid.(string)
+				if s, ok2 := uid.(string); ok2 {
+					userID = s
+				}
 			}
 			endpoint := method + " " + c.Request.URL.Path
-			_ = saveIdempotencyKey(c.Request.Context(), db, idempKey, requestHash, responseBody, int16(status), userID, endpoint)
+			if err := saveIdempotencyKey(c.Request.Context(), db, idempKey, requestHash, responseBody, int16(status), userID, endpoint); err != nil {
+				slog.Default().WarnContext(c.Request.Context(), "idempotency: failed to save key",
+					"key", idempKey, "endpoint", endpoint, "error", err)
+			}
 		}
 	}
 }

@@ -17,7 +17,7 @@ import (
 // buildTestService builds a Service with in-memory components.
 // Integration tests that require a real DB should be in service_integration_test.go
 // and are tagged `//go:build integration`.
-func buildTestService(configs map[string]*WorkflowConfig) (*Service, *InMemoryRepository) {
+func buildTestService(configs map[string]*Config) (*Service, *InMemoryRepository) {
 	loader := NewInMemoryConfigLoader(configs)
 	engine := NewEngine(loader)
 	repo := NewInMemoryRepository()
@@ -40,7 +40,7 @@ func ctxWithClaims(userID uuid.UUID, username string, permissions ...string) con
 	return auth.ContextWithClaims(context.Background(), claims)
 }
 
-func seedWorkflow(repo *InMemoryRepository, cfg *WorkflowConfig, makerUUID uuid.UUID) *Instance {
+func seedWorkflow(repo *InMemoryRepository, cfg *Config, makerUUID uuid.UUID) *Instance {
 	inst := &Instance{
 		ID:                uuid.New(),
 		EntityType:        cfg.EntityType,
@@ -64,7 +64,7 @@ func seedWorkflow(repo *InMemoryRepository, cfg *WorkflowConfig, makerUUID uuid.
 
 func TestService_FourEyes_FullWorkflow(t *testing.T) {
 	cfg := cfg4Eyes(false)
-	svc, repo := buildTestService(map[string]*WorkflowConfig{cfg.EntityType: cfg})
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
 
 	mUUID := uuid.New()
 	rUUID := uuid.New()
@@ -130,7 +130,7 @@ func TestService_FourEyes_FullWorkflow(t *testing.T) {
 
 func TestService_SixEyes_FullWorkflow(t *testing.T) {
 	cfg := cfg6Eyes()
-	svc, repo := buildTestService(map[string]*WorkflowConfig{cfg.EntityType: cfg})
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
 
 	mUUID := uuid.New()
 	rUUID := uuid.New()
@@ -189,7 +189,7 @@ func TestService_SixEyes_FullWorkflow(t *testing.T) {
 // "Maker mencoba jadi Reviewer via API langsung" → SOD_VIOLATION 403.
 func TestService_SoD_MakerTriesToReview(t *testing.T) {
 	cfg := cfg4Eyes(false)
-	svc, repo := buildTestService(map[string]*WorkflowConfig{cfg.EntityType: cfg})
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
 
 	mUUID := uuid.New()
 	inst := seedWorkflow(repo, cfg, mUUID)
@@ -207,7 +207,7 @@ func TestService_SoD_MakerTriesToReview(t *testing.T) {
 // TestService_SoD_MakerTriesToApprove — second QA scenario.
 func TestService_SoD_MakerTriesToApprove(t *testing.T) {
 	cfg := cfg4Eyes(false)
-	svc, repo := buildTestService(map[string]*WorkflowConfig{cfg.EntityType: cfg})
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
 
 	mUUID := uuid.New()
 	rUUID := uuid.New()
@@ -232,7 +232,7 @@ func TestService_SoD_MakerTriesToApprove(t *testing.T) {
 
 func TestService_Reject_FromPendingReview(t *testing.T) {
 	cfg := cfg4Eyes(false)
-	svc, repo := buildTestService(map[string]*WorkflowConfig{cfg.EntityType: cfg})
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
 
 	mUUID := uuid.New()
 	rUUID := uuid.New()
@@ -259,7 +259,7 @@ func TestService_Reject_FromPendingReview(t *testing.T) {
 
 func TestService_Reject_CommentTooShort(t *testing.T) {
 	cfg := cfg4Eyes(false)
-	svc, repo := buildTestService(map[string]*WorkflowConfig{cfg.EntityType: cfg})
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
 
 	mUUID := uuid.New()
 	rUUID := uuid.New()
@@ -297,7 +297,7 @@ func TestService_Reject_CommentTooShort(t *testing.T) {
 
 func TestService_OptimisticLock(t *testing.T) {
 	cfg := cfg4Eyes(false)
-	svc, repo := buildTestService(map[string]*WorkflowConfig{cfg.EntityType: cfg})
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
 
 	mUUID := uuid.New()
 	inst := seedWorkflow(repo, cfg, mUUID) // RowVersion = 1
@@ -307,7 +307,7 @@ func TestService_OptimisticLock(t *testing.T) {
 	wrongRV := int64(999)
 	req := ActionRequest{
 		SignatureMethod: SignatureMethodJWTStandard,
-		RowVersion:     &wrongRV,
+		RowVersion:      &wrongRV,
 	}
 	_, err := svc.Submit(ctx, SubmitInput{
 		EntityType: cfg.EntityType, EntityID: inst.EntityID, Request: req,
@@ -321,7 +321,7 @@ func TestService_OptimisticLock(t *testing.T) {
 
 func TestService_EntityNotFound(t *testing.T) {
 	cfg := cfg4Eyes(false)
-	svc, _ := buildTestService(map[string]*WorkflowConfig{cfg.EntityType: cfg})
+	svc, _ := buildTestService(map[string]*Config{cfg.EntityType: cfg})
 
 	ctx := ctxWithClaims(uuid.New(), "maker", "penempatan.submit")
 	_, err := svc.Submit(ctx, SubmitInput{
@@ -338,7 +338,7 @@ func TestService_EntityNotFound(t *testing.T) {
 
 func TestService_SignatureImmutability(t *testing.T) {
 	cfg := cfg4Eyes(false)
-	svc, repo := buildTestService(map[string]*WorkflowConfig{cfg.EntityType: cfg})
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
 
 	mUUID := uuid.New()
 	rUUID := uuid.New()
@@ -376,7 +376,7 @@ func TestService_SignatureImmutability(t *testing.T) {
 
 func TestService_GetStatus(t *testing.T) {
 	cfg := cfg4Eyes(false)
-	svc, repo := buildTestService(map[string]*WorkflowConfig{cfg.EntityType: cfg})
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
 
 	mUUID := uuid.New()
 	inst := seedWorkflow(repo, cfg, mUUID)
@@ -399,7 +399,7 @@ func TestService_GetStatus(t *testing.T) {
 
 func TestService_NoClaims_Unauthorized(t *testing.T) {
 	cfg := cfg4Eyes(false)
-	svc, repo := buildTestService(map[string]*WorkflowConfig{cfg.EntityType: cfg})
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
 
 	inst := seedWorkflow(repo, cfg, uuid.New())
 

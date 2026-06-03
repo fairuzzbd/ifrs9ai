@@ -105,8 +105,8 @@ func TestSoD_Approve2_SixEyes_AllBlocked(t *testing.T) {
 	}
 
 	blocked := []struct {
-		name   string
-		userID string
+		name     string
+		userID   string
 		wantCode domainerrors.Code
 	}{
 		{"maker", makerID, domainerrors.CodeSoDApprover1SameAsMaker},

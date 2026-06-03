@@ -22,12 +22,13 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq"
 	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 
 	"blips-ifrs9.tugu-re.com/internal/audit"
 )
@@ -52,7 +53,9 @@ func main() {
 
 	dsn := *dbFlag
 	if dsn == "" {
-		_ = godotenv.Load()
+		if envErr := godotenv.Load(); envErr != nil && !os.IsNotExist(envErr) {
+			slog.Default().Debug("godotenv.Load: skipped", "reason", envErr.Error())
+		}
 		dsn = os.Getenv("DATABASE_URL")
 		if dsn == "" {
 			// No hardcoded credentials (MEDIUM-4/LOW-5 security mandate).
@@ -70,12 +73,21 @@ func main() {
 		}
 	}
 
+	// run encapsulates the DB-lifecycle logic so that defer db.Close() and os.Exit
+	// do not conflict (gocritic exitAfterDefer).
+	exitCode := run(dsn, start, end, *jsonFlag)
+	os.Exit(exitCode)
+}
+
+// run opens the DB, verifies the hash chain, and returns an OS exit code.
+// Separating this from main() ensures defer db.Close() runs before any exit.
+func run(dsn string, start, end time.Time, jsonOutput bool) int {
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: tidak bisa connect ke database: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
-	defer db.Close()
+	defer db.Close() //nolint:errcheck // Close on read-only DB; error not actionable at exit.
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -83,18 +95,19 @@ func main() {
 	result, err := audit.VerifyHashChain(ctx, db, start, end)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: verifikasi gagal: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
-	if *jsonFlag {
+	if jsonOutput {
 		outputJSON(result)
 	} else {
 		outputText(result)
 	}
 
 	if !result.IsValid {
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 func parseRange(s string) (time.Time, time.Time, error) {

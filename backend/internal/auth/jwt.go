@@ -16,9 +16,11 @@ type contextKey struct{ name string }
 var (
 	// claimsKey adalah key untuk menyimpan Claims di context.
 	claimsKey = contextKey{"auth_claims"}
-	// idleWindowKey adalah key untuk menyimpan last-activity timestamp.
-	idleWindowKey = contextKey{"last_activity"}
 )
+
+// TODO(DEC-025): idle window enforcement (15-min idle → force re-auth) is not yet wired.
+// When implemented, use a contextKey{"last_activity"} stored by the request middleware and
+// checked by CheckPermission or a dedicated IdleCheck helper.
 
 // IdleTimeout adalah idle window sesuai DEC-025: 15 menit.
 const IdleTimeout = 15 * time.Minute

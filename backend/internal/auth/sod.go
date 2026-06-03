@@ -9,9 +9,9 @@ import (
 // WorkflowParticipants menyimpan ID user yang sudah berpartisipasi dalam workflow.
 // Field kosong ("") berarti step belum ada.
 type WorkflowParticipants struct {
-	MakerID    string
-	ReviewerID string
-	ApproverID string  // 4-eyes approver
+	MakerID     string
+	ReviewerID  string
+	ApproverID  string // 4-eyes approver
 	Approver2ID string // 6-eyes second approver
 }
 

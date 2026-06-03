@@ -47,7 +47,9 @@ const (
 
 func main() {
 	// Best-effort .env load (compat with dev setup; no-op if file missing).
-	_ = godotenv.Load()
+	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
+		slog.Default().Debug("godotenv.Load: skipped", "reason", err.Error())
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
@@ -79,6 +81,10 @@ func main() {
 		slog.Error("failed to initialise migrate", "error", err)
 		os.Exit(exitMigrErr)
 	}
+	// Parse + validate arguments before registering the defer, so os.Exit in
+	// dispatchCommand does not skip the cleanup defer (gocritic exitAfterDefer).
+	runFn := dispatchCommand(m)
+
 	defer func() {
 		srcErr, dbErr := m.Close()
 		if srcErr != nil {
@@ -89,25 +95,33 @@ func main() {
 		}
 	}()
 
+	runFn()
+}
+
+// dispatchCommand parses os.Args and returns a zero-argument func that executes
+// the requested migration command. All argument validation — including os.Exit on
+// invalid input — is done here, before main() registers its cleanup defer.
+func dispatchCommand(m *migrate.Migrate) func() {
 	command := os.Args[1]
 
 	switch command {
 	case "up":
-		runUp(m)
+		return func() { runUp(m) }
 
 	case "down":
 		steps := 1
 		if len(os.Args) >= 3 {
-			steps, err = strconv.Atoi(os.Args[2])
-			if err != nil || steps < 1 {
+			n, err := strconv.Atoi(os.Args[2])
+			if err != nil || n < 1 {
 				slog.Error("down: invalid step count", "arg", os.Args[2])
 				os.Exit(exitArgErr)
 			}
+			steps = n
 		}
-		runDown(m, steps)
+		return func() { runDown(m, steps) }
 
 	case "version":
-		runVersion(m)
+		return func() { runVersion(m) }
 
 	case "force":
 		if len(os.Args) < 3 {
@@ -120,7 +134,7 @@ func main() {
 			slog.Error("force: invalid version", "arg", os.Args[2])
 			os.Exit(exitArgErr)
 		}
-		runForce(m, v)
+		return func() { runForce(m, v) }
 
 	case "goto":
 		if len(os.Args) < 3 {
@@ -133,16 +147,18 @@ func main() {
 			slog.Error("goto: invalid version", "arg", os.Args[2])
 			os.Exit(exitArgErr)
 		}
-		runGoto(m, uint(v))
+		return func() { runGoto(m, uint(v)) }
 
 	case "drop":
-		runDrop(m)
+		return func() { runDrop(m) }
 
 	default:
 		slog.Error("unknown command", "command", command)
 		printUsage()
 		os.Exit(exitArgErr)
 	}
+	// unreachable — os.Exit above exits; return satisfies the compiler.
+	return func() {}
 }
 
 // ──────────────────────────────────────────────
@@ -160,8 +176,11 @@ func runUp(m *migrate.Migrate) {
 		checkDirty(m)
 		os.Exit(exitMigrErr)
 	}
-	v, dirty, _ := m.Version()
-	slog.Info("migrations applied successfully", "version", v, "dirty", dirty)
+	if v, dirty, err := m.Version(); err != nil {
+		slog.Info("migrations applied successfully (version query failed)", "error", err)
+	} else {
+		slog.Info("migrations applied successfully", "version", v, "dirty", dirty)
+	}
 }
 
 func runDown(m *migrate.Migrate, steps int) {
@@ -175,8 +194,11 @@ func runDown(m *migrate.Migrate, steps int) {
 		checkDirty(m)
 		os.Exit(exitMigrErr)
 	}
-	v, dirty, _ := m.Version()
-	slog.Info("rollback complete", "version", v, "dirty", dirty)
+	if v, dirty, err := m.Version(); err != nil {
+		slog.Info("rollback complete (version query failed)", "error", err)
+	} else {
+		slog.Info("rollback complete", "version", v, "dirty", dirty)
+	}
 }
 
 func runVersion(m *migrate.Migrate) {

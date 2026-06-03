@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"blips-ifrs9.tugu-re.com/internal/common/listquery"
 	domainerrors "blips-ifrs9.tugu-re.com/internal/common/errors"
+	"blips-ifrs9.tugu-re.com/internal/common/listquery"
 )
 
 func TestParseFromRequest_Sort(t *testing.T) {

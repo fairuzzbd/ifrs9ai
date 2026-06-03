@@ -27,9 +27,9 @@ const DefaultPresignTTLMinutes = 60
 
 // MinIOClient adalah wrapper di atas minio.Client dengan konvensi BLIPS.
 type MinIOClient struct {
-	client  *minio.Client
-	cfg     MinIOConfig
-	logger  *slog.Logger
+	client *minio.Client
+	cfg    MinIOConfig
+	logger *slog.Logger
 }
 
 // NewMinIOClient membuat MinIOClient baru.

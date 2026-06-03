@@ -21,10 +21,10 @@ import (
 //
 // All methods take context.Context and propagate trace/tenant/user per convention.
 type Service struct {
-	engine     *Engine
-	repo       Repository
+	engine      *Engine
+	repo        Repository
 	auditWriter *audit.Writer
-	logger     *slog.Logger
+	logger      *slog.Logger
 }
 
 // NewService constructs a Service.
@@ -52,11 +52,11 @@ type SubmitInput struct {
 // Submit transitions DRAFT → PENDING_REVIEW.
 func (s *Service) Submit(ctx context.Context, in SubmitInput) (*ActionResult, error) {
 	return s.performTransition(ctx, transitionParams{
-		entityType:   in.EntityType,
-		entityID:     in.EntityID,
-		action:       ActionSubmit,
-		request:      in.Request,
-		stepUpFresh:  in.StepUpFresh,
+		entityType:  in.EntityType,
+		entityID:    in.EntityID,
+		action:      ActionSubmit,
+		request:     in.Request,
+		stepUpFresh: in.StepUpFresh,
 	})
 }
 
@@ -71,11 +71,11 @@ type ReviewInput struct {
 // Review transitions PENDING_REVIEW → PENDING_APPROVAL.
 func (s *Service) Review(ctx context.Context, in ReviewInput) (*ActionResult, error) {
 	return s.performTransition(ctx, transitionParams{
-		entityType:   in.EntityType,
-		entityID:     in.EntityID,
-		action:       ActionReview,
-		request:      in.Request,
-		stepUpFresh:  in.StepUpFresh,
+		entityType:  in.EntityType,
+		entityID:    in.EntityID,
+		action:      ActionReview,
+		request:     in.Request,
+		stepUpFresh: in.StepUpFresh,
 	})
 }
 
@@ -90,11 +90,11 @@ type ApproveInput struct {
 // Approve transitions PENDING_APPROVAL → APPROVED (4-eyes) or PENDING_APPROVAL_2 (6-eyes).
 func (s *Service) Approve(ctx context.Context, in ApproveInput) (*ActionResult, error) {
 	return s.performTransition(ctx, transitionParams{
-		entityType:   in.EntityType,
-		entityID:     in.EntityID,
-		action:       ActionApprove,
-		request:      in.Request,
-		stepUpFresh:  in.StepUpFresh,
+		entityType:  in.EntityType,
+		entityID:    in.EntityID,
+		action:      ActionApprove,
+		request:     in.Request,
+		stepUpFresh: in.StepUpFresh,
 	})
 }
 
@@ -109,11 +109,11 @@ type Approve2Input struct {
 // Approve2 transitions PENDING_APPROVAL_2 → APPROVED (6-eyes only).
 func (s *Service) Approve2(ctx context.Context, in Approve2Input) (*ActionResult, error) {
 	return s.performTransition(ctx, transitionParams{
-		entityType:   in.EntityType,
-		entityID:     in.EntityID,
-		action:       ActionApprove2,
-		request:      in.Request,
-		stepUpFresh:  in.StepUpFresh,
+		entityType:  in.EntityType,
+		entityID:    in.EntityID,
+		action:      ActionApprove2,
+		request:     in.Request,
+		stepUpFresh: in.StepUpFresh,
 	})
 }
 
@@ -243,17 +243,17 @@ func (s *Service) performTransition(ctx context.Context, p transitionParams) (*A
 		comment = p.request.Comment
 	}
 	sigRecord := &SignatureRecord{
-		ID:             uuid.New(),
-		WorkflowID:     inst.ID,
-		Action:         p.action,
-		UserID:         userUUID,
-		Username:       username,
-		RoleAtTime:     roleAtTime,
-		SignedAt:       now,
-		SignatureHash:  result.SignatureHash,
+		ID:              uuid.New(),
+		WorkflowID:      inst.ID,
+		Action:          p.action,
+		UserID:          userUUID,
+		Username:        username,
+		RoleAtTime:      roleAtTime,
+		SignedAt:        now,
+		SignatureHash:   result.SignatureHash,
 		SignatureMethod: result.SignatureMethod,
-		Comment:        comment,
-		TenantID:       tenantID,
+		Comment:         comment,
+		TenantID:        tenantID,
 	}
 
 	// Execute everything in one transaction.
@@ -264,9 +264,9 @@ func (s *Service) performTransition(ctx context.Context, p transitionParams) (*A
 
 	// For InMemoryRepository, tx is nil — that's fine; UpdateState/InsertSignature accept nil tx.
 	defer func() {
-		if tx != nil {
-			if err != nil {
-				_ = tx.Rollback()
+		if tx != nil && err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil {
+				slog.Default().ErrorContext(ctx, "workflow service: tx rollback failed", "error", rbErr)
 			}
 		}
 	}()
@@ -310,17 +310,17 @@ func (s *Service) performTransition(ctx context.Context, p transitionParams) (*A
 	}
 
 	return &ActionResult{
-		EntityID:       inst.EntityID,
-		EntityType:     inst.EntityType,
-		PreviousState:  result.PreviousState,
-		CurrentState:   result.NewState,
-		Action:         p.action,
-		PerformedBy:    username,
-		PerformedAt:    now,
-		SignatureHash:  result.SignatureHash,
+		EntityID:        inst.EntityID,
+		EntityType:      inst.EntityType,
+		PreviousState:   result.PreviousState,
+		CurrentState:    result.NewState,
+		Action:          p.action,
+		PerformedBy:     username,
+		PerformedAt:     now,
+		SignatureHash:   result.SignatureHash,
 		SignatureMethod: result.SignatureMethod,
-		NextActions:    result.NextActions,
-		WorkflowEyes:   inst.Eyes,
+		NextActions:     result.NextActions,
+		WorkflowEyes:    inst.Eyes,
 	}, nil
 }
 
@@ -353,7 +353,7 @@ func (s *Service) applyActorToUpdate(u *StateUpdate, action Action, userID uuid.
 func (r *RejectRequest) toActionRequest() ActionRequest {
 	return ActionRequest{
 		Comment:         &r.Comment,
-		SignatureMethod:  r.SignatureMethod,
+		SignatureMethod: r.SignatureMethod,
 		RowVersion:      r.RowVersion,
 	}
 }

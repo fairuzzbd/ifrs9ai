@@ -63,7 +63,7 @@ func (h *Handler) Submit(c *gin.Context) {
 
 	req := ActionRequest{
 		Comment:         body.Comment,
-		SignatureMethod:  parseSignatureMethod(body.SignatureMethod),
+		SignatureMethod: parseSignatureMethod(body.SignatureMethod),
 		RowVersion:      body.RowVersion,
 	}
 
@@ -98,7 +98,7 @@ func (h *Handler) Review(c *gin.Context) {
 
 	req := ActionRequest{
 		Comment:         body.Comment,
-		SignatureMethod:  parseSignatureMethod(body.SignatureMethod),
+		SignatureMethod: parseSignatureMethod(body.SignatureMethod),
 		RowVersion:      body.RowVersion,
 	}
 
@@ -135,7 +135,7 @@ func (h *Handler) Approve(c *gin.Context) {
 
 	req := ActionRequest{
 		Comment:         body.Comment,
-		SignatureMethod:  parseSignatureMethod(body.SignatureMethod),
+		SignatureMethod: parseSignatureMethod(body.SignatureMethod),
 		RowVersion:      body.RowVersion,
 	}
 
@@ -170,7 +170,7 @@ func (h *Handler) Approve2(c *gin.Context) {
 
 	req := ActionRequest{
 		Comment:         body.Comment,
-		SignatureMethod:  parseSignatureMethod(body.SignatureMethod),
+		SignatureMethod: parseSignatureMethod(body.SignatureMethod),
 		RowVersion:      body.RowVersion,
 	}
 
@@ -223,7 +223,7 @@ func (h *Handler) Reject(c *gin.Context) {
 
 	rejectReq := RejectRequest{
 		Comment:         *body.Comment,
-		SignatureMethod:  parseSignatureMethod(body.SignatureMethod),
+		SignatureMethod: parseSignatureMethod(body.SignatureMethod),
 		RowVersion:      body.RowVersion,
 	}
 
@@ -266,27 +266,27 @@ func (h *Handler) GetStatus(c *gin.Context) {
 
 type workflowActionBody struct {
 	Comment         *string `json:"comment"`
-	SignatureMethod  string  `json:"signatureMethod"`
+	SignatureMethod string  `json:"signatureMethod"`
 	RowVersion      *int64  `json:"rowVersion"`
 }
 
 type workflowRejectBody struct {
 	Comment         *string `json:"comment"`
-	SignatureMethod  string  `json:"signatureMethod"`
+	SignatureMethod string  `json:"signatureMethod"`
 	RowVersion      *int64  `json:"rowVersion"`
 }
 
 type actionResultJSON struct {
-	EntityID        string   `json:"entityId"`
-	EntityType      string   `json:"entityType"`
-	PreviousState   string   `json:"previousState"`
-	CurrentState    string   `json:"currentState"`
-	Action          string   `json:"action"`
-	PerformedBy     string   `json:"performedBy"`
-	PerformedAt     string   `json:"performedAt"`
-	Signature       sigJSON  `json:"signature"`
-	NextActions     []string `json:"nextActions"`
-	WorkflowEyes    int      `json:"workflowEyes"`
+	EntityID      string   `json:"entityId"`
+	EntityType    string   `json:"entityType"`
+	PreviousState string   `json:"previousState"`
+	CurrentState  string   `json:"currentState"`
+	Action        string   `json:"action"`
+	PerformedBy   string   `json:"performedBy"`
+	PerformedAt   string   `json:"performedAt"`
+	Signature     sigJSON  `json:"signature"`
+	NextActions   []string `json:"nextActions"`
+	WorkflowEyes  int      `json:"workflowEyes"`
 }
 
 type sigJSON struct {
@@ -296,29 +296,29 @@ type sigJSON struct {
 
 func toActionResultJSON(r *ActionResult) actionResultJSON {
 	return actionResultJSON{
-		EntityID:       r.EntityID.String(),
-		EntityType:     r.EntityType,
-		PreviousState:  string(r.PreviousState),
-		CurrentState:   string(r.CurrentState),
-		Action:         string(r.Action),
-		PerformedBy:    r.PerformedBy,
-		PerformedAt:    r.PerformedAt.Format("2006-01-02T15:04:05Z07:00"),
-		Signature:      sigJSON{SignatureHash: r.SignatureHash, SignatureMethod: string(r.SignatureMethod)},
-		NextActions:    r.NextActions,
-		WorkflowEyes:   r.WorkflowEyes,
+		EntityID:      r.EntityID.String(),
+		EntityType:    r.EntityType,
+		PreviousState: string(r.PreviousState),
+		CurrentState:  string(r.CurrentState),
+		Action:        string(r.Action),
+		PerformedBy:   r.PerformedBy,
+		PerformedAt:   r.PerformedAt.Format("2006-01-02T15:04:05Z07:00"),
+		Signature:     sigJSON{SignatureHash: r.SignatureHash, SignatureMethod: string(r.SignatureMethod)},
+		NextActions:   r.NextActions,
+		WorkflowEyes:  r.WorkflowEyes,
 	}
 }
 
 type statusResponseJSON struct {
-	EntityID     string              `json:"entityId"`
-	EntityType   string              `json:"entityType"`
-	CurrentState string              `json:"currentState"`
-	WorkflowEyes int                 `json:"workflowEyes"`
-	MakerID      *string             `json:"makerId,omitempty"`
-	ReviewerID   *string             `json:"reviewerId,omitempty"`
-	Approver1ID  *string             `json:"approverId,omitempty"`
-	Approver2ID  *string             `json:"approver2Id,omitempty"`
-	History      []sigRecordJSON     `json:"history"`
+	EntityID     string          `json:"entityId"`
+	EntityType   string          `json:"entityType"`
+	CurrentState string          `json:"currentState"`
+	WorkflowEyes int             `json:"workflowEyes"`
+	MakerID      *string         `json:"makerId,omitempty"`
+	ReviewerID   *string         `json:"reviewerId,omitempty"`
+	Approver1ID  *string         `json:"approverId,omitempty"`
+	Approver2ID  *string         `json:"approver2Id,omitempty"`
+	History      []sigRecordJSON `json:"history"`
 }
 
 type sigRecordJSON struct {
@@ -334,7 +334,8 @@ type sigRecordJSON struct {
 
 func toStatusResponseJSON(r *StatusResponse) statusResponseJSON {
 	history := make([]sigRecordJSON, 0, len(r.History))
-	for _, s := range r.History {
+	for i := range r.History {
+		s := &r.History[i]
 		history = append(history, sigRecordJSON{
 			Action:          string(s.Action),
 			UserID:          s.UserID.String(),
@@ -419,7 +420,7 @@ func permissionFor(resource, action string) string {
 }
 
 // normalizeEntityType converts a kebab-case resource param to upper snake_case
-// entity type used in WorkflowConfig lookups.
+// entity type used in Config lookups.
 // "ecl-parameter" → "ECL_PARAMETER"
 func normalizeEntityType(resource string) string {
 	return strings.ToUpper(strings.ReplaceAll(resource, "-", "_"))

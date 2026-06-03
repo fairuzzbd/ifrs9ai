@@ -24,16 +24,16 @@ type SortSpec struct {
 type FilterOp string
 
 const (
-	FilterOpEq       FilterOp = "eq"
-	FilterOpNe       FilterOp = "ne"
-	FilterOpGt       FilterOp = "gt"
-	FilterOpGte      FilterOp = "gte"
-	FilterOpLt       FilterOp = "lt"
-	FilterOpLte      FilterOp = "lte"
-	FilterOpLike     FilterOp = "like"
-	FilterOpIsNull   FilterOp = "is_null"
-	FilterOpNotNull  FilterOp = "is_not_null"
-	FilterOpIn       FilterOp = "in"
+	FilterOpEq      FilterOp = "eq"
+	FilterOpNe      FilterOp = "ne"
+	FilterOpGt      FilterOp = "gt"
+	FilterOpGte     FilterOp = "gte"
+	FilterOpLt      FilterOp = "lt"
+	FilterOpLte     FilterOp = "lte"
+	FilterOpLike    FilterOp = "like"
+	FilterOpIsNull  FilterOp = "is_null"
+	FilterOpNotNull FilterOp = "is_not_null"
+	FilterOpIn      FilterOp = "in"
 )
 
 // FilterSpec adalah satu filter kondisi.
@@ -227,7 +227,7 @@ func (q Query) ToSQL(tableAlias string) (whereClause string, args []any, orderBy
 	whereClause = strings.Join(conditions, " AND ")
 
 	// ORDER BY — kolom sudah divalidasi di Parse.
-	var orderParts []string
+	orderParts := make([]string, 0, len(q.Sort))
 	for _, s := range q.Sort {
 		dir := "ASC"
 		if s.Dir == "desc" {

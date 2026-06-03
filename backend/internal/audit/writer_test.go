@@ -83,9 +83,9 @@ func TestComputeHash_HashChainIntegrity(t *testing.T) {
 // TestBuildCanonicalJSON_SortedKeys verifies keys are sorted for determinism.
 func TestBuildCanonicalJSON_SortedKeys(t *testing.T) {
 	m := map[string]any{
-		"z_key":   "z_val",
-		"a_key":   "a_val",
-		"m_key":   "m_val",
+		"z_key": "z_val",
+		"a_key": "a_val",
+		"m_key": "m_val",
 	}
 	result := audit.BuildCanonicalJSON(m)
 
@@ -107,9 +107,9 @@ func TestBuildCanonicalJSON_SortedKeys(t *testing.T) {
 // TestBuildCanonicalJSON_Deterministic verifies same input → same output.
 func TestBuildCanonicalJSON_Deterministic(t *testing.T) {
 	m := map[string]any{
-		"action":   "CREATE",
-		"tenant":   "TUGURE",
-		"entity":   "mst.instrumen",
+		"action": "CREATE",
+		"tenant": "TUGURE",
+		"entity": "mst.instrumen",
 	}
 	r1 := audit.BuildCanonicalJSON(m)
 	r2 := audit.BuildCanonicalJSON(m)

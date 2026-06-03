@@ -2,7 +2,7 @@
 // state machine per workflow-state-machine.md §1-5.
 //
 // Design contract:
-//   - Engine reads WorkflowConfig from sys.config (no if-else per entity in engine code).
+//   - Engine reads Config from sys.config (no if-else per entity in engine code).
 //   - 4-eyes: DRAFT→PENDING_REVIEW→PENDING_APPROVAL→APPROVED|REJECTED.
 //   - 6-eyes: DRAFT→PENDING_REVIEW→PENDING_APPROVAL→PENDING_APPROVAL_2→APPROVED|REJECTED.
 //   - SoD: maker≠reviewer≠approver≠approver2 (DEC-017). Enforced by service layer.
@@ -92,9 +92,9 @@ type Instance struct {
 	TenantID          string
 }
 
-// Participants builds WorkflowParticipants for SoD checks.
-func (i *Instance) Participants() WorkflowParticipants {
-	p := WorkflowParticipants{
+// Participants builds Participants for SoD checks.
+func (i *Instance) Participants() Participants {
+	p := Participants{
 		MakerID: i.MakerID.String(),
 	}
 	if i.ReviewerID != nil {
@@ -109,11 +109,11 @@ func (i *Instance) Participants() WorkflowParticipants {
 	return p
 }
 
-// WorkflowParticipants mirrors auth.WorkflowParticipants — defined here to avoid
+// Participants mirrors auth.Participants — defined here to avoid
 // circular import between workflow ↔ auth. Converter fills it from Instance.
-type WorkflowParticipants struct {
-	MakerID    string
-	ReviewerID string
+type Participants struct {
+	MakerID     string
+	ReviewerID  string
 	ApproverID  string
 	Approver2ID string
 }
@@ -128,7 +128,7 @@ type SignatureRecord struct {
 	RoleAtTime      string
 	SignedAt        time.Time
 	SignatureHash   string
-	SignatureMethod  SignatureMethod
+	SignatureMethod SignatureMethod
 	Comment         *string
 	TenantID        string
 }
@@ -136,30 +136,30 @@ type SignatureRecord struct {
 // ActionRequest is the parsed + validated request body for all workflow actions.
 type ActionRequest struct {
 	Comment         *string
-	SignatureMethod  SignatureMethod
+	SignatureMethod SignatureMethod
 	RowVersion      *int64
 }
 
 // RejectRequest adds the mandatory comment constraint.
 type RejectRequest struct {
 	Comment         string // minLength 10, required
-	SignatureMethod  SignatureMethod
+	SignatureMethod SignatureMethod
 	RowVersion      *int64
 }
 
 // ActionResult is the data portion of a WorkflowActionResponse.
 type ActionResult struct {
-	EntityID       uuid.UUID
-	EntityType     string
-	PreviousState  State
-	CurrentState   State
-	Action         Action
-	PerformedBy    string // preferred_username
-	PerformedAt    time.Time
-	SignatureHash  string
+	EntityID        uuid.UUID
+	EntityType      string
+	PreviousState   State
+	CurrentState    State
+	Action          Action
+	PerformedBy     string // preferred_username
+	PerformedAt     time.Time
+	SignatureHash   string
 	SignatureMethod SignatureMethod
-	NextActions    []string
-	WorkflowEyes   int
+	NextActions     []string
+	WorkflowEyes    int
 }
 
 // StatusResponse is the data portion of a WorkflowStatusResponse.

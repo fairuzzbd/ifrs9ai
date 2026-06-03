@@ -74,23 +74,23 @@ const (
 // Key harus PascalCase agar cocok dengan {{.Key}} di text/template.
 type TemplateVars map[string]string
 
-// NotificationTemplate adalah record dari sys.notification_template.
-type NotificationTemplate struct {
-	ID             string
-	TemplateCode   TemplateCode
-	Channel        Channel
+// Template adalah record dari sys.notification_template.
+type Template struct {
+	ID              string
+	TemplateCode    TemplateCode
+	Channel         Channel
 	SubjectTemplate string
-	BodyTemplate   string
-	Language       string
-	AktifFlag      bool
-	UpdatedAt      *time.Time
+	BodyTemplate    string
+	Language        string
+	AktifFlag       bool
+	UpdatedAt       *time.Time
 }
 
 // TemplateStore memuat template dari sys.notification_template atau fallback in-memory.
 type TemplateStore interface {
 	// Load memuat template untuk code + channel + language.
 	// Mengembalikan ErrTemplateNotFound jika tidak ditemukan.
-	Load(ctx context.Context, code TemplateCode, channel Channel, lang string) (*NotificationTemplate, error)
+	Load(ctx context.Context, code TemplateCode, channel Channel, lang string) (*Template, error)
 }
 
 // ErrTemplateNotFound adalah error ketika template tidak ditemukan di store.
@@ -107,12 +107,12 @@ func NewDBTemplateStore(db *sql.DB) *DBTemplateStore {
 }
 
 // Load mengambil template dari sys.notification_template.
-func (s *DBTemplateStore) Load(ctx context.Context, code TemplateCode, channel Channel, lang string) (*NotificationTemplate, error) {
+func (s *DBTemplateStore) Load(ctx context.Context, code TemplateCode, channel Channel, lang string) (*Template, error) {
 	if s.db == nil {
 		return nil, ErrTemplateNotFound
 	}
 
-	var t NotificationTemplate
+	var t Template
 	var subject sql.NullString
 	var updatedAt sql.NullTime
 
@@ -145,7 +145,7 @@ func (s *DBTemplateStore) Load(ctx context.Context, code TemplateCode, channel C
 // InMemoryTemplateStore adalah fallback template store untuk dev/test.
 // Berisi template default yang mencerminkan ux-patterns.md §2.2 (pesan spesifik).
 type InMemoryTemplateStore struct {
-	templates map[templateKey]*NotificationTemplate
+	templates map[templateKey]*Template
 }
 
 type templateKey struct {
@@ -157,7 +157,7 @@ type templateKey struct {
 // NewInMemoryTemplateStore membuat store dengan template bawaan (dev/test safe).
 func NewInMemoryTemplateStore() *InMemoryTemplateStore {
 	store := &InMemoryTemplateStore{
-		templates: make(map[templateKey]*NotificationTemplate),
+		templates: make(map[templateKey]*Template),
 	}
 	store.seed()
 	return store
@@ -166,7 +166,7 @@ func NewInMemoryTemplateStore() *InMemoryTemplateStore {
 // seed mengisi template bawaan. Pesan SPESIFIK sesuai ux-patterns.md §2.2.
 func (s *InMemoryTemplateStore) seed() {
 	add := func(code TemplateCode, channel Channel, subject, body string) {
-		s.templates[templateKey{code, channel, "id-ID"}] = &NotificationTemplate{
+		s.templates[templateKey{code, channel, "id-ID"}] = &Template{
 			TemplateCode:    code,
 			Channel:         channel,
 			SubjectTemplate: subject,
@@ -313,7 +313,7 @@ Sistem BLIPS IFRS9`,
 }
 
 // Load mengambil template dari map in-memory.
-func (s *InMemoryTemplateStore) Load(_ context.Context, code TemplateCode, channel Channel, lang string) (*NotificationTemplate, error) {
+func (s *InMemoryTemplateStore) Load(_ context.Context, code TemplateCode, channel Channel, lang string) (*Template, error) {
 	t, ok := s.templates[templateKey{code, channel, lang}]
 	if !ok {
 		return nil, fmt.Errorf("%w: code=%s channel=%s lang=%s", ErrTemplateNotFound, code, channel, lang)
@@ -324,7 +324,7 @@ func (s *InMemoryTemplateStore) Load(_ context.Context, code TemplateCode, chann
 // RenderTemplate merender template dengan variabel yang diberikan.
 // Mengembalikan subject dan body yang sudah dirender.
 // Error bila template parsing gagal atau variabel tidak lengkap.
-func RenderTemplate(tmpl *NotificationTemplate, vars TemplateVars) (subject, body string, err error) {
+func RenderTemplate(tmpl *Template, vars TemplateVars) (subject, body string, err error) {
 	body, err = renderText(tmpl.BodyTemplate, vars)
 	if err != nil {
 		return "", "", fmt.Errorf("notification: render body template %s: %w", tmpl.TemplateCode, err)

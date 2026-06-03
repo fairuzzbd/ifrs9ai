@@ -265,7 +265,12 @@ func buildCanonicalJSON(m map[string]any) string {
 		sorted[k] = m[k]
 	}
 
-	b, _ := json.Marshal(sorted)
+	b, err := json.Marshal(sorted)
+	if err != nil {
+		// buildCanonicalJSON is used only with map[string]any of primitive scalars
+		// assembled in-package; marshal failure here is a programmer error.
+		panic(fmt.Sprintf("buildCanonicalJSON: json.Marshal: %v", err))
+	}
 	return string(b)
 }
 

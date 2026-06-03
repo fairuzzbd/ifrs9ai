@@ -72,7 +72,7 @@ type downloadResponseJSON struct {
 //   - file: file binary (required)
 //   - entity_type: mis. "mst.instrumen" (required)
 //   - entity_id: UUID (required)
-//   - category: DocumentCategory (required)
+//   - category: Category (required)
 //   - description: string (optional)
 //
 // Headers wajib (dari middleware): Idempotency-Key, Authorization: Bearer
@@ -159,7 +159,7 @@ func (h *Handler) Upload(c *gin.Context) {
 		FileSizeBytes:    fileHeader.Size,
 		EntityType:       req.EntityType,
 		EntityID:         entityID,
-		Category:         DocumentCategory(req.Category),
+		Category:         Category(req.Category),
 		Description:      desc,
 		UploadedByUserID: userID,
 	}

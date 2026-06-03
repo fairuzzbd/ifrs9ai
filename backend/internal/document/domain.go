@@ -38,9 +38,9 @@ type Document struct {
 	VirusScanEngine     *string
 	EntityType          string
 	EntityID            uuid.UUID
-	DocumentCategory    DocumentCategory
+	Category            Category
 	DocumentDescription *string
-	Status              DocumentStatus
+	Status              Status
 	CreatedAt           time.Time
 	CreatedBy           uuid.UUID
 	UpdatedAt           time.Time
@@ -65,32 +65,32 @@ const (
 	VirusScanScanError VirusScanStatus = "SCAN_ERROR"
 )
 
-// DocumentStatus adalah status lifecycle dokumen.
-type DocumentStatus string
+// Status adalah status lifecycle dokumen.
+type Status string
 
 const (
 	// DocumentStatusActive dokumen aktif.
-	DocumentStatusActive DocumentStatus = "ACTIVE"
+	DocumentStatusActive Status = "ACTIVE"
 	// DocumentStatusSuperseded dokumen sudah digantikan versi baru.
-	DocumentStatusSuperseded DocumentStatus = "SUPERSEDED"
+	DocumentStatusSuperseded Status = "SUPERSEDED"
 	// DocumentStatusDeleted dokumen soft-deleted.
-	DocumentStatusDeleted DocumentStatus = "DELETED"
+	DocumentStatusDeleted Status = "DELETED"
 )
 
-// DocumentCategory adalah kategori dokumen sesuai constraint di migration 0006.
-type DocumentCategory string
+// Category adalah kategori dokumen sesuai constraint di migration 0006.
+type Category string
 
 const (
-	DocCategoryBuktiTransaksi  DocumentCategory = "BUKTI_TRANSAKSI"
-	DocCategorySPPIWorksheet   DocumentCategory = "SPPI_WORKSHEET"
-	DocCategoryBMAssessment    DocumentCategory = "BM_ASSESSMENT"
-	DocCategoryECLParameter    DocumentCategory = "ECL_PARAMETER"
-	DocCategoryEIRAmortisasi   DocumentCategory = "EIR_AMORTISASI"
-	DocCategoryRatingReport    DocumentCategory = "RATING_REPORT"
-	DocCategoryKontrak         DocumentCategory = "KONTRAK"
-	DocCategoryKonfirmasiDeal  DocumentCategory = "KONFIRMASI_DEAL"
-	DocCategoryRekapLaporan    DocumentCategory = "REKAP_LAPORAN"
-	DocCategoryLainLain        DocumentCategory = "LAIN_LAIN"
+	DocCategoryBuktiTransaksi Category = "BUKTI_TRANSAKSI"
+	DocCategorySPPIWorksheet  Category = "SPPI_WORKSHEET"
+	DocCategoryBMAssessment   Category = "BM_ASSESSMENT"
+	DocCategoryECLParameter   Category = "ECL_PARAMETER"
+	DocCategoryEIRAmortisasi  Category = "EIR_AMORTISASI"
+	DocCategoryRatingReport   Category = "RATING_REPORT"
+	DocCategoryKontrak        Category = "KONTRAK"
+	DocCategoryKonfirmasiDeal Category = "KONFIRMASI_DEAL"
+	DocCategoryRekapLaporan   Category = "REKAP_LAPORAN"
+	DocCategoryLainLain       Category = "LAIN_LAIN"
 )
 
 // DefaultBucket adalah bucket MinIO default untuk dokumen BLIPS.
@@ -115,7 +115,7 @@ type UploadInput struct {
 	// EntityID adalah UUID entitas.
 	EntityID uuid.UUID
 	// Category adalah kategori dokumen.
-	Category DocumentCategory
+	Category Category
 	// Description adalah deskripsi opsional.
 	Description *string
 	// UploadedByUserID adalah UUID user yang mengupload.
@@ -126,17 +126,17 @@ type UploadInput struct {
 
 // UploadResult adalah hasil sukses upload.
 type UploadResult struct {
-	DocumentID  uuid.UUID
-	DocRefKode  string
-	ObjectKey   string
-	Bucket      string
-	SHA256Hash  string
+	DocumentID      uuid.UUID
+	DocRefKode      string
+	ObjectKey       string
+	Bucket          string
+	SHA256Hash      string
 	VirusScanStatus VirusScanStatus
 }
 
 // DownloadURLResult adalah hasil generate presigned download URL.
 type DownloadURLResult struct {
-	DocumentID  uuid.UUID
+	DocumentID   uuid.UUID
 	PresignedURL string
-	ExpiresAt   time.Time
+	ExpiresAt    time.Time
 }

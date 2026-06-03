@@ -149,26 +149,26 @@ func (s *Service) Upload(ctx context.Context, in UploadInput, reader io.Reader) 
 	}
 
 	doc := &Document{
-		ID:               docID,
-		DocRefKode:       docRefKode,
-		Bucket:           DefaultBucket,
-		ObjectKey:        objectKey,
-		FilenameOriginal: sanitizeFilename(in.Filename),
-		MimeType:         in.MimeType,
-		FileSizeBytes:    actualSize,
-		SHA256Hash:       sha256Hash,
-		VirusScanStatus: virusScanStatus,
-		EntityType:       in.EntityType,
-		EntityID:         in.EntityID,
-		DocumentCategory: in.Category,
+		ID:                  docID,
+		DocRefKode:          docRefKode,
+		Bucket:              DefaultBucket,
+		ObjectKey:           objectKey,
+		FilenameOriginal:    sanitizeFilename(in.Filename),
+		MimeType:            in.MimeType,
+		FileSizeBytes:       actualSize,
+		SHA256Hash:          sha256Hash,
+		VirusScanStatus:     virusScanStatus,
+		EntityType:          in.EntityType,
+		EntityID:            in.EntityID,
+		Category:            in.Category,
 		DocumentDescription: in.Description,
-		Status:           DocumentStatusActive,
-		CreatedAt:        now,
-		CreatedBy:        in.UploadedByUserID,
-		UpdatedAt:        now,
-		UpdatedBy:        in.UploadedByUserID,
-		RowVersion:       1,
-		TenantID:         tenantID,
+		Status:              DocumentStatusActive,
+		CreatedAt:           now,
+		CreatedBy:           in.UploadedByUserID,
+		UpdatedAt:           now,
+		UpdatedBy:           in.UploadedByUserID,
+		RowVersion:          1,
+		TenantID:            tenantID,
 	}
 
 	// DB transaction: insert + audit.
@@ -178,7 +178,9 @@ func (s *Service) Upload(ctx context.Context, in UploadInput, reader io.Reader) 
 	}
 	defer func() {
 		if err != nil {
-			_ = tx.Rollback()
+			if rbErr := tx.Rollback(); rbErr != nil {
+				slog.Default().ErrorContext(ctx, "document service: tx rollback failed", "error", rbErr)
+			}
 		}
 	}()
 
@@ -194,15 +196,15 @@ func (s *Service) Upload(ctx context.Context, in UploadInput, reader io.Reader) 
 			EntityID:    docID,
 			ActorUserID: in.UploadedByUserID.String(),
 			After: map[string]any{
-				"id":               docID.String(),
-				"doc_ref_kode":     docRefKode,
-				"filename":         doc.FilenameOriginal,
-				"sha256_hash":      sha256Hash,
-				"entity_type":      in.EntityType,
-				"entity_id":        in.EntityID.String(),
-				"category":         string(in.Category),
+				"id":                docID.String(),
+				"doc_ref_kode":      docRefKode,
+				"filename":          doc.FilenameOriginal,
+				"sha256_hash":       sha256Hash,
+				"entity_type":       in.EntityType,
+				"entity_id":         in.EntityID.String(),
+				"category":          string(in.Category),
 				"virus_scan_status": string(virusScanStatus),
-				"size_bytes":       actualSize,
+				"size_bytes":        actualSize,
 			},
 		})
 		if auditErr != nil {
@@ -333,8 +335,8 @@ func validateUploadInput(in UploadInput) error {
 	return nil
 }
 
-// isValidCategory memvalidasi DocumentCategory.
-func isValidCategory(cat DocumentCategory) bool {
+// isValidCategory memvalidasi Category.
+func isValidCategory(cat Category) bool {
 	switch cat {
 	case DocCategoryBuktiTransaksi, DocCategorySPPIWorksheet, DocCategoryBMAssessment,
 		DocCategoryECLParameter, DocCategoryEIRAmortisasi, DocCategoryRatingReport,

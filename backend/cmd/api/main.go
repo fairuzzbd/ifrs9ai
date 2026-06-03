@@ -25,8 +25,8 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/redis/go-redis/v9"
 	_ "github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
 
 	"blips-ifrs9.tugu-re.com/internal/audit"
 	"blips-ifrs9.tugu-re.com/internal/auth"
@@ -195,7 +195,9 @@ func main() {
 	}
 
 	// Asynq client untuk enqueue (opsional — nil = sync mode di dev).
-	var asynqClient interface{ EnqueueContext(ctx interface{}, task interface{}, opts ...interface{}) (interface{}, error) }
+	var asynqClient interface {
+		EnqueueContext(ctx interface{}, task interface{}, opts ...interface{}) (interface{}, error)
+	}
 	_ = asynqClient // Phase 2: wire asynq.NewClient(asynq.RedisClientOpt{Addr: cfg.RedisURL})
 
 	notifSvc := notification.NewService(
@@ -257,8 +259,9 @@ func main() {
 	}
 
 	// Graceful shutdown pada SIGINT/SIGTERM.
+	// stop and cancel are called explicitly on every exit path (no defer) to avoid
+	// gocritic exitAfterDefer with log.Fatalf.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	go func() {
 		log.Printf("blips-api v%s starting on :%s (env=%s)", version, cfg.ServerPort, cfg.AppEnv)
@@ -268,14 +271,16 @@ func main() {
 	}()
 
 	<-ctx.Done()
+	stop()
 	log.Println("shutdown signal received, draining connections...")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
+		cancel()
 		log.Fatalf("graceful shutdown failed: %v", err)
 	}
+	cancel()
 	log.Println("server stopped cleanly")
 }
 

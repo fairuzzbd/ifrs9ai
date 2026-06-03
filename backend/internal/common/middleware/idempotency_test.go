@@ -1,9 +1,9 @@
 package middleware_test
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -142,12 +142,14 @@ func TestComputeRequestHash_UsesExpectedAlgorithm(t *testing.T) {
 	h.Write(body)
 
 	expected := h.Sum(nil)
-	expectedHex := bytes.Equal(expected, expected) // just a bool check
-	_ = expectedHex
+	expectedHex := hex.EncodeToString(expected)
 
 	got := middleware.ComputeRequestHashHex(method, path, body)
 	if len(got) != 64 { // SHA-256 = 32 bytes = 64 hex chars
 		t.Errorf("expected 64 hex chars (SHA-256), got %d chars", len(got))
+	}
+	if got != expectedHex {
+		t.Errorf("hash mismatch: got %q, want %q", got, expectedHex)
 	}
 }
 

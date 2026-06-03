@@ -1,10 +1,10 @@
 // Package auth menyediakan JWT verification, RBAC permission check, dan SoD enforcement.
 //
 // Prinsip keamanan utama:
-// 1. Permission check SELALU pakai {entity}.{action} string dari JWT claims.permissions[].
-//    DILARANG KERAS role-string comparison (if role == "CFO") — red flag security-baseline.
-// 2. SoD (Segregation of Duties): maker ≠ reviewer ≠ approver, enforced di service layer.
-// 3. Step-up MFA: action DEC-027 re-prompt jika stepup_verified_at > 5 menit.
+//  1. Permission check SELALU pakai {entity}.{action} string dari JWT claims.permissions[].
+//     DILARANG KERAS role-string comparison (if role == "CFO") — red flag security-baseline.
+//  2. SoD (Segregation of Duties): maker ≠ reviewer ≠ approver, enforced di service layer.
+//  3. Step-up MFA: action DEC-027 re-prompt jika stepup_verified_at > 5 menit.
 package auth
 
 import (

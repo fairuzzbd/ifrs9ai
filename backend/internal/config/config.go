@@ -7,6 +7,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/joho/godotenv"
@@ -70,7 +71,9 @@ type Config struct {
 // Tidak ada hardcoded credentials — lihat DEC-028.
 func Load() *Config {
 	// Best-effort: .env opsional, abaikan error bila file tidak tersedia.
-	_ = godotenv.Load()
+	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
+		slog.Default().Debug("godotenv.Load: skipped", "reason", err.Error())
+	}
 
 	appEnv := getenv("APP_ENV", "development")
 

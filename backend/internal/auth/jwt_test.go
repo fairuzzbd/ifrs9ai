@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
-	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -328,15 +327,6 @@ func TestClaims_IsNotYetValid(t *testing.T) {
 	if zero.IsNotYetValid() {
 		t.Error("zero Nbf should not trigger not-yet-valid")
 	}
-}
-
-// jsonRoundTrip marshals and unmarshals to simulate what VerifyToken does internally.
-func jsonRoundTrip(t *testing.T, v any) map[string]any {
-	t.Helper()
-	b, _ := json.Marshal(v)
-	var out map[string]any
-	json.Unmarshal(b, &out)
-	return out
 }
 
 // TestRequireStepUp_WithoutStepup verifies error when no step-up in context.

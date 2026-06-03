@@ -113,7 +113,7 @@ func TestDocument_UploadAndVerifySHA256(t *testing.T) {
 		VirusScanStatus:  document.VirusScanPending,
 		EntityType:       "mst.instrumen",
 		EntityID:         uuid.New(),
-		DocumentCategory: document.DocCategoryBuktiTransaksi,
+		Category: document.DocCategoryBuktiTransaksi,
 		Status:           document.DocumentStatusActive,
 		CreatedAt:        now,
 		CreatedBy:        uploaderID,
@@ -170,8 +170,8 @@ func TestDocument_ObjectKey_PathTraversalRejected(t *testing.T) {
 	infra := Setup(t)
 
 	minioCfg := document.MinIOConfig{
-		Endpoint:  infra.MinioCfg.Endpoint,
-		AccessKeyID: infra.MinioCfg.AccessKey,
+		Endpoint:        infra.MinioCfg.Endpoint,
+		AccessKeyID:     infra.MinioCfg.AccessKey,
 		SecretAccessKey: infra.MinioCfg.SecretKey,
 	}
 	mc, err := document.NewMinIOClient(minioCfg, nil)
@@ -224,10 +224,10 @@ func TestDocument_SoftDelete(t *testing.T) {
 		FilenameOriginal: "softdel.txt", MimeType: "text/plain",
 		FileSizeBytes: 10, SHA256Hash: hex.EncodeToString(make([]byte, 32)),
 		VirusScanStatus: document.VirusScanPending,
-		EntityType: "mst.instrumen", EntityID: uuid.New(),
-		DocumentCategory: document.DocCategoryLainLain,
-		Status: document.DocumentStatusActive,
-		CreatedAt: now, CreatedBy: uploaderID,
+		EntityType:      "mst.instrumen", EntityID: uuid.New(),
+		Category: document.DocCategoryLainLain,
+		Status:           document.DocumentStatusActive,
+		CreatedAt:        now, CreatedBy: uploaderID,
 		UpdatedAt: now, UpdatedBy: uploaderID, TenantID: "TUGURE",
 	}); err != nil {
 		_ = tx.Rollback()

@@ -17,8 +17,8 @@ func TestService_Upload_NilMinIO(t *testing.T) {
 	// Service tanpa MinIO dan tanpa DB — untuk unit test pure.
 	svc := NewService(
 		&DBRepository{db: nil}, // DB nil: insert akan error, ditest secara terpisah
-		nil,                     // MinIO nil: skip upload
-		nil,                     // audit nil
+		nil,                    // MinIO nil: skip upload
+		nil,                    // audit nil
 		nil,
 	)
 
@@ -114,7 +114,7 @@ func TestValidateUploadInput_InvalidCategory(t *testing.T) {
 		FileSizeBytes:    1024,
 		EntityType:       "mst.instrumen",
 		EntityID:         uuid.New(),
-		Category:         DocumentCategory("TIDAK_VALID"),
+		Category:         Category("TIDAK_VALID"),
 		UploadedByUserID: uuid.New(),
 	}
 	err := validateUploadInput(in)
@@ -159,7 +159,7 @@ func TestValidateUploadInput_NilUserID(t *testing.T) {
 
 // TestIsValidCategory_AllCategories memverifikasi semua kategori yang valid.
 func TestIsValidCategory_AllCategories(t *testing.T) {
-	valid := []DocumentCategory{
+	valid := []Category{
 		DocCategoryBuktiTransaksi,
 		DocCategorySPPIWorksheet,
 		DocCategoryBMAssessment,
@@ -180,7 +180,7 @@ func TestIsValidCategory_AllCategories(t *testing.T) {
 
 // TestIsValidCategory_Invalid memverifikasi kategori tidak valid.
 func TestIsValidCategory_Invalid(t *testing.T) {
-	invalid := []DocumentCategory{
+	invalid := []Category{
 		"",
 		"UNKNOWN",
 		"bukti_transaksi", // lowercase harus invalid
@@ -196,11 +196,11 @@ func TestIsValidCategory_Invalid(t *testing.T) {
 // TestSanitizeFilename_Security memverifikasi filename sanitization untuk keamanan.
 func TestSanitizeFilename_Security(t *testing.T) {
 	cases := []struct {
-		input     string
-		wantSafe  bool // hasilnya tidak boleh mengandung path separator
+		input    string
+		wantSafe bool // hasilnya tidak boleh mengandung path separator
 	}{
 		{"normal-file.pdf", true},
-		{"../../../etc/passwd", true},   // harus jadi "passwd"
+		{"../../../etc/passwd", true}, // harus jadi "passwd"
 		{"/absolute/path/file.xlsx", true},
 		{"windows\\path\\file.csv", true},
 		{"file with spaces.pdf", true},
@@ -242,7 +242,7 @@ func TestVirusScanStatus_Constants(t *testing.T) {
 // TestDocumentCategory_Constants memverifikasi nilai konstanta kategori cocok dengan DB constraint.
 func TestDocumentCategory_Constants(t *testing.T) {
 	// Nilai ini harus cocok dengan ck_doc_category CHECK constraint di migration 0006.
-	expected := map[DocumentCategory]string{
+	expected := map[Category]string{
 		DocCategoryBuktiTransaksi: "BUKTI_TRANSAKSI",
 		DocCategorySPPIWorksheet:  "SPPI_WORKSHEET",
 		DocCategoryBMAssessment:   "BM_ASSESSMENT",
@@ -256,7 +256,7 @@ func TestDocumentCategory_Constants(t *testing.T) {
 	}
 	for cat, want := range expected {
 		if string(cat) != want {
-			t.Errorf("DocumentCategory constant mismatch: got %q, want %q", cat, want)
+			t.Errorf("Category constant mismatch: got %q, want %q", cat, want)
 		}
 	}
 }
