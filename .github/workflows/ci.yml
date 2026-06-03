@@ -76,12 +76,28 @@ jobs:
           cache: true
           cache-dependency-path: backend/go.sum
 
+      # Explicitly populate GOMODCACHE from go.sum before golangci-lint runs.
+      # Without this, golangci-lint's embedded type-checker may run against
+      # an incomplete module cache if setup-go had a partial hit.
+      - name: Download Go modules
+        if: steps.changed.outputs.backend == 'true'
+        run: go mod download
+
       - uses: golangci/golangci-lint-action@v6
         if: steps.changed.outputs.backend == 'true'
         with:
           version: v1.55
           working-directory: backend
           args: ./...
+          # skip-cache: prevents golangci-lint-action from restoring its own
+          # build-artifact cache. The action keys that cache on lint config +
+          # linter version, NOT on go.sum, so a cache entry created in Phase 0
+          # (before redis/asynq/minio/migrate were added) gets restored and
+          # causes `undefined: redis` / `undefined: jwt` type-check failures
+          # even though go.mod + go.sum are correct and `go build` is green.
+          # setup-go's GOMODCACHE cache (keyed on go.sum) is still active and
+          # provides the module speed-up; only the stale build cache is skipped.
+          skip-cache: true
 
   backend-test:
     name: backend-test
@@ -109,6 +125,12 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
           cache-dependency-path: backend/go.sum
+
+      # Same rationale as backend-lint: ensure GOMODCACHE is fully populated
+      # before go test runs, regardless of setup-go cache hit/miss status.
+      - name: Download Go modules
+        if: steps.changed.outputs.backend == 'true'
+        run: go mod download
 
       - name: Run tests with race detector + coverage
         if: steps.changed.outputs.backend == 'true'
