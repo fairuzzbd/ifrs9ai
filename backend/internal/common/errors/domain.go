@@ -42,6 +42,11 @@ const (
 	CodeSystemCurrencyProtected Code = "SYSTEM_CURRENCY_PROTECTED"
 	CodeEntityInUse             Code = "ENTITY_IN_USE"
 	CodeMasterApprovedNoEdit    Code = "MASTER_APPROVED_NO_EDIT"
+
+	// Impact FL multiplier module codes (mst.impact_mev_pd and mst.impact_pd)
+	CodeImpactDuplicatePeriodeSkenario Code = "IMPACT_DUPLICATE_PERIODE_SKENARIO"
+	CodeImpactPDOutOfRange             Code = "IMPACT_PD_OUT_OF_RANGE"
+	CodeImpactPDPeriodeExists          Code = "IMPACT_PD_PERIODE_EXISTS"
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
@@ -66,7 +71,8 @@ func (c Code) HTTPStatus() int {
 	case CodeIdempotencyReplay:
 		return http.StatusOK // replay: return original status
 	case CodeIdempotencyMismatch, CodeWorkflowInvalidTransition,
-		CodeSPPITestIncomplete, CodeBMAssessmentRequired, CodeJobNotCancellable:
+		CodeSPPITestIncomplete, CodeBMAssessmentRequired, CodeJobNotCancellable,
+		CodeImpactDuplicatePeriodeSkenario, CodeImpactPDOutOfRange, CodeImpactPDPeriodeExists:
 		return http.StatusUnprocessableEntity
 	case CodePeriodeClosed, CodeECLParamFrozen:
 		return 423 // Locked

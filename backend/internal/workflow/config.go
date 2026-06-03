@@ -285,5 +285,45 @@ func DefaultConfigs() map[string]*Config {
 				Approver2NotAnyPrevious:    true,
 			},
 		},
+		// IMPACT_MEV_PD — ECL param dual FL multiplier MEV component (DEC-010).
+		// 6-eyes, both ALCO approvals require step-up MFA (migration 0008).
+		"IMPACT_MEV_PD": {
+			EntityType:  "IMPACT_MEV_PD",
+			Eyes:        6,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":   "ecl_parameter.submit",
+				"review":   "ecl_parameter.review",
+				"approve":  "ecl_parameter.approve",
+				"approve2": "ecl_parameter.approve",
+				"reject":   "ecl_parameter.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": true, "approve2": true},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    true,
+			},
+		},
+		// IMPACT_PD — ECL param FL multiplier per skenario (DEC-010).
+		// 6-eyes, both ALCO approvals require step-up MFA (migration 0008).
+		"IMPACT_PD": {
+			EntityType:  "IMPACT_PD",
+			Eyes:        6,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":   "ecl_parameter.submit",
+				"review":   "ecl_parameter.review",
+				"approve":  "ecl_parameter.approve",
+				"approve2": "ecl_parameter.approve",
+				"reject":   "ecl_parameter.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": true, "approve2": true},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    true,
+			},
+		},
 	}
 }

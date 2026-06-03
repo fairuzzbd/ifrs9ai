@@ -3,6 +3,12 @@ import { Circle, CheckCircle2, CornerDownLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { MasterWorkflowState } from "@/lib/schemas/mata-uang.schema";
 
+/**
+ * Extended status type: covers both mata-uang (RETURNED) and impact FL modules (REJECTED).
+ * WorkflowStatusBadge accepts either variant.
+ */
+type ExtendedWorkflowState = MasterWorkflowState | "REJECTED";
+
 interface StatusConfig {
   label: string;
   bgColor: string;
@@ -11,7 +17,7 @@ interface StatusConfig {
   icon: React.ReactNode;
 }
 
-const STATUS_CONFIG: Record<MasterWorkflowState, StatusConfig> = {
+const STATUS_CONFIG: Record<ExtendedWorkflowState, StatusConfig> = {
   DRAFT: {
     label: "Draf",
     bgColor: "bg-[var(--blips-status-draft-bg)]",
@@ -81,10 +87,18 @@ const STATUS_CONFIG: Record<MasterWorkflowState, StatusConfig> = {
     borderColor: "border-[var(--blips-status-returned-border)]",
     icon: <CornerDownLeft className="h-3 w-3" aria-hidden />,
   },
+  REJECTED: {
+    label: "Ditolak",
+    bgColor: "bg-[var(--blips-status-returned-bg)]",
+    textColor: "text-[var(--blips-status-returned-text)]",
+    borderColor: "border-[var(--blips-status-returned-border)]",
+    icon: <CornerDownLeft className="h-3 w-3" aria-hidden />,
+  },
 };
 
 interface WorkflowStatusBadgeProps {
-  status: MasterWorkflowState;
+  /** Workflow status string. Accepts any string; unknown values render nothing. */
+  status: string;
   size?: "sm" | "default";
   className?: string;
 }
@@ -94,7 +108,7 @@ export function WorkflowStatusBadge({
   size = "default",
   className,
 }: WorkflowStatusBadgeProps) {
-  const config = STATUS_CONFIG[status];
+  const config = STATUS_CONFIG[status as ExtendedWorkflowState];
   if (!config) return null;
 
   return (

@@ -33,6 +33,8 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/common/middleware"
 	"blips-ifrs9.tugu-re.com/internal/config"
 	"blips-ifrs9.tugu-re.com/internal/document"
+	"blips-ifrs9.tugu-re.com/internal/master/impactmevpd"
+	"blips-ifrs9.tugu-re.com/internal/master/impactpd"
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
@@ -264,6 +266,36 @@ func main() {
 	mataUangSvc := matauang.NewService(mataUangRepo, auditWriter, logger)
 	mataUangHandler := matauang.NewHandler(mataUangSvc, wfHandler)
 	matauang.RegisterRoutes(v1, mataUangHandler)
+
+	// -----------------------------------------------------------------------
+	// Impact MEV PD — ECL dual FL multiplier MEV component (DEC-010)
+	// Routes: GET/POST /api/v1/master/impact-mev-pd
+	//         GET /api/v1/master/impact-mev-pd/export
+	//         GET/PUT/DELETE /api/v1/master/impact-mev-pd/:id
+	//         GET /api/v1/master/impact-mev-pd/:id/{history,workflow}
+	//         POST /api/v1/master/impact-mev-pd/:id/{submit,review,approve,approve2,reject}
+	// -----------------------------------------------------------------------
+	impactMevPDRepo := impactmevpd.NewDBRepository(db)
+	impactMevPDSvc := impactmevpd.NewService(impactMevPDRepo, auditWriter, logger)
+	impactMevPDHook := impactmevpd.NewWorkflowHook(impactMevPDSvc)
+	wfService.RegisterEntityHook("IMPACT_MEV_PD", impactMevPDHook)
+	impactMevPDHandler := impactmevpd.NewHandler(impactMevPDSvc, wfHandler)
+	impactmevpd.RegisterRoutes(v1, impactMevPDHandler)
+
+	// -----------------------------------------------------------------------
+	// Impact PD — ECL FL multiplier per skenario (DEC-010)
+	// Routes: GET/POST /api/v1/master/impact-pd
+	//         GET /api/v1/master/impact-pd/export
+	//         GET/PUT/DELETE /api/v1/master/impact-pd/:id
+	//         GET /api/v1/master/impact-pd/:id/{history,workflow}
+	//         POST /api/v1/master/impact-pd/:id/{submit,review,approve,approve2,reject}
+	// -----------------------------------------------------------------------
+	impactPDRepo := impactpd.NewDBRepository(db)
+	impactPDSvc := impactpd.NewService(impactPDRepo, auditWriter, logger)
+	impactPDHook := impactpd.NewWorkflowHook(impactPDSvc)
+	wfService.RegisterEntityHook("IMPACT_PD", impactPDHook)
+	impactPDHandler := impactpd.NewHandler(impactPDSvc, wfHandler)
+	impactpd.RegisterRoutes(v1, impactPDHandler)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,
