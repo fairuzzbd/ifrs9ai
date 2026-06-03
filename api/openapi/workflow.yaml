@@ -455,6 +455,15 @@ components:
           - upload-batch
           - sppi-test
           - bm-assessment
+          # APP-A master data (Phase 3)
+          - mata-uang
+          - periode-buku
+          - portofolio
+          - chart-of-accounts
+          - mapping-jurnal
+          - kurs
+          - counterparty
+          - instrumen
       description: Resource type — menentukan entity dan workflow config yang dipakai
 
     entityIdParam:

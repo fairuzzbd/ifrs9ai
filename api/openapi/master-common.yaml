@@ -1,0 +1,848 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — Generic Master Data CRUD Template
+  version: "1.0.0"
+  description: |
+    Template OpenAPI untuk seluruh 16 modul mst.* (APP-A-MSTR-001).
+    File ini TIDAK di-mount langsung di router — dipakai sebagai $ref source
+    oleh file OpenAPI konkret per modul (mis. mata-uang.yaml).
+
+    POLA REPLIKASI:
+      Untuk membuat kontrak modul baru, buat file baru (mis. portofolio.yaml) dan:
+      1. Ganti {resource}    → path konkret (mis. "portofolio")
+      2. Ganti {Entity}      → nama camelCase entity (mis. "Portofolio")
+      3. Ganti {ENTITY}      → nama SCREAMING_SNAKE (mis. "PORTOFOLIO") untuk audit action
+      4. Ganti {id_field}    → nama field ID konkret (UUID atau kode PK)
+      5. Tentukan schema request/response spesifik modul
+      6. Tentukan allowedSortCols dan allowedFilterCols per modul
+      7. Inject WorkflowConfig seed yang sesuai (4-eyes vs 6-eyes) ke 000007_workflow_engine.up.sql
+
+    VARIAN yang memerlukan kontrak terpisah (jangan pakai template ini langsung):
+      VARIAN-A  ECL-param masters  — 6-eyes + ALCO step-up + ECL_PARAM_FROZEN guard
+      VARIAN-B  Counterparty/rating — PII masking + security gate + SICR trigger
+      VARIAN-C  Upload/import masters — async Asynq job + JobProgressPanel
+
+    Referensi:
+      DEC-017 (4-eyes/6-eyes), DEC-021 (idempotency), DEC-022 (cursor),
+      api-conventions.md, ux-patterns.md §1 (list/export), §2 (form notif)
+
+paths: {}   # Template — implementasi path di file modul konkret
+
+components:
+  schemas:
+
+    # =========================================================================
+    # Generic Master Entity — base fields shared by ALL mst.* entities
+    # =========================================================================
+    MasterEntityBase:
+      type: object
+      description: |
+        Base object yang harus diperluas oleh setiap modul master.
+        Berisi: audit fields + workflow state + soft-delete indicator.
+        Extend via allOf + tambah field spesifik modul.
+      properties:
+        workflowStatus:
+          $ref: "#/components/schemas/MasterWorkflowState"
+        workflowInstanceId:
+          type: string
+          format: uuid
+          nullable: true
+          description: FK ke sys.workflow_instance.id. Null sebelum submit pertama.
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-06-03T08:00:00+07:00"
+        createdBy:
+          type: string
+          format: uuid
+        updatedAt:
+          type: string
+          format: date-time
+          example: "2026-06-03T08:00:00+07:00"
+        updatedBy:
+          type: string
+          format: uuid
+        deletedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Null jika belum di-soft-delete. Set by DELETE endpoint.
+        deletedBy:
+          type: string
+          format: uuid
+          nullable: true
+        rowVersion:
+          type: integer
+          description: |
+            Optimistic lock counter. Wajib dikirim kembali di PATCH/PUT.
+            Server return CONFLICT (409) jika tidak cocok.
+          example: 1
+
+    # =========================================================================
+    # Master Workflow State
+    # Diperluas dari WorkflowState di _common.yaml dengan tambahan RETURNED
+    # =========================================================================
+    MasterWorkflowState:
+      type: string
+      enum:
+        - DRAFT
+        - PENDING_REVIEW
+        - PENDING_APPROVAL
+        - PENDING_APPROVAL_2   # hanya untuk 6-eyes (ECL param, klasifikasi)
+        - APPROVED
+        - REJECTED
+        - RETURNED             # dikembalikan ke maker untuk revisi; re-submit lagi ke PENDING_REVIEW
+      description: |
+        State lifecycle untuk semua master entity.
+
+        Transisi 4-eyes (mata_uang, portofolio, CoA, mapping_jurnal, dll):
+          DRAFT → PENDING_REVIEW → PENDING_APPROVAL → APPROVED
+          DRAFT → PENDING_REVIEW → PENDING_APPROVAL → RETURNED (reject)
+          RETURNED → PENDING_REVIEW (re-submit)
+          DRAFT → DRAFT (update)
+
+        Transisi 6-eyes (ECL param, klasifikasi PSAK 71):
+          DRAFT → PENDING_REVIEW → PENDING_APPROVAL → PENDING_APPROVAL_2 → APPROVED
+          (RETURNED bisa dari mana saja yang sedang PENDING_*)
+
+        RETURNED vs REJECTED:
+          REJECTED  = terminal state (tidak bisa re-submit). Berlaku di workflow
+                      entity transaksi (penempatan, jurnal) per api-conventions.md.
+          RETURNED  = master entity dikembalikan ke maker untuk revisi — maker BISA
+                      edit dan re-submit. State ini hanya untuk mst.* entities.
+                      Diimplementasi sebagai current_state='REJECTED' + retractable=true
+                      di sys.workflow_instance, dengan UI label "RETURNED".
+                      Backend menyimpan 'REJECTED'; API response expose 'RETURNED'.
+
+    # =========================================================================
+    # Generic List Request Parameters (dipakai di semua list endpoint)
+    # Ini adalah schema dokumentasi; parameter aktual ada di parameters section
+    # =========================================================================
+    ListQueryDocs:
+      type: object
+      description: |
+        Dokumentasi query parameters yang wajib ada di setiap GET list endpoint.
+        Backend implementasi: internal/common/listquery/listquery.go
+
+        Allowed sort/filter columns WAJIB di-whitelist per endpoint (SQLi prevention).
+        Kolom default yang selalu boleh di-sort/filter (semua modul):
+          - created_at, updated_at, deleted_at (sort only)
+          - created_by (filter only — UUID match)
+
+        Kolom business yang boleh di-sort/filter HARUS didefinisikan per modul
+        (lihat allowedSortCols dan allowedFilterCols di file modul konkret).
+      properties:
+        cursor:
+          type: string
+          description: "Opaque base64 cursor dari pagination.nextCursor (DEC-022)"
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+        sort:
+          type: string
+          pattern: "^[a-z_]+(:(asc|desc))?(,[a-z_]+(:(asc|desc))?)*$"
+          example: "kode:asc,created_at:desc"
+          description: "Multi-column sort, max 3 kolom. snake_case column names."
+        q:
+          type: string
+          maxLength: 200
+          description: "Text search global. Server scan kolom yang relevan per modul."
+        include_deleted:
+          type: boolean
+          default: false
+          description: "Tampilkan soft-deleted. Hanya untuk ROLE-AUDIT (permission audit_log.read)."
+
+    # =========================================================================
+    # Generic Export Request Parameters
+    # =========================================================================
+    ExportQueryDocs:
+      type: object
+      description: |
+        Parameter untuk GET .../export.
+        Semua filter dan sort yang aktif di list endpoint WAJIB di-respect.
+        Dataset >= 10k row → async export (202 + jobId).
+        Dataset < 10k row → sync stream file langsung.
+      properties:
+        format:
+          type: string
+          enum: [csv, xlsx]
+          description: "Format output. Default: csv."
+        cursor:
+          type: string
+          description: "Tidak diperlukan untuk export (export semua data sesuai filter)."
+        sort:
+          type: string
+          description: "Sort yang berlaku untuk export. Sama format dengan list endpoint."
+
+    # =========================================================================
+    # Generic Create/Update Request Body Base
+    # Setiap modul extend ini dengan allOf + tambah required fields
+    # =========================================================================
+    MasterCreateRequestBase:
+      type: object
+      description: |
+        Base untuk semua POST (create) request body modul master.
+        Tidak ada field di sini yang universal — tiap modul define sendiri.
+        rowVersion TIDAK dikirim saat create (baru ada setelah record dibuat).
+
+    MasterUpdateRequestBase:
+      type: object
+      description: |
+        Base untuk semua PATCH/PUT (update) request body modul master.
+        rowVersion WAJIB dikirim untuk optimistic lock check.
+      required:
+        - rowVersion
+      properties:
+        rowVersion:
+          type: integer
+          description: |
+            Nilai row_version yang terakhir dibaca dari server.
+            Server return 409 CONFLICT jika tidak cocok.
+          example: 1
+
+    # =========================================================================
+    # Standard List Response Envelope (Typed)
+    # Modul konkret mendefinisikan items schema
+    # =========================================================================
+    MasterListResponse:
+      type: object
+      description: |
+        Envelope standard untuk semua list endpoint master data.
+        Dipakai oleh frontend DataTable component.
+      required: [data, pagination, meta]
+      properties:
+        data:
+          type: array
+          description: Array of entity items (type defined per modul)
+        pagination:
+          type: object
+          required: [nextCursor, hasMore, limit]
+          properties:
+            nextCursor:
+              type: string
+              nullable: true
+              description: "Cursor untuk halaman berikutnya. null jika tidak ada."
+              example: "eyJrb2RlIjoiVVNEIn0="
+            hasMore:
+              type: boolean
+            totalEstimate:
+              type: integer
+              nullable: true
+              description: "Estimasi total (dari EXPLAIN). Untuk UI display saja."
+            limit:
+              type: integer
+        appliedSort:
+          type: array
+          items:
+            type: object
+            properties:
+              col: { type: string }
+              dir:
+                type: string
+                enum: [asc, desc]
+        appliedFilter:
+          type: object
+          additionalProperties: true
+          description: "Echo-back filter yang sedang aktif."
+        meta:
+          type: object
+          properties:
+            traceId: { type: string }
+
+    # =========================================================================
+    # Standard Create/Update Success Response Envelope
+    # =========================================================================
+    MasterMutationResponse:
+      type: object
+      description: "Envelope untuk create (201) dan update (200) response."
+      required: [data, meta]
+      properties:
+        data:
+          description: "Entity yang baru dibuat atau diperbarui (type defined per modul)"
+        meta:
+          type: object
+          properties:
+            traceId: { type: string }
+
+    # =========================================================================
+    # Standard Workflow Submit Request (Maker submit)
+    # Override di modul jika ada field tambahan
+    # =========================================================================
+    MasterSubmitRequest:
+      type: object
+      required: [rowVersion]
+      properties:
+        comment:
+          type: string
+          maxLength: 500
+          description: "Catatan opsional dari maker saat submit."
+          nullable: true
+        rowVersion:
+          type: integer
+          description: "Optimistic lock check."
+
+    # =========================================================================
+    # Workflow Approve Request (Reviewer/Approver sign)
+    # =========================================================================
+    MasterApproveRequest:
+      type: object
+      required: [signatureMethod, rowVersion]
+      properties:
+        comment:
+          type: string
+          maxLength: 1000
+          nullable: true
+          description: "Komentar approval. Opsional untuk approve, wajib untuk reject."
+        signatureMethod:
+          type: string
+          enum: [JWT_STANDARD, JWT_STEP_UP]
+          default: JWT_STANDARD
+          description: |
+            JWT_STANDARD: access token biasa.
+            JWT_STEP_UP: hanya jika stepUpRequired.approve=true di WorkflowConfig.
+        rowVersion:
+          type: integer
+
+    # =========================================================================
+    # Workflow Reject Request (komentar WAJIB per business rule)
+    # =========================================================================
+    MasterRejectRequest:
+      type: object
+      required: [comment, signatureMethod, rowVersion]
+      properties:
+        comment:
+          type: string
+          minLength: 10
+          maxLength: 1000
+          description: |
+            Alasan penolakan. WAJIB dan min 10 karakter.
+            Disimpan di sys.workflow_instance.reject_comment + audit log.
+            Dikirim sebagai notifikasi ke maker.
+        signatureMethod:
+          type: string
+          enum: [JWT_STANDARD, JWT_STEP_UP]
+          default: JWT_STANDARD
+        rowVersion:
+          type: integer
+
+    # =========================================================================
+    # Soft-delete Response (204 atau 200 dengan status)
+    # BLIPS pakai 200 dengan body untuk consistency + audit trail trace
+    # =========================================================================
+    MasterDeleteResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          properties:
+            deleted:
+              type: boolean
+              example: true
+            deletedAt:
+              type: string
+              format: date-time
+            entityId:
+              type: string
+              description: "Identifier entitas yang dihapus"
+        meta:
+          type: object
+          properties:
+            traceId: { type: string }
+
+    # =========================================================================
+    # Audit History Response (GET .../history)
+    # =========================================================================
+    MasterHistoryResponse:
+      type: object
+      required: [data, pagination, meta]
+      properties:
+        data:
+          type: array
+          items:
+            type: object
+            description: "Row aud.audit_log untuk entity ini"
+            required: [eventId, eventTime, actorUserId, actorRole, action]
+            properties:
+              eventId:
+                type: string
+                format: uuid
+              eventTime:
+                type: string
+                format: date-time
+              actorUserId:
+                type: string
+                format: uuid
+              actorUsername:
+                type: string
+              actorRole:
+                type: string
+              action:
+                type: string
+                description: "mis. MATA_UANG.CREATE, MATA_UANG.APPROVE"
+                example: "MATA_UANG.APPROVE"
+              beforeJsonb:
+                type: object
+                nullable: true
+                description: |
+                  State sebelum mutasi. Null untuk CREATE.
+                  Hanya visible untuk ROLE-AUDIT (permission audit_log.read).
+              afterJsonb:
+                type: object
+                nullable: true
+                description: |
+                  State setelah mutasi. Null untuk soft-DELETE.
+                  Hanya visible untuk ROLE-AUDIT.
+              ip:
+                type: string
+                nullable: true
+              traceId:
+                type: string
+                nullable: true
+        pagination:
+          type: object
+          properties:
+            nextCursor: { type: string, nullable: true }
+            hasMore: { type: boolean }
+        meta:
+          type: object
+          properties:
+            traceId: { type: string }
+
+  # ===========================================================================
+  # Reusable Parameters (referenced oleh modul konkret)
+  # ===========================================================================
+  parameters:
+    cursorParam:
+      name: cursor
+      in: query
+      required: false
+      schema: { type: string }
+      description: "Cursor dari pagination.nextCursor response sebelumnya (DEC-022)"
+
+    limitParam:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+      description: "Jumlah item per halaman. Default 50, max 200."
+
+    sortParam:
+      name: sort
+      in: query
+      required: false
+      schema:
+        type: string
+        pattern: "^[a-z_]+(:(asc|desc))?(,[a-z_]+(:(asc|desc))?)*$"
+      description: |
+        Multi-column sort, max 3 kolom.
+        Format: col1:asc,col2:desc
+        Kolom yang diizinkan: per-endpoint whitelist (server return INVALID_SORT_COL jika tidak ada).
+      example: "kode:asc,created_at:desc"
+
+    searchParam:
+      name: q
+      in: query
+      required: false
+      schema:
+        type: string
+        maxLength: 200
+      description: "Text search global. Server tentukan kolom yang di-scan."
+
+    includeDeletedParam:
+      name: include_deleted
+      in: query
+      required: false
+      schema:
+        type: boolean
+        default: false
+      description: "Tampilkan soft-deleted. Hanya untuk ROLE-AUDIT."
+
+    exportFormatParam:
+      name: format
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [csv, xlsx]
+        default: csv
+      description: |
+        Format file export.
+        csv  = UTF-8 BOM, delimiter koma, sync stream (< 10k row).
+        xlsx = excelize, header bold, async Asynq job (>= 10k row → 202 + jobId).
+
+  # ===========================================================================
+  # Error codes tambahan untuk master data (extend _common.yaml)
+  # ===========================================================================
+  # Catatan: Error codes canonical ada di _common.yaml ErrorCode enum.
+  # Codes baru untuk modul master di bawah ini HARUS ditambahkan ke enum
+  # _common.yaml pada saat PR merge (konvensi: tidak bisa declare di sini saja).
+
+  # Kode baru yang dibutuhkan untuk master-data (belum ada di _common.yaml):
+  #   SYSTEM_CURRENCY_PROTECTED  403  Mata uang fungsional sistem tidak bisa dihapus/diubah kode
+  #   ENTITY_IN_USE              409  Record tidak bisa dihapus karena masih direferensikan
+  #   MASTER_APPROVED_NO_EDIT    403  Record APPROVED tidak bisa diedit langsung (ajukan amandemen)
+  #   WORKFLOW_NOT_RETURNED      422  Re-submit hanya bisa dari state RETURNED
+  #   ACTIVE_FLAG_REF_CONFLICT   422  aktif_flag tidak bisa diubah false karena ada referensi aktif
+
+  responses:
+    MasterEntityInUse:
+      description: Record tidak bisa dihapus karena masih direferensikan entitas lain
+      content:
+        application/json:
+          schema:
+            $ref: "../../api/openapi/_common.yaml#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: ENTITY_IN_USE
+              message: "Record tidak bisa dihapus karena masih digunakan oleh 12 entitas lain."
+              details:
+                - field: "id"
+                  rule: "referenced_by"
+                  message: "Digunakan oleh 12 instrumen aktif"
+              traceId: "01HXY..."
+
+    MasterApprovedNoEdit:
+      description: Record APPROVED tidak bisa diedit langsung
+      content:
+        application/json:
+          schema:
+            $ref: "../../api/openapi/_common.yaml#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: MASTER_APPROVED_NO_EDIT
+              message: "Record yang sudah disetujui tidak bisa diubah langsung. Ajukan amandemen ke Finance Controller."
+              details: []
+              traceId: "01HXY..."
+
+    SystemCurrencyProtected:
+      description: Mata uang fungsional sistem dilindungi (khusus mata_uang modul)
+      content:
+        application/json:
+          schema:
+            $ref: "../../api/openapi/_common.yaml#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: SYSTEM_CURRENCY_PROTECTED
+              message: "Mata uang ini adalah currency fungsional sistem dan tidak bisa dihapus atau diubah kodenya."
+              details: []
+              traceId: "01HXY..."
+
+  # ===========================================================================
+  # POLA REPLIKASI — Panduan untuk 15 modul mst.* lainnya
+  # ===========================================================================
+  # Dokumentasi ini adalah reference normative. Backend engineer dan frontend
+  # engineer HARUS baca ini sebelum mengimplementasi modul baru.
+  #
+  # Lihat section x-blips-replication-guide di bawah untuk detail lengkap.
+  # ===========================================================================
+
+x-blips-replication-guide:
+  description: |
+    PANDUAN REPLIKASI untuk 15 modul mst.* lainnya.
+    Pilot: mata-uang.yaml (APP-A-MSTR-002).
+
+  per-module-checklist:
+    - step: "1. Buat file api/openapi/{modul}.yaml"
+      detail: |
+        Copy mata-uang.yaml sebagai template.
+        Ganti semua placeholder: resource path, schema names, field definitions.
+        Pastikan $ref ke _common.yaml dan master-common.yaml tetap valid.
+
+    - step: "2. Define entity schema"
+      detail: |
+        Definisikan {Module}Response (GET response), {Module}CreateRequest, {Module}UpdateRequest.
+        Gunakan allOf dengan MasterEntityBase untuk include audit fields.
+        Tentukan field mana yang:
+          - immutable setelah create (contoh: kode_mata_uang)
+          - read-only untuk non-AUDIT role (contoh: PII fields)
+          - enum/controlled vocab (jangan free-text untuk data terregulasi)
+
+    - step: "3. Tentukan allowedSortCols dan allowedFilterCols"
+      detail: |
+        Dokumentasikan di x-blips-allowed-cols di file modul.
+        Backend engineer WAJIB whitelist ini di repo layer (SQLi prevention).
+        Contoh mata_uang: sort by [kode_mata_uang, nama_mata_uang, aktif_flag, created_at]
+                          filter by [aktif_flag, sumber_kurs_default, frekuensi_update]
+
+    - step: "4. Seed WORKFLOW_CONFIG di migration 000007"
+      detail: |
+        Tambahkan INSERT ke sys.config di 000007_workflow_engine.up.sql:
+        Key: WORKFLOW_CONFIG_{ENTITY_TYPE_SCREAMING_SNAKE}
+        Value: JSON WorkflowConfig (lihat schema WorkflowConfig di _common.yaml)
+        Tentukan: eyes (4 atau 6), permissions, stepUpRequired, sodRules.
+        Jangan buat migration baru — ini tetap di 000007 sampai ada kebutuhan alter.
+
+    - step: "5. Tambah resourceParam enum di workflow.yaml"
+      detail: |
+        Tambahkan nilai enum baru ke resourceParam di workflow.yaml:
+        mis. "mata-uang" (kebab-case, sesuai URL path).
+
+    - step: "6. Daftarkan error codes baru di _common.yaml"
+      detail: |
+        Jika modul baru butuh error code baru (mis. SYSTEM_CURRENCY_PROTECTED),
+        tambahkan ke enum ErrorCode di _common.yaml.
+        Jangan deklarasi ulang di file modul — harus di satu tempat.
+
+    - step: "7. Audit action naming"
+      detail: |
+        Convention: {ENTITY_SCREAMING_SNAKE}.{ACTION}
+        Actions: CREATE, UPDATE, DELETE, SUBMIT, REVIEW, APPROVE, APPROVE2, REJECT, RESUBMIT, EXPORT
+        Contoh: MATA_UANG.CREATE, PORTOFOLIO.APPROVE, CHART_OF_ACCOUNTS.EXPORT
+
+  workflow-config-matrix:
+    description: |
+      Matriks konfigurasi workflow per modul mst.*
+      Kolom: modul, eyes, maker role, reviewer role, approver role, step-up, compliance gate, security gate
+
+    modules:
+      - module: mata_uang
+        table: mst.mata_uang
+        eyes: 4
+        maker: ROLE-AKUN
+        reviewer: ROLE-AKUN-CTL
+        approver: ROLE-AKUN-CTL
+        step_up_approve: false
+        compliance_gate: false
+        security_gate: false
+        notes: "Reviewer dan approver HARUS user berbeda (SoD). MFA wajib untuk AKUN-CTL."
+
+      - module: periode_buku
+        table: mst.periode_buku
+        eyes: 4
+        maker: ROLE-AKUN
+        reviewer: ROLE-AKUN-CTL
+        approver: ROLE-CFO
+        step_up_approve: true
+        compliance_gate: false
+        security_gate: false
+        notes: "Hard-close = CFO + step-up MFA. Soft-close = AKUN-CTL review."
+
+      - module: portofolio
+        table: mst.portofolio
+        eyes: 4
+        maker: ROLE-MAKER-TR
+        reviewer: ROLE-RISK
+        approver: ROLE-APPR-TR
+        step_up_approve: false
+        compliance_gate: false
+        security_gate: false
+        notes: "Reviewer RISK karena portofolio terkait Business Model classification."
+
+      - module: chart_of_accounts
+        table: mst.chart_of_accounts
+        eyes: 4
+        maker: ROLE-AKUN
+        reviewer: ROLE-AKUN-CTL
+        approver: ROLE-AKUN-CTL
+        step_up_approve: false
+        compliance_gate: false
+        security_gate: false
+        notes: "Import Excel CoA = Varian C (async job). Workflow tetap 4-eyes post-import."
+
+      - module: mapping_jurnal_header
+        table: mst.mapping_jurnal_header
+        eyes: 4
+        maker: ROLE-AKUN
+        reviewer: ROLE-AKUN-CTL
+        approver: ROLE-AKUN-CTL
+        step_up_approve: false
+        compliance_gate: false
+        security_gate: false
+        notes: "Sama dengan CoA — akuntansi domain."
+
+      - module: mapping_jurnal_detail
+        table: mst.mapping_jurnal_detail
+        eyes: 4
+        maker: ROLE-AKUN
+        reviewer: ROLE-AKUN-CTL
+        approver: ROLE-AKUN-CTL
+        step_up_approve: false
+        compliance_gate: false
+        security_gate: false
+        notes: "Child dari mapping_jurnal_header — ikut workflow header."
+
+      - module: kurs
+        table: mst.kurs
+        eyes: 4
+        maker: ROLE-AKUN
+        reviewer: ROLE-AKUN-CTL
+        approver: ROLE-AKUN-CTL
+        step_up_approve: false
+        compliance_gate: false
+        security_gate: false
+        notes: "BI JISDOR scheduled job = Varian C. Manual override tetap 4-eyes."
+
+      - module: counterparty
+        table: mst.counterparty
+        eyes: 4
+        maker: ROLE-MAKER-TR
+        reviewer: ROLE-RISK
+        approver: ROLE-APPR-TR
+        step_up_approve: false
+        compliance_gate: false
+        security_gate: true
+        notes: "PII encrypt (DEC-028). BLOCKING security-engineer review. Varian B."
+
+      - module: rating_history
+        table: mst.rating_history
+        eyes: 4
+        maker: ROLE-RISK
+        reviewer: ROLE-RISK
+        approver: ROLE-APPR-TR
+        step_up_approve: false
+        compliance_gate: false
+        security_gate: true
+        notes: "Child dari counterparty. SICR auto-trigger on approve. Varian B."
+
+      - module: instrumen
+        table: mst.instrumen
+        eyes: 4
+        maker: ROLE-MAKER-TR
+        reviewer: ROLE-RISK
+        approver: ROLE-APPR-TR
+        step_up_approve: false
+        compliance_gate: false
+        security_gate: false
+        notes: "Paling kompleks — FK ke counterparty, portofolio, mata_uang, CoA. SPPI test triggered on approve."
+
+      - module: lgd_basel
+        table: mst.lgd_basel
+        eyes: 6
+        maker: ROLE-RISK
+        reviewer: ROLE-AKUN-CTL
+        approver: ROLE-ALCO
+        approver2: ROLE-ALCO
+        step_up_approve: true
+        compliance_gate: true
+        security_gate: false
+        notes: "ECL param. BLOCKING ifrs9-compliance-reviewer. ALCO step-up. Varian A."
+
+      - module: bobot_skenario
+        table: mst.bobot_skenario
+        eyes: 6
+        maker: ROLE-RISK
+        reviewer: ROLE-AKUN-CTL
+        approver: ROLE-ALCO
+        approver2: ROLE-ALCO
+        step_up_approve: true
+        compliance_gate: true
+        security_gate: false
+        notes: "ECL param. Default weights 0.25/0.50/0.25 (DEC-010). ALCO override."
+
+      - module: lps_coverage
+        table: mst.lps_coverage
+        eyes: 6
+        maker: ROLE-RISK
+        reviewer: ROLE-AKUN-CTL
+        approver: ROLE-ALCO
+        approver2: ROLE-ALCO
+        step_up_approve: true
+        compliance_gate: true
+        security_gate: false
+        notes: "ECL param. IDR 2 miliar cap (DEC-014). Varian A."
+
+      - module: pd_pefindo
+        table: mst.pd_pefindo
+        eyes: 6
+        maker: ROLE-RISK
+        reviewer: ROLE-AKUN-CTL
+        approver: ROLE-ALCO
+        approver2: ROLE-ALCO
+        step_up_approve: true
+        compliance_gate: true
+        security_gate: false
+        notes: "ECL param + Varian C (XLSX upload Pefindo). Upload = integration-engineer. Varian A+C."
+
+      - module: impact_mev_pd
+        table: mst.impact_mev_pd
+        eyes: 6
+        maker: ROLE-RISK
+        reviewer: ROLE-AKUN-CTL
+        approver: ROLE-ALCO
+        approver2: ROLE-ALCO
+        step_up_approve: true
+        compliance_gate: true
+        security_gate: false
+        notes: "Dual FL multiplier MEV PD. Varian A."
+
+      - module: impact_pd
+        table: mst.impact_pd
+        eyes: 6
+        maker: ROLE-RISK
+        reviewer: ROLE-AKUN-CTL
+        approver: ROLE-ALCO
+        approver2: ROLE-ALCO
+        step_up_approve: true
+        compliance_gate: true
+        security_gate: false
+        notes: "FL multiplier per skenario. Varian A."
+
+  open-questions-resolution:
+    description: "Resolusi open questions dari APP-A-MSTR-001 (BA story)"
+
+    q1_workflow_config_granularity:
+      status: RESOLVED
+      decision: |
+        Setiap modul mst.* punya WORKFLOW_CONFIG_{ENTITY} sendiri di sys.config.
+        Ini sudah di-implement di migration 000007_workflow_engine.up.sql.
+        Format: satu row per entity type, value = JSON WorkflowConfig.
+        Backend WorkflowEngine load config on startup, cache 5 menit.
+        Ini memungkinkan override per modul tanpa code change (config-driven).
+
+    q2_reviewer_role_matrix:
+      status: RESOLVED
+      decision: |
+        Lihat workflow-config-matrix di atas — tabel lengkap modul → maker/reviewer/approver.
+        Catatan untuk mata_uang (pilot):
+          Maker    = ROLE-AKUN
+          Reviewer = ROLE-AKUN-CTL (satu AKUN-CTL berbeda dari maker)
+          Approver = ROLE-AKUN-CTL (AKUN-CTL ketiga, berbeda dari reviewer)
+          *** PERTANYAAN KE STAKEHOLDER: Apakah tersedia 3 user AKUN-CTL yang berbeda
+              (SoD penuh 4-eyes), atau model yang lebih pragmatis adalah:
+              AKUN (maker) → AKUN-CTL sebagai reviewer+approver sekaligus (1 AKUN-CTL)
+              dengan SoD hanya maker≠approver?
+              Story APP-A-MSTR-002 scenario 2 mengasumsikan 1 AKUN-CTL = approve langsung.
+              System-analyst memilih model: 4-eyes TETAP (3 user distinct), AKUN-CTL
+              mengisi dua role berbeda tapi HARUS 2 user berbeda.
+              Ini perlu KONFIRMASI dari stakeholder sebelum backend implement.
+
+    q3_notification_channel:
+      status: OPEN
+      decision: |
+        In-app notification sudah ada di Phase 2 foundation (sys.notification_*).
+        Email: butuh SMTP config di sys.config (KEY: SMTP_HOST, SMTP_PORT, dll).
+        Rekomendasi: in-app notification DULU (Phase 3), email Phase 4.
+        PERLU KONFIRMASI stakeholder apakah email notification critical untuk go-live.
+
+    q4_return_reason_mandatory:
+      status: RESOLVED
+      decision: |
+        Comment WAJIB (minLength: 10) untuk REJECT/RETURN di semua modul mst.*.
+        Tidak ada pengecualian. Ini konsisten dengan workflow.yaml WorkflowRejectRequest.
+
+    q5_bulk_approve:
+      status: DEFERRED
+      decision: |
+        Bulk approve DEFER ke Phase 4 MVP. Alasan: SoD enforcement per-record di bulk
+        memerlukan atomic transaction yang kompleks.
+        Phase 3 MVP: approve satu per satu.
+
+    q6_amendment_after_approved:
+      status: RESOLVED
+      decision: |
+        Master umum (mata_uang, portofolio, CoA, mapping_jurnal, kurs, instrumen):
+          Update in-place + workflow baru. Record tetap satu, tapi harus melalui
+          siklus DRAFT→APPROVE lagi. rowVersion increment.
+          Error MASTER_APPROVED_NO_EDIT jika user coba PATCH langsung tanpa workflow.
+        ECL-param masters (pd_pefindo, lgd_basel, bobot_skenario, lps_coverage, impact_*):
+          VERSIONING (audit-grade immutability). Tidak pernah UPDATE row lama.
+          Insert row baru dengan effective_from = tanggal mulai berlaku.
+          Row lama: effective_to = tanggal − 1.
+          Detail di story terpisah Varian A.

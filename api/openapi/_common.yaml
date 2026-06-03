@@ -254,6 +254,12 @@ components:
         - BAD_SSE_TOKEN_IN_QUERY    # 400 — JWT di ?token= query param terdeteksi dan ditolak
         - BAD_SSE_AUTH_CONFLICT     # 400 — Authorization header + SSE ticket dari user berbeda
         - SSE_TICKET_INVALID        # 401 — SSE ticket tidak valid, sudah dipakai, atau expired
+        # Master data (APP-A)
+        - SYSTEM_CURRENCY_PROTECTED # 403 — Mata uang fungsional sistem tidak bisa dihapus/diubah kode
+        - ENTITY_IN_USE             # 409 — Record tidak bisa dihapus karena masih direferensikan
+        - MASTER_APPROVED_NO_EDIT   # 403 — Record APPROVED tidak bisa diedit langsung (ajukan amandemen)
+        - WORKFLOW_NOT_RETURNED     # 422 — Re-submit hanya bisa dari state RETURNED
+        - ACTIVE_FLAG_REF_CONFLICT  # 422 — aktif_flag tidak bisa diubah false karena ada referensi aktif
 
     # ---- Timestamps -------------------------------------------------------
     TimestampISO:

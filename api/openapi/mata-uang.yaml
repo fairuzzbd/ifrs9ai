@@ -1,0 +1,1730 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — Master Mata Uang (APP-A-MSTR-002)
+  version: "1.0.0"
+  description: |
+    OpenAPI contract untuk mst.mata_uang — pilot pola generik master data.
+    Linked story: docs/stories/APP-A-MSTR-002-master-mata-uang.md
+    Template pattern: api/openapi/master-common.yaml
+
+    Workflow: 4-eyes, config key WORKFLOW_CONFIG_MATA_UANG (seed di 000007)
+    Maker    : ROLE-AKUN (permission: mata_uang.create / mata_uang.update)
+    Reviewer : ROLE-AKUN-CTL (permission: mata_uang.review) — user berbeda dari maker
+    Approver : ROLE-AKUN-CTL (permission: mata_uang.approve) — user berbeda dari maker DAN reviewer
+    Export   : mata_uang.read (semua role dengan read)
+    Read     : mata_uang.read
+    Delete   : mata_uang.delete
+
+    Identifier di URL: kode_mata_uang (CHAR(3), PK, mis. IDR, USD, GBP)
+    Bukan UUID — karena kode ISO 4217 adalah business key yang human-readable.
+
+    Allowed sort columns   : kode_mata_uang, nama_mata_uang, aktif_flag, created_at, tanggal_mulai_aktif
+    Allowed filter columns : aktif_flag, sumber_kurs_default, frekuensi_update, kode_mata_uang (eq/in)
+    Text search (q=)       : kode_mata_uang, nama_mata_uang, simbol
+
+    Schema changes required (data-modeler):
+      mst.mata_uang tabel di 000001 KURANG kolom:
+        - decimal_places SMALLINT NOT NULL DEFAULT 2
+        - is_system_currency BOOLEAN NOT NULL DEFAULT FALSE
+        - workflow_status VARCHAR(30) NOT NULL DEFAULT 'DRAFT'
+        - row_version BIGINT NOT NULL DEFAULT 1
+        - updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        - updated_by UUID REFERENCES sec.user(id)
+        - deleted_at TIMESTAMPTZ
+        - deleted_by UUID REFERENCES sec.user(id)
+        - created_by UUID NOT NULL REFERENCES sec.user(id)
+        - tenant_id TEXT NOT NULL DEFAULT 'TUGURE'
+      Perlu migration 000008_mata_uang_schema_fix.up.sql
+      STOP — data-modeler harus jalan DULU sebelum backend implement.
+
+x-blips-allowed-cols:
+  sort: [kode_mata_uang, nama_mata_uang, aktif_flag, created_at, tanggal_mulai_aktif]
+  filter: [aktif_flag, sumber_kurs_default, frekuensi_update, kode_mata_uang]
+  search_cols: [kode_mata_uang, nama_mata_uang, simbol]
+
+x-blips-audit-actions:
+  - MATA_UANG.CREATE
+  - MATA_UANG.UPDATE
+  - MATA_UANG.DELETE
+  - MATA_UANG.SUBMIT
+  - MATA_UANG.REVIEW
+  - MATA_UANG.APPROVE
+  - MATA_UANG.REJECT
+  - MATA_UANG.RESUBMIT
+  - MATA_UANG.EXPORT
+
+x-blips-workflow-config-key: WORKFLOW_CONFIG_MATA_UANG
+
+servers:
+  - url: /api/v1
+    description: BLIPS REST API v1
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: mata-uang
+    description: Master Mata Uang — ISO 4217 currency reference data
+
+paths:
+  # ===========================================================================
+  # LIST + CREATE
+  # ===========================================================================
+  /master/mata-uang:
+    get:
+      operationId: listMataUang
+      summary: List master mata uang
+      description: |
+        Menampilkan daftar mata uang dengan sort, paging, filter, dan text search.
+        UX rule §1: sort+page+filter+export wajib.
+
+        Default sort: kode_mata_uang ASC
+        Default limit: 50 (max 200)
+
+        Permission: mata_uang.read
+        ROLE-AUDIT tambahan: bisa pakai ?include_deleted=true
+
+        Allowed sort    : kode_mata_uang, nama_mata_uang, aktif_flag, created_at, tanggal_mulai_aktif
+        Allowed filter  : aktif_flag, sumber_kurs_default, frekuensi_update, kode_mata_uang
+        Search (q=)     : kode_mata_uang, nama_mata_uang, simbol
+      tags: [mata-uang]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/cursorParam"
+        - $ref: "#/components/parameters/limitParam"
+        - $ref: "#/components/parameters/sortParam"
+        - $ref: "#/components/parameters/searchParam"
+        - $ref: "#/components/parameters/includeDeletedParam"
+        - name: "filter[aktif_flag]"
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: "Filter: aktif_flag = true/false. Mis: ?filter[aktif_flag]=true"
+        - name: "filter[sumber_kurs_default]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [BI_JISDOR, BI_KURS_TENGAH, INTERNAL]
+          description: "Filter: sumber kurs default"
+        - name: "filter[frekuensi_update]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [HARIAN, INTRA_DAY, BULANAN]
+          description: "Filter: frekuensi update kurs"
+        - name: "filter[kode_mata_uang]"
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 200
+          description: |
+            Filter exact match atau multi-value (comma-separated): mis. IDR,USD,EUR
+            Server parse sebagai IN clause.
+        - name: "filter[workflow_status]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [DRAFT, PENDING_REVIEW, PENDING_APPROVAL, APPROVED, REJECTED, RETURNED]
+          description: "Filter: workflow status"
+      responses:
+        "200":
+          description: List mata uang berhasil
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MataUangListResponse"
+              example:
+                data:
+                  - kodeMataUang: "IDR"
+                    namaMataUang: "Rupiah Indonesia"
+                    simbol: "Rp"
+                    decimalPlaces: 0
+                    sumberKursDefault: "BI_JISDOR"
+                    frekuensiUpdate: "HARIAN"
+                    aktifFlag: true
+                    tanggalMulaiAktif: "2020-01-01"
+                    isSystemCurrency: true
+                    workflowStatus: "APPROVED"
+                    rowVersion: 3
+                    createdAt: "2020-01-01T00:00:00+07:00"
+                    createdBy: "00000000-0000-0000-0000-000000000001"
+                  - kodeMataUang: "USD"
+                    namaMataUang: "Dolar Amerika Serikat"
+                    simbol: "$"
+                    decimalPlaces: 2
+                    sumberKursDefault: "BI_JISDOR"
+                    frekuensiUpdate: "HARIAN"
+                    aktifFlag: true
+                    tanggalMulaiAktif: "2020-01-01"
+                    isSystemCurrency: false
+                    workflowStatus: "APPROVED"
+                    rowVersion: 1
+                    createdAt: "2020-01-01T00:00:00+07:00"
+                    createdBy: "00000000-0000-0000-0000-000000000001"
+                pagination:
+                  nextCursor: null
+                  hasMore: false
+                  totalEstimate: 8
+                  limit: 50
+                appliedSort:
+                  - col: kode_mata_uang
+                    dir: asc
+                appliedFilter: {}
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: |
+            Sort column tidak di-whitelist (INVALID_SORT_COL) atau
+            filter param format salah (VALIDATION_FAILED)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                invalidSortCol:
+                  value:
+                    error:
+                      code: INVALID_SORT_COL
+                      message: "Kolom sort 'nama' tidak diizinkan. Kolom yang diizinkan: kode_mata_uang, nama_mata_uang, aktif_flag, created_at, tanggal_mulai_aktif"
+                      details:
+                        - field: "sort"
+                          rule: "whitelist"
+                          message: "Kolom tidak ada di whitelist endpoint ini"
+                      traceId: "01HXY..."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      operationId: createMataUang
+      summary: Create mata uang baru (status DRAFT)
+      description: |
+        Membuat record mata uang baru dengan status DRAFT.
+        Maker (ROLE-AKUN) input data → record tersimpan di DRAFT → submit untuk review.
+
+        Permission: mata_uang.create
+        Idempotency-Key wajib (DEC-021).
+        kode_mata_uang bersifat immutable setelah create (PK, tidak bisa diubah via PUT).
+
+        Setelah create: record dalam DRAFT. Maker perlu POST .../submit untuk memulai workflow.
+        Status DRAFT bisa diedit berkali-kali sebelum submit.
+
+        Audit: MATA_UANG.CREATE ditulis di transaksi yang sama (DEC-018).
+      tags: [mata-uang]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "UUID v4. Wajib (DEC-021). TTL: 24 jam."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MataUangCreateRequest"
+            example:
+              kodeMataUang: "GBP"
+              namaMataUang: "Pound Sterling"
+              simbol: "£"
+              decimalPlaces: 2
+              sumberKursDefault: "BI_KURS_TENGAH"
+              frekuensiUpdate: "HARIAN"
+              tanggalMulaiAktif: "2026-06-03"
+      responses:
+        "201":
+          description: Mata uang berhasil dibuat dengan status DRAFT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MataUangMutationResponse"
+              example:
+                data:
+                  kodeMataUang: "GBP"
+                  namaMataUang: "Pound Sterling"
+                  simbol: "£"
+                  decimalPlaces: 2
+                  sumberKursDefault: "BI_KURS_TENGAH"
+                  frekuensiUpdate: "HARIAN"
+                  aktifFlag: true
+                  tanggalMulaiAktif: "2026-06-03"
+                  isSystemCurrency: false
+                  workflowStatus: "DRAFT"
+                  workflowInstanceId: null
+                  rowVersion: 1
+                  createdAt: "2026-06-03T08:00:00+07:00"
+                  createdBy: "550e8400-e29b-41d4-a716-446655440000"
+                  updatedAt: "2026-06-03T08:00:00+07:00"
+                  updatedBy: "550e8400-e29b-41d4-a716-446655440000"
+                  deletedAt: null
+                meta:
+                  traceId: "01HXY..."
+        "200":
+          description: Idempotency replay — response identik ke create pertama
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MataUangMutationResponse"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: |
+            kode_mata_uang sudah ada (CONFLICT) atau
+            Idempotency key duplicate dengan payload beda (IDEMPOTENCY_MISMATCH handled as 422 per convention)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: CONFLICT
+                  message: "Mata uang GBP sudah terdaftar di sistem."
+                  details:
+                    - field: "body.kodeMataUang"
+                      rule: "unique"
+                      message: "Kode mata uang GBP sudah ada"
+                  traceId: "01HXY..."
+        "422":
+          $ref: "#/components/responses/IdempotencyMismatch"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ===========================================================================
+  # EXPORT (inline vs async)
+  # ===========================================================================
+  /master/mata-uang/export:
+    get:
+      operationId: exportMataUang
+      summary: Export mata uang ke CSV atau XLSX
+      description: |
+        Export data mata uang sesuai filter dan sort aktif.
+
+        Sync (< 10k row):
+          Response: file stream langsung (Content-Disposition: attachment)
+          Header: X-Total-Rows untuk validasi client
+
+        Async (>= 10k row — jarang untuk mata_uang, tapi protocol harus siap):
+          Response: 202 Accepted { data: { jobId, type, statusUrl, streamUrl } }
+          Frontend: tampilkan <JobProgressPanel>
+          Worker: upload ke MinIO exports/{tenant}/{user}/{date}/{jobId}.csv
+
+        Filter dan sort: sama parameter dengan GET /master/mata-uang
+        Audit: MATA_UANG.EXPORT ditulis di aud.audit_log dengan row_count, format, filter aktif
+
+        Permission: mata_uang.read (semua role dengan read termasuk AUDIT)
+      tags: [mata-uang]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/exportFormatParam"
+        - $ref: "#/components/parameters/sortParam"
+        - $ref: "#/components/parameters/searchParam"
+        - name: "filter[aktif_flag]"
+          in: query
+          required: false
+          schema: { type: boolean }
+        - name: "filter[sumber_kurs_default]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [BI_JISDOR, BI_KURS_TENGAH, INTERNAL]
+        - name: "filter[frekuensi_update]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [HARIAN, INTRA_DAY, BULANAN]
+        - name: "filter[workflow_status]"
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: |
+            Sync export (< 10k row).
+            Content-Type: text/csv atau application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              example: 'attachment; filename="mata-uang-20260603.csv"'
+            X-Total-Rows:
+              schema:
+                type: integer
+              description: Jumlah baris data (tidak termasuk header row)
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+              example: |
+                Kode,Nama,Simbol,Decimal Places,Sumber Kurs,Frekuensi,Status,Tgl Mulai Aktif
+                IDR,Rupiah Indonesia,Rp,0,BI_JISDOR,HARIAN,Aktif,2020-01-01
+                USD,Dolar Amerika Serikat,$,2,BI_JISDOR,HARIAN,Aktif,2020-01-01
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        "202":
+          description: |
+            Async export (>= 10k row).
+            Frontend: subscribe SSE di streamUrl atau poll statusUrl setiap 2 detik.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      jobId: { type: string }
+                      type: { type: string, example: "EXPORT_MATA_UANG" }
+                      statusUrl: { type: string, example: "/api/v1/jobs/job_01HXYZ..." }
+                      streamUrl: { type: string, example: "/api/v1/jobs/job_01HXYZ.../stream" }
+                  meta:
+                    type: object
+                    properties:
+                      traceId: { type: string }
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ===========================================================================
+  # GET / PUT / DELETE single record
+  # ID = kode_mata_uang (CHAR 3, human-readable PK)
+  # ===========================================================================
+  /master/mata-uang/{kode}:
+    parameters:
+      - $ref: "#/components/parameters/kodeMataUangParam"
+
+    get:
+      operationId: getMataUang
+      summary: Detail satu mata uang
+      description: |
+        Mengambil detail mata uang berdasarkan kode ISO 4217.
+        Termasuk workflow status dan workflow instance info.
+        Permission: mata_uang.read
+      tags: [mata-uang]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Detail mata uang
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MataUangDetailResponse"
+              example:
+                data:
+                  kodeMataUang: "GBP"
+                  namaMataUang: "Pound Sterling"
+                  simbol: "£"
+                  decimalPlaces: 2
+                  sumberKursDefault: "BI_KURS_TENGAH"
+                  frekuensiUpdate: "HARIAN"
+                  aktifFlag: true
+                  tanggalMulaiAktif: "2026-06-03"
+                  isSystemCurrency: false
+                  workflowStatus: "PENDING_REVIEW"
+                  workflowInstanceId: "01JXYZ..."
+                  rowVersion: 1
+                  createdAt: "2026-06-03T08:00:00+07:00"
+                  createdBy: "550e8400-e29b-41d4-a716-446655440000"
+                  updatedAt: "2026-06-03T08:00:00+07:00"
+                  updatedBy: "550e8400-e29b-41d4-a716-446655440000"
+                  deletedAt: null
+                  workflow:
+                    currentState: "PENDING_REVIEW"
+                    workflowEyes: 4
+                    makerId: "550e8400-e29b-41d4-a716-446655440000"
+                    reviewerId: null
+                    approverId: null
+                    history:
+                      - action: "SUBMIT"
+                        userId: "550e8400-e29b-41d4-a716-446655440000"
+                        username: "akun.maker"
+                        role: "ROLE-AKUN"
+                        signedAt: "2026-06-03T08:30:00+07:00"
+                        signatureHash: "sha256:abc123..."
+                        comment: null
+                meta:
+                  traceId: "01HXY..."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    put:
+      operationId: updateMataUang
+      summary: Update mata uang (hanya DRAFT atau RETURNED)
+      description: |
+        Update atribut mata uang.
+
+        Guard (dicheck server-side):
+        - workflowStatus HARUS DRAFT atau RETURNED
+          → HTTP 403 MASTER_APPROVED_NO_EDIT jika bukan
+        - kode_mata_uang TIDAK BISA diubah (immutable PK)
+          → field tidak ada di request body; server ignore jika dikirim
+        - rowVersion WAJIB ada dan cocok dengan DB
+          → HTTP 409 CONFLICT jika tidak cocok
+        - is_system_currency TIDAK BISA diubah via API
+          → field diabaikan; perubahan hanya via DB migration (DEC manual)
+        - User HARUS punya permission mata_uang.update
+
+        Audit: MATA_UANG.UPDATE dengan before_jsonb dan after_jsonb
+
+        Permission: mata_uang.update (ROLE-AKUN)
+        Idempotency-Key wajib.
+      tags: [mata-uang]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MataUangUpdateRequest"
+            example:
+              namaMataUang: "British Pound Sterling"
+              simbol: "£"
+              decimalPlaces: 2
+              sumberKursDefault: "BI_KURS_TENGAH"
+              frekuensiUpdate: "HARIAN"
+              aktifFlag: true
+              tanggalMulaiAktif: "2026-06-03"
+              rowVersion: 1
+      responses:
+        "200":
+          description: Update berhasil
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MataUangMutationResponse"
+        "200 (replay)":
+          description: Idempotency replay
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MataUangMutationResponse"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Forbidden atau record tidak bisa diedit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                forbidden:
+                  value:
+                    error:
+                      code: FORBIDDEN
+                      message: "Anda tidak memiliki permission mata_uang.update"
+                      details: []
+                      traceId: "01HXY..."
+                approvedNoEdit:
+                  value:
+                    error:
+                      code: MASTER_APPROVED_NO_EDIT
+                      message: "Mata uang GBP sudah disetujui dan tidak bisa diedit langsung. Ajukan perubahan ke Finance Controller untuk diproses melalui workflow."
+                      details: []
+                      traceId: "01HXY..."
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/IdempotencyMismatch"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: deleteMataUang
+      summary: Soft-delete mata uang
+      description: |
+        Soft-delete mata uang — set deleted_at dan deleted_by.
+        Record tetap ada di DB (tidak hard-delete, DEC-018).
+
+        Guard:
+        - is_system_currency = true → HTTP 403 SYSTEM_CURRENCY_PROTECTED
+        - Ada referensi aktif di tabel lain (instrumen.kode_mata_uang, kurs, dll)
+          → HTTP 409 ENTITY_IN_USE dengan jumlah referensi
+        - workflowStatus = APPROVED dan ada referensi historis
+          → Rekomendasi: set aktif_flag=false via workflow, bukan delete
+
+        Idempotency-Key wajib.
+        Audit: MATA_UANG.DELETE dengan before_jsonb lengkap.
+
+        Permission: mata_uang.delete (ROLE-AKUN)
+      tags: [mata-uang]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Soft-delete berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      deleted: { type: boolean, example: true }
+                      deletedAt:
+                        type: string
+                        format: date-time
+                      entityId:
+                        type: string
+                        description: kode_mata_uang
+                        example: "XYZ"
+                  meta:
+                    type: object
+                    properties:
+                      traceId: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Forbidden atau system currency protected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                forbidden:
+                  value:
+                    error:
+                      code: FORBIDDEN
+                      message: "Anda tidak memiliki permission mata_uang.delete"
+                      details: []
+                      traceId: "01HXY..."
+                systemCurrencyProtected:
+                  value:
+                    error:
+                      code: SYSTEM_CURRENCY_PROTECTED
+                      message: "Mata uang IDR adalah currency fungsional Tugure dan tidak bisa dihapus."
+                      details: []
+                      traceId: "01HXY..."
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Mata uang masih direferensikan entitas lain
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: ENTITY_IN_USE
+                  message: "Mata uang USD tidak bisa dihapus karena masih digunakan oleh 12 instrumen. Nonaktifkan mata uang ini dengan mengubah aktif_flag menjadi false."
+                  details:
+                    - field: "kodeMataUang"
+                      rule: "referenced_by"
+                      message: "Direferensikan oleh 12 instrumen aktif"
+                  traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ===========================================================================
+  # AUDIT HISTORY
+  # ===========================================================================
+  /master/mata-uang/{kode}/history:
+    parameters:
+      - $ref: "#/components/parameters/kodeMataUangParam"
+
+    get:
+      operationId: getMataUangHistory
+      summary: Riwayat audit trail mata uang
+      description: |
+        Menampilkan semua aud.audit_log entries untuk mata uang ini.
+        before_jsonb dan after_jsonb hanya visible untuk ROLE-AUDIT.
+        Permission: mata_uang.read
+      tags: [mata-uang]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/cursorParam"
+        - $ref: "#/components/parameters/limitParam"
+      responses:
+        "200":
+          description: Riwayat audit trail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MataUangHistoryResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ===========================================================================
+  # WORKFLOW SIGNING ENDPOINTS
+  # Reuse pattern dari workflow.yaml tapi specific untuk mata-uang
+  # ===========================================================================
+
+  /master/mata-uang/{kode}/submit:
+    post:
+      operationId: submitMataUang
+      summary: Maker submit mata uang untuk review (DRAFT → PENDING_REVIEW)
+      description: |
+        Transisi: DRAFT atau RETURNED → PENDING_REVIEW
+
+        Guard:
+        - workflowStatus HARUS DRAFT atau RETURNED
+        - User HARUS sama dengan maker (yang create/last-update)
+        - permission mata_uang.submit
+
+        Jika dari RETURNED: audit action = MATA_UANG.RESUBMIT (bukan SUBMIT)
+        Jika dari DRAFT: audit action = MATA_UANG.SUBMIT
+
+        Idempotency-Key wajib.
+        Notifikasi in-app ke semua user dengan permission mata_uang.review.
+      tags: [mata-uang]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/kodeMataUangParam"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MataUangSubmitRequest"
+            example:
+              comment: "Mata uang GBP siap untuk review."
+              rowVersion: 1
+      responses:
+        "200":
+          description: Submit berhasil — status PENDING_REVIEW
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MataUangWorkflowActionResponse"
+              example:
+                data:
+                  entityId: "GBP"
+                  entityType: "MATA_UANG"
+                  previousState: "DRAFT"
+                  currentState: "PENDING_REVIEW"
+                  action: "SUBMIT"
+                  performedBy: "akun.maker"
+                  performedAt: "2026-06-03T08:30:00+07:00"
+                  signature:
+                    signatureHash: "sha256:abc..."
+                    signatureMethod: "JWT_STANDARD"
+                  nextActions: ["review", "reject"]
+                  workflowEyes: 4
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/WorkflowInvalidTransition"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /master/mata-uang/{kode}/review:
+    post:
+      operationId: reviewMataUang
+      summary: Reviewer sign-off (PENDING_REVIEW → PENDING_APPROVAL)
+      description: |
+        Transisi: PENDING_REVIEW → PENDING_APPROVAL
+
+        Guard:
+        - workflowStatus HARUS PENDING_REVIEW
+        - User punya permission mata_uang.review
+        - SoD: reviewer_id ≠ maker_id → SOD_VIOLATION
+        - ROLE-AKUN-CTL: mfa_verified HARUS true (DEC-026)
+
+        Audit: MATA_UANG.REVIEW
+        Idempotency-Key wajib.
+      tags: [mata-uang]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/kodeMataUangParam"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MataUangApproveRequest"
+            example:
+              comment: "Review OK — kode ISO valid, decimal places sesuai standar."
+              signatureMethod: "JWT_STANDARD"
+              rowVersion: 1
+      responses:
+        "200":
+          description: Review berhasil — status PENDING_APPROVAL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MataUangWorkflowActionResponse"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Forbidden atau SoD violation atau MFA required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                sodViolation:
+                  value:
+                    error:
+                      code: SOD_VIOLATION
+                      message: "Anda adalah pembuat mata uang ini. Tidak bisa menjadi reviewer sesuai aturan Segregation of Duties. Minta Finance Controller lain."
+                      details: []
+                      traceId: "01HXY..."
+                mfaRequired:
+                  value:
+                    error:
+                      code: MFA_REQUIRED
+                      message: "Multi-Factor Authentication wajib untuk Finance Controller. Silakan login ulang dengan MFA."
+                      details: []
+                      traceId: "01HXY..."
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/WorkflowInvalidTransition"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /master/mata-uang/{kode}/approve:
+    post:
+      operationId: approveMataUang
+      summary: Approver final approve (PENDING_APPROVAL → APPROVED)
+      description: |
+        Transisi: PENDING_APPROVAL → APPROVED
+
+        Guard (4-eyes):
+        - workflowStatus HARUS PENDING_APPROVAL
+        - User punya permission mata_uang.approve
+        - SoD: approver_id ≠ maker_id AND approver_id ≠ reviewer_id → SOD_VIOLATION
+        - ROLE-AKUN-CTL: mfa_verified HARUS true (DEC-026)
+        - WORKFLOW_CONFIG_MATA_UANG.stepUpRequired.approve = false → X-Step-Up-Token tidak diperlukan
+
+        Setelah APPROVED: mata uang aktif dan bisa digunakan di form instrumen baru.
+        Audit: MATA_UANG.APPROVE
+        Idempotency-Key wajib.
+      tags: [mata-uang]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/kodeMataUangParam"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MataUangApproveRequest"
+            example:
+              comment: "Disetujui. Mata uang GBP aktif per 2026-06-03."
+              signatureMethod: "JWT_STANDARD"
+              rowVersion: 1
+      responses:
+        "200":
+          description: Approve berhasil — status APPROVED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MataUangWorkflowActionResponse"
+              example:
+                data:
+                  entityId: "GBP"
+                  entityType: "MATA_UANG"
+                  previousState: "PENDING_APPROVAL"
+                  currentState: "APPROVED"
+                  action: "APPROVE"
+                  performedBy: "akun.ctl.1"
+                  performedAt: "2026-06-03T09:00:00+07:00"
+                  signature:
+                    signatureHash: "sha256:def..."
+                    signatureMethod: "JWT_STANDARD"
+                  nextActions: []
+                  workflowEyes: 4
+                meta:
+                  traceId: "01HXY..."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Forbidden, SoD, atau MFA required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                sodViolation:
+                  value:
+                    error:
+                      code: SOD_VIOLATION
+                      message: "Anda adalah pembuat atau reviewer mata uang ini. Tidak bisa menjadi approver sesuai aturan Segregation of Duties."
+                      details: []
+                      traceId: "01HXY..."
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/WorkflowInvalidTransition"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /master/mata-uang/{kode}/reject:
+    post:
+      operationId: rejectMataUang
+      summary: Reviewer atau Approver menolak dan mengembalikan ke Maker (→ RETURNED)
+      description: |
+        Transisi dari state PENDING_* ke RETURNED (bukan REJECTED terminal).
+        Maker bisa edit dan re-submit setelah RETURNED.
+
+        Bisa dilakukan dari:
+          PENDING_REVIEW → RETURNED (oleh reviewer)
+          PENDING_APPROVAL → RETURNED (oleh approver)
+
+        Guard:
+        - workflowStatus HARUS PENDING_REVIEW atau PENDING_APPROVAL
+        - User punya permission mata_uang.reject
+        - SoD: reviewer/approver tidak boleh sama dengan maker
+        - comment WAJIB, minLength 10 karakter (audit accountability)
+
+        Backend menyimpan sebagai: current_state='REJECTED' di sys.workflow_instance.
+        API response: workflowStatus='RETURNED' (label beda dari transaksional entity).
+        Maker dapat: edit field, lalu POST .../submit lagi (resubmit).
+
+        Audit: MATA_UANG.REJECT dengan komentar penolakan.
+        Notifikasi in-app ke maker: "[nama_reviewer] mengembalikan mata uang [kode]: [komentar]"
+        Idempotency-Key wajib.
+      tags: [mata-uang]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/kodeMataUangParam"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MataUangRejectRequest"
+            example:
+              comment: "Kode GBP sudah ada di sistem dengan nama berbeda. Harap verifikasi nama resmi sesuai ISO 4217."
+              signatureMethod: "JWT_STANDARD"
+              rowVersion: 1
+      responses:
+        "200":
+          description: Reject berhasil — status RETURNED (maker bisa re-submit)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MataUangWorkflowActionResponse"
+              example:
+                data:
+                  entityId: "GBP"
+                  entityType: "MATA_UANG"
+                  previousState: "PENDING_REVIEW"
+                  currentState: "RETURNED"
+                  action: "REJECT"
+                  performedBy: "akun.ctl.1"
+                  performedAt: "2026-06-03T08:45:00+07:00"
+                  signature:
+                    signatureHash: "sha256:xyz..."
+                    signatureMethod: "JWT_STANDARD"
+                  nextActions: []
+                  workflowEyes: 4
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: Comment wajib untuk reject
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: VALIDATION_FAILED
+                  message: "Alasan penolakan wajib diisi (minimum 10 karakter)"
+                  details:
+                    - field: "body.comment"
+                      rule: "minLength"
+                      message: "Alasan penolakan minimal 10 karakter"
+                  traceId: "01HXY..."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SodViolation"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/WorkflowInvalidTransition"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /master/mata-uang/{kode}/workflow:
+    get:
+      operationId: getMataUangWorkflow
+      summary: Status workflow dan riwayat signing
+      description: |
+        Menampilkan current workflow state + semua signature records (immutable history).
+        Permission: mata_uang.read
+      tags: [mata-uang]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/kodeMataUangParam"
+      responses:
+        "200":
+          description: Workflow status + history
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MataUangWorkflowStatusResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+# =============================================================================
+components:
+# =============================================================================
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  # ===========================================================================
+  # Parameters
+  # ===========================================================================
+  parameters:
+    kodeMataUangParam:
+      name: kode
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[A-Z]{3}$"
+        example: "GBP"
+      description: "Kode mata uang ISO 4217, 3 huruf kapital. Primary key."
+
+    cursorParam:
+      name: cursor
+      in: query
+      required: false
+      schema: { type: string }
+      description: "Opaque cursor dari pagination.nextCursor (DEC-022)"
+
+    limitParam:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+
+    sortParam:
+      name: sort
+      in: query
+      required: false
+      schema:
+        type: string
+        pattern: "^[a-z_]+(:(asc|desc))?(,[a-z_]+(:(asc|desc))?)*$"
+      description: |
+        Multi-column sort. Allowed: kode_mata_uang, nama_mata_uang, aktif_flag, created_at, tanggal_mulai_aktif
+      example: "kode_mata_uang:asc"
+
+    searchParam:
+      name: q
+      in: query
+      required: false
+      schema:
+        type: string
+        maxLength: 200
+      description: "Text search: kode_mata_uang, nama_mata_uang, simbol"
+
+    includeDeletedParam:
+      name: include_deleted
+      in: query
+      required: false
+      schema:
+        type: boolean
+        default: false
+      description: "Tampilkan soft-deleted. Hanya ROLE-AUDIT."
+
+    exportFormatParam:
+      name: format
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [csv, xlsx]
+        default: csv
+
+  # ===========================================================================
+  # Schemas — MataUang specific
+  # ===========================================================================
+  schemas:
+
+    # ---- Core entity --------------------------------------------------------
+    MataUangFields:
+      type: object
+      description: "Field-field spesifik mst.mata_uang (di luar audit fields)"
+      properties:
+        kodeMataUang:
+          type: string
+          pattern: "^[A-Z]{3}$"
+          example: "GBP"
+          description: "ISO 4217, 3 huruf kapital. Primary key. IMMUTABLE setelah create."
+        namaMataUang:
+          type: string
+          minLength: 3
+          maxLength: 60
+          example: "Pound Sterling"
+          description: "Nama lengkap mata uang"
+        simbol:
+          type: string
+          minLength: 1
+          maxLength: 5
+          example: "£"
+          description: "Simbol tampilan (mis. Rp, $, €)"
+        decimalPlaces:
+          type: integer
+          minimum: 0
+          maximum: 4
+          default: 2
+          example: 2
+          description: |
+            Jumlah digit desimal untuk tampilan amount.
+            IDR=0, USD/EUR/GBP/SGD=2, KWD=3, JPY=0.
+            Nilai ini dipakai frontend untuk format angka amount.
+        sumberKursDefault:
+          type: string
+          enum: [BI_JISDOR, BI_KURS_TENGAH, INTERNAL]
+          example: "BI_JISDOR"
+          description: |
+            Source default untuk FX rate mata uang ini.
+            BI_JISDOR: rate resmi Bank Indonesia 10:30 WIB.
+            BI_KURS_TENGAH: kurs tengah BI.
+            INTERNAL: ditetapkan manual oleh user.
+        frekuensiUpdate:
+          type: string
+          enum: [HARIAN, INTRA_DAY, BULANAN]
+          example: "HARIAN"
+          description: "Frekuensi update kurs mata uang ini"
+        aktifFlag:
+          type: boolean
+          default: true
+          description: |
+            Mata uang aktif (true) / non-aktif (false).
+            Non-aktif: tidak bisa dipilih di form instrumen baru.
+            Data historis instrumen lama tidak terpengaruh.
+        tanggalMulaiAktif:
+          type: string
+          format: date
+          example: "2026-06-03"
+          description: |
+            Tanggal mata uang mulai aktif di sistem BLIPS.
+            Tidak boleh di masa depan (validation cross-field).
+        isSystemCurrency:
+          type: boolean
+          readOnly: true
+          example: false
+          description: |
+            Mata uang fungsional sistem (IDR untuk Tugure).
+            TRUE: tidak bisa dihapus atau diubah kodenya (SYSTEM_CURRENCY_PROTECTED).
+            Set via flag, bukan hardcode. IMMUTABLE via API — hanya bisa diubah via DB.
+
+    MataUangResponse:
+      allOf:
+        - $ref: "#/components/schemas/MataUangFields"
+        - type: object
+          properties:
+            workflowStatus:
+              type: string
+              enum: [DRAFT, PENDING_REVIEW, PENDING_APPROVAL, APPROVED, RETURNED]
+            workflowInstanceId:
+              type: string
+              format: uuid
+              nullable: true
+            rowVersion:
+              type: integer
+            createdAt:
+              type: string
+              format: date-time
+            createdBy:
+              type: string
+              format: uuid
+            updatedAt:
+              type: string
+              format: date-time
+            updatedBy:
+              type: string
+              format: uuid
+            deletedAt:
+              type: string
+              format: date-time
+              nullable: true
+            deletedBy:
+              type: string
+              format: uuid
+              nullable: true
+
+    MataUangDetailResponse:
+      type: object
+      properties:
+        data:
+          allOf:
+            - $ref: "#/components/schemas/MataUangResponse"
+            - type: object
+              properties:
+                workflow:
+                  $ref: "#/components/schemas/MataUangWorkflowStatus"
+        meta:
+          type: object
+          properties:
+            traceId: { type: string }
+
+    # ---- List response ------------------------------------------------------
+    MataUangListResponse:
+      type: object
+      required: [data, pagination, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/MataUangResponse"
+        pagination:
+          type: object
+          required: [nextCursor, hasMore, limit]
+          properties:
+            nextCursor:
+              type: string
+              nullable: true
+            hasMore: { type: boolean }
+            totalEstimate:
+              type: integer
+              nullable: true
+            limit: { type: integer }
+        appliedSort:
+          type: array
+          items:
+            type: object
+            properties:
+              col: { type: string }
+              dir:
+                type: string
+                enum: [asc, desc]
+        appliedFilter:
+          type: object
+          additionalProperties: true
+        meta:
+          type: object
+          properties:
+            traceId: { type: string }
+
+    # ---- Mutation response --------------------------------------------------
+    MataUangMutationResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/MataUangResponse"
+        meta:
+          type: object
+          properties:
+            traceId: { type: string }
+
+    # ---- History response ---------------------------------------------------
+    MataUangHistoryResponse:
+      type: object
+      required: [data, pagination, meta]
+      properties:
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              eventId: { type: string, format: uuid }
+              eventTime: { type: string, format: date-time }
+              actorUserId: { type: string, format: uuid }
+              actorUsername: { type: string }
+              actorRole: { type: string }
+              action:
+                type: string
+                enum: [MATA_UANG.CREATE, MATA_UANG.UPDATE, MATA_UANG.DELETE, MATA_UANG.SUBMIT, MATA_UANG.REVIEW, MATA_UANG.APPROVE, MATA_UANG.REJECT, MATA_UANG.RESUBMIT, MATA_UANG.EXPORT]
+              beforeJsonb:
+                type: object
+                nullable: true
+                description: "Hanya untuk ROLE-AUDIT (permission audit_log.read)"
+              afterJsonb:
+                type: object
+                nullable: true
+                description: "Hanya untuk ROLE-AUDIT (permission audit_log.read)"
+              ip: { type: string, nullable: true }
+              traceId: { type: string, nullable: true }
+        pagination:
+          type: object
+          properties:
+            nextCursor: { type: string, nullable: true }
+            hasMore: { type: boolean }
+        meta:
+          type: object
+          properties:
+            traceId: { type: string }
+
+    # ---- Create Request -----------------------------------------------------
+    MataUangCreateRequest:
+      type: object
+      required:
+        - kodeMataUang
+        - namaMataUang
+        - simbol
+        - decimalPlaces
+        - sumberKursDefault
+        - frekuensiUpdate
+        - tanggalMulaiAktif
+      properties:
+        kodeMataUang:
+          type: string
+          pattern: "^[A-Z]{3}$"
+          example: "GBP"
+          description: "ISO 4217. Immutable setelah create."
+        namaMataUang:
+          type: string
+          minLength: 3
+          maxLength: 60
+          example: "Pound Sterling"
+        simbol:
+          type: string
+          minLength: 1
+          maxLength: 5
+          example: "£"
+        decimalPlaces:
+          type: integer
+          minimum: 0
+          maximum: 4
+          default: 2
+        sumberKursDefault:
+          type: string
+          enum: [BI_JISDOR, BI_KURS_TENGAH, INTERNAL]
+        frekuensiUpdate:
+          type: string
+          enum: [HARIAN, INTRA_DAY, BULANAN]
+        tanggalMulaiAktif:
+          type: string
+          format: date
+          description: "Tidak boleh di masa depan (cross-field validation)"
+          example: "2026-06-03"
+        aktifFlag:
+          type: boolean
+          default: true
+          description: "Opsional. Default true."
+
+    # ---- Update Request -----------------------------------------------------
+    MataUangUpdateRequest:
+      type: object
+      required:
+        - rowVersion
+      properties:
+        namaMataUang:
+          type: string
+          minLength: 3
+          maxLength: 60
+        simbol:
+          type: string
+          minLength: 1
+          maxLength: 5
+        decimalPlaces:
+          type: integer
+          minimum: 0
+          maximum: 4
+        sumberKursDefault:
+          type: string
+          enum: [BI_JISDOR, BI_KURS_TENGAH, INTERNAL]
+        frekuensiUpdate:
+          type: string
+          enum: [HARIAN, INTRA_DAY, BULANAN]
+        aktifFlag:
+          type: boolean
+          description: |
+            Mengubah aktif_flag false hanya jika tidak ada referensi aktif.
+            Jika ada referensi: ACTIVE_FLAG_REF_CONFLICT (422).
+        tanggalMulaiAktif:
+          type: string
+          format: date
+        rowVersion:
+          type: integer
+          description: "Optimistic lock. Wajib."
+
+    # ---- Submit Request -----------------------------------------------------
+    MataUangSubmitRequest:
+      type: object
+      required: [rowVersion]
+      properties:
+        comment:
+          type: string
+          maxLength: 500
+          nullable: true
+        rowVersion:
+          type: integer
+
+    # ---- Approve Request ----------------------------------------------------
+    MataUangApproveRequest:
+      type: object
+      required: [signatureMethod, rowVersion]
+      properties:
+        comment:
+          type: string
+          maxLength: 1000
+          nullable: true
+        signatureMethod:
+          type: string
+          enum: [JWT_STANDARD, JWT_STEP_UP]
+          default: JWT_STANDARD
+        rowVersion:
+          type: integer
+
+    # ---- Reject Request -----------------------------------------------------
+    MataUangRejectRequest:
+      type: object
+      required: [comment, signatureMethod, rowVersion]
+      properties:
+        comment:
+          type: string
+          minLength: 10
+          maxLength: 1000
+          description: "WAJIB. Alasan penolakan dikirim sebagai notifikasi ke maker."
+        signatureMethod:
+          type: string
+          enum: [JWT_STANDARD, JWT_STEP_UP]
+          default: JWT_STANDARD
+        rowVersion:
+          type: integer
+
+    # ---- Workflow action response -------------------------------------------
+    MataUangWorkflowActionResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          required: [entityId, entityType, previousState, currentState, action, performedBy, performedAt]
+          properties:
+            entityId:
+              type: string
+              description: "kode_mata_uang"
+              example: "GBP"
+            entityType:
+              type: string
+              example: "MATA_UANG"
+            previousState:
+              $ref: "#/components/schemas/MataUangWorkflowStateEnum"
+            currentState:
+              $ref: "#/components/schemas/MataUangWorkflowStateEnum"
+            action:
+              type: string
+              enum: [SUBMIT, REVIEW, APPROVE, REJECT]
+            performedBy:
+              type: string
+              description: "preferred_username dari JWT"
+            performedAt:
+              type: string
+              format: date-time
+            signature:
+              type: object
+              properties:
+                signatureHash: { type: string }
+                signatureMethod:
+                  type: string
+                  enum: [JWT_STANDARD, JWT_STEP_UP]
+            nextActions:
+              type: array
+              items: { type: string }
+              description: "Actions yang tersedia dari state saat ini. Kosong jika terminal."
+            workflowEyes:
+              type: integer
+              enum: [4, 6]
+              example: 4
+        meta:
+          type: object
+          properties:
+            traceId: { type: string }
+
+    # ---- Workflow status (embedded in GET detail) ---------------------------
+    MataUangWorkflowStatus:
+      type: object
+      properties:
+        currentState:
+          $ref: "#/components/schemas/MataUangWorkflowStateEnum"
+        workflowEyes:
+          type: integer
+          enum: [4, 6]
+          example: 4
+        makerId:
+          type: string
+          format: uuid
+          nullable: true
+        reviewerId:
+          type: string
+          format: uuid
+          nullable: true
+        approverId:
+          type: string
+          format: uuid
+          nullable: true
+        history:
+          type: array
+          items:
+            type: object
+            properties:
+              action:
+                type: string
+                enum: [SUBMIT, REVIEW, APPROVE, REJECT]
+              userId: { type: string, format: uuid }
+              username: { type: string }
+              role: { type: string }
+              signedAt: { type: string, format: date-time }
+              signatureHash: { type: string }
+              comment:
+                type: string
+                nullable: true
+
+    MataUangWorkflowStatusResponse:
+      type: object
+      properties:
+        data:
+          $ref: "#/components/schemas/MataUangWorkflowStatus"
+        meta:
+          type: object
+          properties:
+            traceId: { type: string }
+
+    # ---- State enum ---------------------------------------------------------
+    MataUangWorkflowStateEnum:
+      type: string
+      enum: [DRAFT, PENDING_REVIEW, PENDING_APPROVAL, APPROVED, RETURNED]
+      description: |
+        State lifecycle mata uang.
+        RETURNED = dikembalikan ke maker; maker bisa edit + resubmit.
+        Tidak ada PENDING_APPROVAL_2 (mata_uang = 4-eyes, bukan 6-eyes).
+
+    # ---- Error envelope (inline untuk self-contained) -----------------------
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details, traceId]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  rule: { type: string }
+                  message: { type: string }
+            traceId: { type: string }
+
+  # ===========================================================================
+  # Responses (reusable shortcuts)
+  # ===========================================================================
+  responses:
+    ValidationFailed:
+      description: Validasi field atau cross-field gagal
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: VALIDATION_FAILED
+              message: "2 field tidak valid"
+              details:
+                - field: "body.kodeMataUang"
+                  rule: "pattern"
+                  message: "Kode mata uang harus 3 huruf kapital sesuai ISO 4217 (contoh: IDR, USD, EUR)"
+                - field: "body.decimalPlaces"
+                  rule: "max"
+                  message: "Decimal places harus antara 0 dan 4"
+              traceId: "01HXY..."
+    Unauthorized:
+      description: JWT tidak valid
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Forbidden:
+      description: Permission tidak terpenuhi
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    SodViolation:
+      description: SoD violation
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    NotFound:
+      description: Mata uang tidak ditemukan
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: NOT_FOUND
+              message: "Mata uang GBP tidak ditemukan."
+              details: []
+              traceId: "01HXY..."
+    Conflict:
+      description: Optimistic lock conflict (row_version mismatch)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: CONFLICT
+              message: "Mata uang GBP telah diubah oleh user lain. Muat ulang halaman untuk melihat data terbaru."
+              details: []
+              traceId: "01HXY..."
+    WorkflowInvalidTransition:
+      description: State machine menolak transisi
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    IdempotencyMismatch:
+      description: Idempotency-Key sudah dipakai dengan payload berbeda
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    RateLimited:
+      description: Too many requests
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
