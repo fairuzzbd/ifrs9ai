@@ -38,6 +38,10 @@ const (
 	CodeStepUpExpired              Code = "STEP_UP_EXPIRED"
 	CodeJobNotCancellable          Code = "JOB_NOT_CANCELLABLE"
 	CodeJobNotFound                Code = "JOB_NOT_FOUND"
+	// Master-data module codes (shared across all mst.* modules)
+	CodeSystemCurrencyProtected Code = "SYSTEM_CURRENCY_PROTECTED"
+	CodeEntityInUse             Code = "ENTITY_IN_USE"
+	CodeMasterApprovedNoEdit    Code = "MASTER_APPROVED_NO_EDIT"
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
@@ -51,6 +55,10 @@ func (c Code) HTTPStatus() int {
 		CodeSoDApprover1SameAsMaker, CodeSoDApprover2SameAsReviewer,
 		CodeStepUpRequired, CodeStepUpExpired:
 		return http.StatusForbidden
+	case CodeSystemCurrencyProtected, CodeMasterApprovedNoEdit:
+		return http.StatusForbidden
+	case CodeEntityInUse:
+		return http.StatusConflict
 	case CodeNotFound, CodeJobNotFound:
 		return http.StatusNotFound
 	case CodeConflict:

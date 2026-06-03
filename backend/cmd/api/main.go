@@ -33,6 +33,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/common/middleware"
 	"blips-ifrs9.tugu-re.com/internal/config"
 	"blips-ifrs9.tugu-re.com/internal/document"
+	"blips-ifrs9.tugu-re.com/internal/master/matauang"
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
 )
@@ -251,6 +252,18 @@ func main() {
 
 	// Register document routes: POST /api/v1/documents, GET /api/v1/documents/{id}
 	document.RegisterRoutes(v1, docHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Mata Uang (APP-A-MSTR-002)
+	// Routes: GET/POST /api/v1/master/mata-uang, GET/PUT/DELETE /api/v1/master/mata-uang/:kode
+	//         GET /api/v1/master/mata-uang/export
+	//         POST /api/v1/master/mata-uang/:kode/{submit,review,approve,reject}
+	//         GET  /api/v1/master/mata-uang/:kode/{history,workflow}
+	// -----------------------------------------------------------------------
+	mataUangRepo := matauang.NewDBRepository(db)
+	mataUangSvc := matauang.NewService(mataUangRepo, auditWriter, logger)
+	mataUangHandler := matauang.NewHandler(mataUangSvc, wfHandler)
+	matauang.RegisterRoutes(v1, mataUangHandler)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,
