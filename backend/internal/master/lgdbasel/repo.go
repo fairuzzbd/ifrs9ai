@@ -390,7 +390,7 @@ func (r *DBRepository) CountReferences(ctx context.Context, id uuid.UUID) (int64
 
 	// Quote identifier safely: refTable comes from information_schema (trusted
 	// pg_catalog source, not user input — safe to interpolate into SQL).
-	// #nosec G201 -- refTable origin is information_schema, sanitised by Postgres.
+	// #nosec G201 -- refTable origin is information_schema, sanitized by Postgres.
 	q := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE lgd_pool_id = $1", refTable.String) //nolint:gosec
 	var count int64
 	if err := r.db.QueryRowContext(ctx, q, id).Scan(&count); err != nil {

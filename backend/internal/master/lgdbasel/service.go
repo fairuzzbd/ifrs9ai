@@ -565,7 +565,7 @@ func (s *Service) validateUpdate(req UpdateRequest) (*decimal.Decimal, error) {
 	var lgdPtr *decimal.Decimal
 	if req.LGD != nil {
 		d, err := decimal.NewFromString(*req.LGD)
-		if err != nil {
+		if err != nil { //nolint:gocritic // chained conditions check different fields
 			details = append(details, domainerrors.Detail{
 				Field:   "body.lgd",
 				Rule:    "decimal",
