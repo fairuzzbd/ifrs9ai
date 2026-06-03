@@ -45,6 +45,12 @@ interface ApprovalWithSignatureProps {
   sodBlocked: boolean;
   sodMessage?: string;
   submitting?: boolean;
+  /**
+   * When true, signals that this approval step requires MFA step-up (DEC-027).
+   * A warning banner is shown to the approver before they act.
+   * The calling code is responsible for passing signatureMethod="JWT_STEP_UP" to the API.
+   */
+  requireStepUpMfa?: boolean;
   onApprove: (comment: string | undefined) => void;
   onReject: (comment: string) => void;
   className?: string;
@@ -59,6 +65,7 @@ export function ApprovalWithSignature({
   sodBlocked,
   sodMessage,
   submitting = false,
+  requireStepUpMfa = false,
   onApprove,
   onReject,
   className,
@@ -185,6 +192,27 @@ export function ApprovalWithSignature({
     <div className={cn("space-y-4", className)}>
       <h4 className="text-sm font-semibold">Tindakan</h4>
       <Separator />
+
+      {/* MFA step-up warning banner */}
+      {requireStepUpMfa && (
+        <div
+          role="alert"
+          className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2"
+        >
+          <svg
+            className="mt-0.5 h-4 w-4 shrink-0 text-amber-600"
+            viewBox="0 0 16 16"
+            fill="currentColor"
+            aria-hidden
+          >
+            <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 11a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm.75-4.25a.75.75 0 0 1-1.5 0V5a.75.75 0 0 1 1.5 0v2.75z" />
+          </svg>
+          <p className="text-xs text-amber-800">
+            Langkah ini memerlukan <strong>MFA step-up</strong> (DEC-027).
+            Pastikan Anda sudah melakukan verifikasi MFA terkini sebelum memberikan persetujuan.
+          </p>
+        </div>
+      )}
 
       {/* Comment textarea */}
       <div className="space-y-2">

@@ -107,7 +107,7 @@ export type WorkflowSubmitInput = z.infer<typeof workflowSubmitSchema>;
 // ---------------------------------------------------------------------------
 
 export interface WorkflowHistoryEntry {
-  action: "SUBMIT" | "REVIEW" | "APPROVE" | "REJECT";
+  action: "SUBMIT" | "REVIEW" | "APPROVE" | "APPROVE_2" | "REJECT";
   userId: string;
   username: string;
   role: string;
@@ -122,6 +122,7 @@ export interface WorkflowStatus {
   makerId: string | null;
   reviewerId: string | null;
   approverId: string | null;
+  approverId2?: string | null;
   history: WorkflowHistoryEntry[];
 }
 
