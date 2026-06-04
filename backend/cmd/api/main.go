@@ -33,7 +33,9 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/common/middleware"
 	"blips-ifrs9.tugu-re.com/internal/config"
 	"blips-ifrs9.tugu-re.com/internal/document"
+	"blips-ifrs9.tugu-re.com/internal/master/counterparty"
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
+	"blips-ifrs9.tugu-re.com/internal/master/ratinghistory"
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
 )
@@ -83,7 +85,9 @@ func main() {
 		}
 	}
 
-	// JWT Verifier (optional; dipakai di auth middleware).
+	// JWT Verifier (mandatory in staging/production; dev-only opt-out).
+	// Per security-engineer audit SECURITY-counterparty-2026-06-04 F-01: refuse
+	// to boot without JWT in non-dev environments — never silently disable auth.
 	var jwtVerifier *auth.Verifier
 	if cfg.JWTPublicKeyPEM != "" {
 		pk, err := parseRSAPublicKey(cfg.JWTPublicKeyPEM)
@@ -94,6 +98,11 @@ func main() {
 		jwtVerifier = auth.NewVerifier(pk, cfg.JWTIssuer)
 		logger.Info("JWT verification enabled (RSA-2048)")
 	} else {
+		if cfg.AppEnv == "production" || cfg.AppEnv == "staging" {
+			logger.Error("JWT_PUBLIC_KEY_PEM is required in staging/production. Refusing to start.",
+				"app_env", cfg.AppEnv)
+			os.Exit(1)
+		}
 		logger.Warn("JWT_PUBLIC_KEY_PEM not set — JWT verification DISABLED (dev only)")
 	}
 
@@ -264,6 +273,27 @@ func main() {
 	mataUangSvc := matauang.NewService(mataUangRepo, auditWriter, logger)
 	mataUangHandler := matauang.NewHandler(mataUangSvc, wfHandler)
 	matauang.RegisterRoutes(v1, mataUangHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Counterparty + Rating History (APP-A, modul 7, 4-eyes).
+	// BLOCKING security-engineer untuk PII (DEC-028): npwp/nomor_rekening/ktp
+	// encrypted via sec.encrypt/decrypt. PII default response masked, full
+	// decrypt via GET /:id/pii (requires counterparty.view_pii + audit).
+	// -----------------------------------------------------------------------
+	counterpartyRepo := counterparty.NewDBRepository(db)
+	counterpartySvc := counterparty.NewService(counterpartyRepo, auditWriter, logger)
+	counterpartyHook := counterparty.NewWorkflowHook(counterpartySvc)
+	wfService.RegisterEntityHook("COUNTERPARTY", counterpartyHook)
+	counterpartyHandler := counterparty.NewHandler(counterpartySvc, wfHandler)
+	counterparty.RegisterRoutes(v1, counterpartyHandler)
+
+	ratingHistoryRepo := ratinghistory.NewDBRepository(db)
+	ratingHistorySvc := ratinghistory.NewService(ratingHistoryRepo, counterpartyRepo, auditWriter, logger)
+	ratingHistoryHook := ratinghistory.NewWorkflowHook(ratingHistorySvc)
+	wfService.RegisterEntityHook("RATING_HISTORY", ratingHistoryHook)
+	ratingHistoryHandler := ratinghistory.NewHandler(ratingHistorySvc, wfHandler)
+	ratinghistory.RegisterRoutes(v1, ratingHistoryHandler)
+	ratinghistory.RegisterCounterpartyNestedRoutes(v1, ratingHistoryHandler)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,
