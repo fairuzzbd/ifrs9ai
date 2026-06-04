@@ -14,6 +14,21 @@ import (
 	domainerrors "blips-ifrs9.tugu-re.com/internal/common/errors"
 )
 
+// EntityHook is implemented by domain modules that want to be notified
+// after a workflow state transition completes (post-commit). It is called
+// non-fatally: errors are logged as warnings but do not roll back the transition.
+type EntityHook interface {
+	OnTransition(ctx context.Context, evt HookEvent) error
+}
+
+// HookEvent carries the data passed to EntityHook.OnTransition.
+type HookEvent struct {
+	EntityID   uuid.UUID // surrogate UUID of the domain entity
+	EntityType string    // e.g. "CHART_OF_ACCOUNTS"
+	NewState   string    // e.g. "APPROVED"
+	Action     string    // e.g. "APPROVE"
+}
+
 // Service is the workflow service layer. It owns the transaction boundary:
 //   - loads the instance
 //   - calls engine.Transition (pure business logic, no DB)
@@ -25,6 +40,7 @@ type Service struct {
 	repo        Repository
 	auditWriter *audit.Writer
 	logger      *slog.Logger
+	entityHooks map[string]EntityHook // entityType (UPPER) → hook
 }
 
 // NewService constructs a Service.
@@ -37,7 +53,14 @@ func NewService(engine *Engine, repo Repository, auditWriter *audit.Writer, logg
 		repo:        repo,
 		auditWriter: auditWriter,
 		logger:      logger,
+		entityHooks: make(map[string]EntityHook),
 	}
+}
+
+// RegisterEntityHook registers a hook for the given entityType (case-insensitive).
+// Call this during wiring (main.go) before serving requests.
+func (s *Service) RegisterEntityHook(entityType string, hook EntityHook) {
+	s.entityHooks[strings.ToUpper(entityType)] = hook
 }
 
 // SubmitInput is the request payload for Submit.
@@ -306,6 +329,24 @@ func (s *Service) performTransition(ctx context.Context, p transitionParams) (*A
 	if tx != nil {
 		if err = tx.Commit(); err != nil {
 			return nil, fmt.Errorf("workflow service: commit: %w", err)
+		}
+	}
+
+	// Dispatch EntityHook post-commit (non-fatal: log warn on error).
+	if hook, ok := s.entityHooks[strings.ToUpper(p.entityType)]; ok {
+		evt := HookEvent{
+			EntityID:   inst.EntityID,
+			EntityType: p.entityType,
+			NewState:   string(result.NewState),
+			Action:     string(p.action),
+		}
+		if hookErr := hook.OnTransition(ctx, evt); hookErr != nil {
+			s.logger.WarnContext(ctx, "workflow entity hook failed (non-fatal)",
+				"entityType", p.entityType,
+				"entityID", p.entityID,
+				"action", p.action,
+				"error", hookErr,
+			)
 		}
 	}
 

@@ -33,6 +33,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/common/middleware"
 	"blips-ifrs9.tugu-re.com/internal/config"
 	"blips-ifrs9.tugu-re.com/internal/document"
+	"blips-ifrs9.tugu-re.com/internal/master/coa"
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
@@ -264,6 +265,27 @@ func main() {
 	mataUangSvc := matauang.NewService(mataUangRepo, auditWriter, logger)
 	mataUangHandler := matauang.NewHandler(mataUangSvc, wfHandler)
 	matauang.RegisterRoutes(v1, mataUangHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Chart of Accounts (APP-A-MSTR-COA)
+	// Routes: GET/POST /api/v1/master/coa
+	//         GET /api/v1/master/coa/export
+	//         POST /api/v1/master/coa/import-xlsx
+	//         GET  /api/v1/master/coa/import-jobs/:jobId
+	//         GET/PATCH/DELETE /api/v1/master/coa/:id
+	//         GET /api/v1/master/coa/:id/{history,workflow}
+	//         POST /api/v1/master/coa/:id/{submit,review,approve,reject}
+	// -----------------------------------------------------------------------
+	coaRepo := coa.NewDBRepository(db)
+	coaJobRepo := coa.NewDBJobRepository(db)
+	coaSvc := coa.NewService(coaRepo, auditWriter, logger)
+	coaImporter := coa.NewImporter(coaRepo, coaJobRepo, auditWriter, nil /* Asynq: nil = sync goroutine */, logger)
+	coaHandler := coa.NewHandler(coaSvc, coaImporter, wfHandler)
+	coa.RegisterRoutes(v1, coaHandler)
+
+	// Register EntityHook so workflow transitions sync coa.workflow_status.
+	coaHook := coa.NewWorkflowHook(coaSvc)
+	wfService.RegisterEntityHook("CHART_OF_ACCOUNTS", coaHook)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,
