@@ -34,6 +34,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/config"
 	"blips-ifrs9.tugu-re.com/internal/document"
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
+	"blips-ifrs9.tugu-re.com/internal/master/portofolio"
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
 )
@@ -264,6 +265,19 @@ func main() {
 	mataUangSvc := matauang.NewService(mataUangRepo, auditWriter, logger)
 	mataUangHandler := matauang.NewHandler(mataUangSvc, wfHandler)
 	matauang.RegisterRoutes(v1, mataUangHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Portofolio (APP-A-MSTR-010)
+	// Routes: GET/POST /api/v1/master/portofolio
+	//         GET/PUT/DELETE /api/v1/master/portofolio/:kode
+	//         GET /api/v1/master/portofolio/export
+	//         POST /api/v1/master/portofolio/:kode/{submit,review,approve,reject}
+	//         GET  /api/v1/master/portofolio/:kode/{history,workflow}
+	// -----------------------------------------------------------------------
+	portofolioRepo := portofolio.NewDBRepository(db)
+	portofolioSvc := portofolio.NewService(portofolioRepo, auditWriter, logger)
+	portofolioHandler := portofolio.NewHandler(portofolioSvc, wfHandler)
+	portofolio.RegisterRoutes(v1, portofolioHandler)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,

@@ -42,6 +42,10 @@ const (
 	CodeSystemCurrencyProtected Code = "SYSTEM_CURRENCY_PROTECTED"
 	CodeEntityInUse             Code = "ENTITY_IN_USE"
 	CodeMasterApprovedNoEdit    Code = "MASTER_APPROVED_NO_EDIT"
+	// Portofolio-specific codes
+	CodePortofolioDuplicateKode    Code = "PORTOFOLIO_DUPLICATE_KODE"
+	CodePortofolioInvalidKodeFormat Code = "PORTOFOLIO_INVALID_KODE_FORMAT"
+	CodePortofolioInvalidBMCategory Code = "PORTOFOLIO_INVALID_BM_CATEGORY"
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
@@ -57,8 +61,10 @@ func (c Code) HTTPStatus() int {
 		return http.StatusForbidden
 	case CodeSystemCurrencyProtected, CodeMasterApprovedNoEdit:
 		return http.StatusForbidden
-	case CodeEntityInUse:
+	case CodeEntityInUse, CodePortofolioDuplicateKode:
 		return http.StatusConflict
+	case CodePortofolioInvalidKodeFormat, CodePortofolioInvalidBMCategory:
+		return http.StatusBadRequest
 	case CodeNotFound, CodeJobNotFound:
 		return http.StatusNotFound
 	case CodeConflict:
