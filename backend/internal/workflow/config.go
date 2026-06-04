@@ -285,5 +285,23 @@ func DefaultConfigs() map[string]*Config {
 				Approver2NotAnyPrevious:    true,
 			},
 		},
+		// APP-D: Mapping Jurnal (4-eyes, AKUN → AKUN-CTL review → AKUN-CTL approve)
+		"MAPPING_JURNAL": {
+			EntityType:  "MAPPING_JURNAL",
+			Eyes:        4,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":  "mapping_jurnal.submit",
+				"review":  "mapping_jurnal.review",
+				"approve": "mapping_jurnal.approve",
+				"reject":  "mapping_jurnal.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": false},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    false,
+			},
+		},
 	}
 }

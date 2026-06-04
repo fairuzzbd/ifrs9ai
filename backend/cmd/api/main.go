@@ -33,6 +33,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/common/middleware"
 	"blips-ifrs9.tugu-re.com/internal/config"
 	"blips-ifrs9.tugu-re.com/internal/document"
+	"blips-ifrs9.tugu-re.com/internal/master/mappingjurnal"
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
@@ -264,6 +265,26 @@ func main() {
 	mataUangSvc := matauang.NewService(mataUangRepo, auditWriter, logger)
 	mataUangHandler := matauang.NewHandler(mataUangSvc, wfHandler)
 	matauang.RegisterRoutes(v1, mataUangHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Mapping Jurnal (APP-D)
+	// Routes: GET/POST /api/v1/master/mapping-jurnal
+	//         GET/PATCH/DELETE /api/v1/master/mapping-jurnal/:id
+	//         GET /api/v1/master/mapping-jurnal/export
+	//         POST /api/v1/master/mapping-jurnal/:id/{submit,review,approve,reject}
+	//         GET  /api/v1/master/mapping-jurnal/:id/{history,workflow}
+	//
+	// Workflow hook: keeps mst.mapping_jurnal_header.workflow_status in sync with
+	// sys.workflow_instance after each transition. On APPROVE also enforces:
+	//   - sum(DEBIT multiplier) == sum(KREDIT multiplier) ±0.0001
+	//   - All referenced CoA rows must have workflow_status='APPROVED'
+	// -----------------------------------------------------------------------
+	mappingJurnalRepo := mappingjurnal.NewDBRepository(db)
+	mappingJurnalSvc := mappingjurnal.NewService(mappingJurnalRepo, auditWriter, logger)
+	mappingJurnalHook := mappingjurnal.NewWorkflowHook(mappingJurnalSvc)
+	wfService.RegisterHook("MAPPING_JURNAL", mappingJurnalHook)
+	mappingJurnalHandler := mappingjurnal.NewHandler(mappingJurnalSvc, wfHandler)
+	mappingjurnal.RegisterRoutes(v1, mappingJurnalHandler)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,

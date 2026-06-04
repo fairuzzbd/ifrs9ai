@@ -25,6 +25,7 @@ type Service struct {
 	repo        Repository
 	auditWriter *audit.Writer
 	logger      *slog.Logger
+	hooks       map[string]EntityHook // entityType (upper snake) → hook
 }
 
 // NewService constructs a Service.
@@ -37,7 +38,14 @@ func NewService(engine *Engine, repo Repository, auditWriter *audit.Writer, logg
 		repo:        repo,
 		auditWriter: auditWriter,
 		logger:      logger,
+		hooks:       make(map[string]EntityHook),
 	}
+}
+
+// RegisterHook registers an EntityHook for the given entity type (upper snake_case).
+// Must be called before the first request is served. Not thread-safe after startup.
+func (s *Service) RegisterHook(entityType string, hook EntityHook) {
+	s.hooks[strings.ToUpper(entityType)] = hook
 }
 
 // SubmitInput is the request payload for Submit.
@@ -306,6 +314,23 @@ func (s *Service) performTransition(ctx context.Context, p transitionParams) (*A
 	if tx != nil {
 		if err = tx.Commit(); err != nil {
 			return nil, fmt.Errorf("workflow service: commit: %w", err)
+		}
+	}
+
+	// Call entity hook (if registered) to sync domain entity's workflow_status column.
+	// Hook runs AFTER the workflow transaction commits so it opens its own tx.
+	entityTypeUpper := strings.ToUpper(p.entityType)
+	if hook, ok := s.hooks[entityTypeUpper]; ok {
+		if hookErr := hook.OnTransition(ctx, p.entityType, inst.EntityID, string(result.NewState), string(p.action)); hookErr != nil {
+			// Log but do not fail the workflow action — the workflow state is already committed.
+			// The entity's workflow_status column will be eventually consistent on next load.
+			s.logger.ErrorContext(ctx, "workflow hook OnTransition failed",
+				"entityType", p.entityType,
+				"entityID", p.entityID,
+				"action", p.action,
+				"newState", result.NewState,
+				"error", hookErr,
+			)
 		}
 	}
 

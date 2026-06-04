@@ -42,6 +42,10 @@ const (
 	CodeSystemCurrencyProtected Code = "SYSTEM_CURRENCY_PROTECTED"
 	CodeEntityInUse             Code = "ENTITY_IN_USE"
 	CodeMasterApprovedNoEdit    Code = "MASTER_APPROVED_NO_EDIT"
+
+	// Mapping jurnal module codes
+	CodeMappingJurnalDebitCreditMismatch  Code = "MAPPING_JURNAL_DEBIT_CREDIT_MISMATCH"
+	CodeMappingJurnalKodeAkunNotApproved  Code = "MAPPING_JURNAL_KODE_AKUN_NOT_APPROVED"
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
@@ -66,7 +70,8 @@ func (c Code) HTTPStatus() int {
 	case CodeIdempotencyReplay:
 		return http.StatusOK // replay: return original status
 	case CodeIdempotencyMismatch, CodeWorkflowInvalidTransition,
-		CodeSPPITestIncomplete, CodeBMAssessmentRequired, CodeJobNotCancellable:
+		CodeSPPITestIncomplete, CodeBMAssessmentRequired, CodeJobNotCancellable,
+		CodeMappingJurnalDebitCreditMismatch, CodeMappingJurnalKodeAkunNotApproved:
 		return http.StatusUnprocessableEntity
 	case CodePeriodeClosed, CodeECLParamFrozen:
 		return 423 // Locked
