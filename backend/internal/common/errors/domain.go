@@ -42,6 +42,15 @@ const (
 	CodeSystemCurrencyProtected Code = "SYSTEM_CURRENCY_PROTECTED"
 	CodeEntityInUse             Code = "ENTITY_IN_USE"
 	CodeMasterApprovedNoEdit    Code = "MASTER_APPROVED_NO_EDIT"
+
+	// instrumen-specific codes
+	CodeInstrumenDuplicateKode            Code = "INSTRUMEN_DUPLICATE_KODE"
+	CodeInstrumenCounterpartyNotApproved  Code = "INSTRUMEN_COUNTERPARTY_NOT_APPROVED"
+	CodeInstrumenPortofolioNotApproved    Code = "INSTRUMEN_PORTOFOLIO_NOT_APPROVED"
+	CodeInstrumenMataUangNotApproved      Code = "INSTRUMEN_MATA_UANG_NOT_APPROVED"
+	CodeInstrumenInvalidTipe              Code = "INSTRUMEN_INVALID_TIPE"
+	CodeInstrumenKlasifikasiLocked        Code = "INSTRUMEN_KLASIFIKASI_LOCKED"
+	CodeInstrumenMissingKustodian         Code = "INSTRUMEN_MISSING_KUSTODIAN"
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
@@ -68,6 +77,14 @@ func (c Code) HTTPStatus() int {
 	case CodeIdempotencyMismatch, CodeWorkflowInvalidTransition,
 		CodeSPPITestIncomplete, CodeBMAssessmentRequired, CodeJobNotCancellable:
 		return http.StatusUnprocessableEntity
+	case CodeInstrumenDuplicateKode:
+		return http.StatusConflict
+	case CodeInstrumenCounterpartyNotApproved, CodeInstrumenPortofolioNotApproved,
+		CodeInstrumenMataUangNotApproved, CodeInstrumenInvalidTipe,
+		CodeInstrumenMissingKustodian:
+		return http.StatusUnprocessableEntity
+	case CodeInstrumenKlasifikasiLocked:
+		return 423 // Locked
 	case CodePeriodeClosed, CodeECLParamFrozen:
 		return 423 // Locked
 	case CodeRateLimited:

@@ -14,17 +14,32 @@ import (
 	domainerrors "blips-ifrs9.tugu-re.com/internal/common/errors"
 )
 
+// EntityHook is called post-commit after a workflow transition completes.
+// Implementations sync entity-level workflow_status. Errors logged WARN,
+// non-fatal (workflow transition already committed).
+type EntityHook interface {
+	OnTransition(ctx context.Context, evt HookEvent) error
+}
+
+// HookEvent carries post-commit transition data.
+type HookEvent struct {
+	EntityID   uuid.UUID
+	EntityType string
+	NewState   string
+	Action     string
+}
+
 // Service is the workflow service layer. It owns the transaction boundary:
 //   - loads the instance
 //   - calls engine.Transition (pure business logic, no DB)
 //   - updates instance state + inserts signature + writes audit — all in one tx
-//
-// All methods take context.Context and propagate trace/tenant/user per convention.
+//   - dispatches registered EntityHooks post-commit
 type Service struct {
 	engine      *Engine
 	repo        Repository
 	auditWriter *audit.Writer
 	logger      *slog.Logger
+	entityHooks map[string]EntityHook
 }
 
 // NewService constructs a Service.
@@ -37,7 +52,19 @@ func NewService(engine *Engine, repo Repository, auditWriter *audit.Writer, logg
 		repo:        repo,
 		auditWriter: auditWriter,
 		logger:      logger,
+		entityHooks: make(map[string]EntityHook),
 	}
+}
+
+// RegisterEntityHook registers a hook for the given entity type (upper).
+func (s *Service) RegisterEntityHook(entityType string, hook EntityHook) {
+	if hook == nil {
+		return
+	}
+	if s.entityHooks == nil {
+		s.entityHooks = make(map[string]EntityHook)
+	}
+	s.entityHooks[strings.ToUpper(entityType)] = hook
 }
 
 // SubmitInput is the request payload for Submit.
@@ -306,6 +333,23 @@ func (s *Service) performTransition(ctx context.Context, p transitionParams) (*A
 	if tx != nil {
 		if err = tx.Commit(); err != nil {
 			return nil, fmt.Errorf("workflow service: commit: %w", err)
+		}
+	}
+
+	// Post-commit EntityHook dispatch (non-fatal).
+	if hook, ok := s.entityHooks[strings.ToUpper(p.entityType)]; ok && hook != nil {
+		if hookErr := hook.OnTransition(ctx, HookEvent{
+			EntityID:   inst.EntityID,
+			EntityType: p.entityType,
+			NewState:   string(result.NewState),
+			Action:     string(p.action),
+		}); hookErr != nil {
+			s.logger.WarnContext(ctx, "workflow entity hook failed",
+				"error", hookErr,
+				"entityType", p.entityType,
+				"entityID", inst.EntityID,
+				"action", p.action,
+			)
 		}
 	}
 

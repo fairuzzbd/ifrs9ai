@@ -33,6 +33,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/common/middleware"
 	"blips-ifrs9.tugu-re.com/internal/config"
 	"blips-ifrs9.tugu-re.com/internal/document"
+	"blips-ifrs9.tugu-re.com/internal/master/instrumen"
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
@@ -264,6 +265,21 @@ func main() {
 	mataUangSvc := matauang.NewService(mataUangRepo, auditWriter, logger)
 	mataUangHandler := matauang.NewHandler(mataUangSvc, wfHandler)
 	matauang.RegisterRoutes(v1, mataUangHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Instrumen (APP-A-MSTR-011)
+	// Routes: GET/POST /api/v1/master/instrumen
+	//         GET /api/v1/master/instrumen/export
+	//         GET/PUT/DELETE /api/v1/master/instrumen/:id
+	//         POST /api/v1/master/instrumen/:id/{submit,review,approve,reject}
+	//         GET  /api/v1/master/instrumen/:id/{history,workflow}
+	// -----------------------------------------------------------------------
+	instrumenRepo := instrumen.NewDBRepository(db)
+	instrumenSvc := instrumen.NewService(instrumenRepo, auditWriter, logger)
+	instrumenHook := instrumen.NewWorkflowHook(instrumenSvc)
+	wfService.RegisterEntityHook("INSTRUMEN", instrumenHook)
+	instrumenHandler := instrumen.NewHandler(instrumenSvc, wfHandler)
+	instrumen.RegisterRoutes(v1, instrumenHandler)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,
