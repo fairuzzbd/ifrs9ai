@@ -285,11 +285,26 @@ func DefaultConfigs() map[string]*Config {
 				Approver2NotAnyPrevious:    true,
 			},
 		},
-		// BOBOT_SKENARIO — 6-eyes ECL parameter (DEC-010, DEC-017).
-		// Scenario weights (G/N/B) default 0.25/0.50/0.25; ALCO can override but
-		// sum MUST equal 1.0. Both approve steps require step-up MFA (DEC-027).
-		// SoD: approver2 ≠ maker ∧ ≠ reviewer ∧ ≠ approver1.
-		// Source of truth: WORKFLOW_CONFIG_BOBOT_SKENARIO seeded in migration 0008.
+		// LGD_BASEL — 6-eyes ECL parameter. Both approvals require step-up MFA (DEC-027).
+		"LGD_BASEL": {
+			EntityType:  "LGD_BASEL",
+			Eyes:        6,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":   "ecl_parameter.submit",
+				"review":   "ecl_parameter.review",
+				"approve":  "ecl_parameter.approve",
+				"approve2": "ecl_parameter.approve",
+				"reject":   "ecl_parameter.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": true, "approve2": true},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    true,
+			},
+		},
+		// BOBOT_SKENARIO — 6-eyes ECL parameter (DEC-010 sum=1.0).
 		"BOBOT_SKENARIO": {
 			EntityType:  "BOBOT_SKENARIO",
 			Eyes:        6,

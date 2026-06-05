@@ -15,21 +15,21 @@ import (
 )
 
 // repoAdapter is a flexible Repository stub for unit tests.
-// Set only the sub-stubs needed for each test; unset stubs use zero-value behaviour.
+// Set only the sub-stubs needed for each test; unset stubs use zero-value behavior.
 type repoAdapter struct {
-	createStub            *stubCreate
-	getByIDStub           *stubGetByID
-	listStub              *stubList
-	updateStub            *stubUpdate
-	softDeleteStub        *stubSoftDelete
-	exportStub            *stubExport
-	countRefStub          *stubCountRef
-	countOverlapStub      *stubCountOverlap
-	countDuplicateStub    *stubCountDuplicate
-	countByPeriodStub     *stubCountByPeriod
-	sumByPeriodStub       *stubSumByPeriod
-	sumByPeriodTxStub     *stubSumByPeriod
-	updateWFStatusTxStub  *stubUpdateWFStatusTx
+	createStub           *stubCreate
+	getByIDStub          *stubGetByID
+	listStub             *stubList
+	updateStub           *stubUpdate
+	softDeleteStub       *stubSoftDelete
+	exportStub           *stubExport
+	countRefStub         *stubCountRef
+	countOverlapStub     *stubCountOverlap
+	countDuplicateStub   *stubCountDuplicate
+	countByPeriodStub    *stubCountByPeriod
+	sumByPeriodStub      *stubSumByPeriod
+	sumByPeriodTxStub    *stubSumByPeriod
+	updateWFStatusTxStub *stubUpdateWFStatusTx
 }
 
 var _ bobotskenario.Repository = (*repoAdapter)(nil)

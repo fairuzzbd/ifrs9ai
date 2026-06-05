@@ -34,7 +34,9 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/config"
 	"blips-ifrs9.tugu-re.com/internal/document"
 	"blips-ifrs9.tugu-re.com/internal/master/bobotskenario"
+	"blips-ifrs9.tugu-re.com/internal/master/lgdbasel"
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
+	"blips-ifrs9.tugu-re.com/internal/master/periodebuku"
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
 )
@@ -267,22 +269,34 @@ func main() {
 	matauang.RegisterRoutes(v1, mataUangHandler)
 
 	// -----------------------------------------------------------------------
-	// Master Data — Bobot Skenario (APP-C ECL Parameter, DEC-010)
-	// Routes: GET/POST /api/v1/master/bobot-skenario
-	//         POST /api/v1/master/bobot-skenario/seed-default
-	//         GET  /api/v1/master/bobot-skenario/export
-	//         GET/PATCH/DELETE /api/v1/master/bobot-skenario/:id
-	//         POST /api/v1/master/bobot-skenario/:id/{submit,review,approve,approve2,reject}
-	//         GET  /api/v1/master/bobot-skenario/:id/{history,workflow}
+	// Master Data — Periode Buku (APP-D-MSTR-001)
+	// -----------------------------------------------------------------------
+	periodeBukuRepo := periodebuku.NewDBRepository(db)
+	periodeBukuSvc := periodebuku.NewService(periodeBukuRepo, auditWriter, logger)
+	periodeBukuHandler := periodebuku.NewHandler(periodeBukuSvc, wfHandler)
+	periodebuku.RegisterRoutes(v1, periodeBukuHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — LGD Basel (APP-C-MSTR-ECL-001, 6-eyes + step-up MFA)
+	// -----------------------------------------------------------------------
+	lgdBaselRepo := lgdbasel.NewDBRepository(db)
+	lgdBaselSvc := lgdbasel.NewService(lgdBaselRepo, auditWriter, logger)
+	lgdBaselHandler := lgdbasel.NewHandler(lgdBaselSvc, wfHandler)
+	lgdbasel.RegisterRoutes(v1, lgdBaselHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Bobot Skenario (APP-C ECL Parameter, DEC-010 sum=1.0)
 	// -----------------------------------------------------------------------
 	bobotSkenarioRepo := bobotskenario.NewDBRepository(db)
 	bobotSkenarioSvc := bobotskenario.NewService(bobotSkenarioRepo, auditWriter, logger)
 	bobotSkenarioHandler := bobotskenario.NewHandler(bobotSkenarioSvc, wfHandler)
 	bobotskenario.RegisterRoutes(v1, bobotSkenarioHandler)
 
-	// Wire entity hook: runs inside workflow tx before commit.
-	// Enforces DEC-010 sum=1.0 invariant atomically on approve2 → APPROVED,
-	// and syncs mst.bobot_skenario.workflow_status in the same transaction (BLOCKER 1+2 fix).
+	// Wire entity hook (post-commit pattern from lgd_basel merge).
+	// NOTE: original bobot design used pre-commit (BLOCKER 1+2 fix); after lgd_basel
+	// landed first with post-commit EntityHook interface, this adapts to that. The
+	// DEC-010 sum=1.0 invariant is now checked post-commit with a TOCTOU window
+	// documented as a follow-up ticket for Phase 5 hardening.
 	bobotSkenarioHook := bobotskenario.NewWorkflowHook(bobotSkenarioSvc, bobotSkenarioRepo)
 	wfService.RegisterEntityHook("BOBOT_SKENARIO", bobotSkenarioHook)
 

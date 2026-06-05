@@ -103,8 +103,8 @@ func (h *WorkflowHook) checkSumInvariantTx(ctx context.Context, tx *sql.Tx, e *B
 				"%s 1.0. DEC-010. Rollback dilakukan — tidak ada perubahan tersimpan.",
 				e.PeriodeBerlakuDari, totalSum.StringFixed(8), direction),
 			domainerrors.Detail{
-				Field:   "bobot",
-				Rule:    "sum_invariant",
+				Field: "bobot",
+				Rule:  "sum_invariant",
 				Message: fmt.Sprintf("Sum bobot = %s, expected 1.0 (tolerance %s)",
 					totalSum.StringFixed(8), SumTolerance.String()),
 			},

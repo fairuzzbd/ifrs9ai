@@ -15,13 +15,14 @@ import (
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
+	"log/slog"
+
 	"blips-ifrs9.tugu-re.com/internal/audit"
 	"blips-ifrs9.tugu-re.com/internal/auth"
 	domainerrors "blips-ifrs9.tugu-re.com/internal/common/errors"
 	"blips-ifrs9.tugu-re.com/internal/common/pagination"
 	"blips-ifrs9.tugu-re.com/internal/master/bobotskenario"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
-	"log/slog"
 )
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
@@ -293,13 +294,13 @@ func TestValidate_PeriodOrder(t *testing.T) {
 		sampai     *string
 		wantValErr bool
 	}{
-		{"2026-01-01", nil, false},                // open-ended, valid
-		{"2026-01-01", ptr("2026-12-31"), false},  // sampai > dari, valid
-		{"2026-01-01", ptr("2026-01-01"), false},  // sampai == dari, valid (same day)
-		{"2026-06-01", ptr("2026-01-01"), true},   // sampai < dari, invalid
-		{"not-a-date", nil, true},                 // dari bad format
-		{"2026-01-01", ptr("not-a-date"), true},   // sampai bad format
-		{"2026-13-01", nil, false},                // format is valid (no calendar validation) — service accepts format-correct strings
+		{"2026-01-01", nil, false},               // open-ended, valid
+		{"2026-01-01", ptr("2026-12-31"), false}, // sampai > dari, valid
+		{"2026-01-01", ptr("2026-01-01"), false}, // sampai == dari, valid (same day)
+		{"2026-06-01", ptr("2026-01-01"), true},  // sampai < dari, invalid
+		{"not-a-date", nil, true},                // dari bad format
+		{"2026-01-01", ptr("not-a-date"), true},  // sampai bad format
+		{"2026-13-01", nil, false},               // format is valid (no calendar validation) — service accepts format-correct strings
 	}
 	for i, tc := range cases {
 		t.Run(fmt.Sprintf("case_%d", i), func(t *testing.T) {
@@ -419,7 +420,7 @@ func TestSumInvariant_ExactlyOne_Passes(t *testing.T) {
 
 	// Other rows sum = 0.75 (NORMAL=0.50 + BAD=0.25)
 	svc := buildSvc(&repoAdapter{
-		getByIDStub:    &stubGetByID{result: e},
+		getByIDStub:     &stubGetByID{result: e},
 		sumByPeriodStub: &stubSumByPeriod{sum: decimal.RequireFromString("0.75000000")},
 	})
 	ctx := auth.ContextWithClaims(context.Background(), testClaims())
@@ -439,7 +440,7 @@ func TestSumInvariant_LessThanOne_Rejected(t *testing.T) {
 	// Total = 0.75 < 1.0
 	e := testBobotSkenarioWith(bobotskenario.SkenarioGood, "0.25000000", bobotskenario.WorkflowStatusPendingApproval2)
 	svc := buildSvc(&repoAdapter{
-		getByIDStub:    &stubGetByID{result: e},
+		getByIDStub:     &stubGetByID{result: e},
 		sumByPeriodStub: &stubSumByPeriod{sum: decimal.RequireFromString("0.50000000")},
 	})
 	ctx := auth.ContextWithClaims(context.Background(), testClaims())
@@ -469,7 +470,7 @@ func TestSumInvariant_GreaterThanOne_Rejected(t *testing.T) {
 	// Total = 1.10 > 1.0
 	e := testBobotSkenarioWith(bobotskenario.SkenarioGood, "0.30000000", bobotskenario.WorkflowStatusPendingApproval2)
 	svc := buildSvc(&repoAdapter{
-		getByIDStub:    &stubGetByID{result: e},
+		getByIDStub:     &stubGetByID{result: e},
 		sumByPeriodStub: &stubSumByPeriod{sum: decimal.RequireFromString("0.80000000")},
 	})
 	ctx := auth.ContextWithClaims(context.Background(), testClaims())
@@ -499,7 +500,7 @@ func TestSumInvariant_WithinTolerance_Passes(t *testing.T) {
 	e := testBobotSkenarioWith(bobotskenario.SkenarioGood, "0.25000000", bobotskenario.WorkflowStatusPendingApproval2)
 	// other sum = 0.75000000 → total = 1.00000000 (within tolerance)
 	svc := buildSvc(&repoAdapter{
-		getByIDStub:    &stubGetByID{result: e},
+		getByIDStub:     &stubGetByID{result: e},
 		sumByPeriodStub: &stubSumByPeriod{sum: decimal.RequireFromString("0.75000000")},
 	})
 	ctx := auth.ContextWithClaims(context.Background(), testClaims())
@@ -572,7 +573,7 @@ func TestSumInvariant_TableDriven(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := testBobotSkenarioWith(bobotskenario.SkenarioGood, tc.entityBobot, bobotskenario.WorkflowStatusPendingApproval2)
 			svc := buildSvc(&repoAdapter{
-				getByIDStub:    &stubGetByID{result: e},
+				getByIDStub:     &stubGetByID{result: e},
 				sumByPeriodStub: &stubSumByPeriod{sum: decimal.RequireFromString(tc.otherSum)},
 			})
 			ctx := auth.ContextWithClaims(context.Background(), testClaims())
@@ -611,7 +612,7 @@ func TestSumInvariant_NonApproveTransition_SkipsCheck(t *testing.T) {
 	e := testBobotSkenario()
 	// sumByPeriod returns 0 — sum would fail if checked.
 	svc := buildSvc(&repoAdapter{
-		getByIDStub:    &stubGetByID{result: e},
+		getByIDStub:     &stubGetByID{result: e},
 		sumByPeriodStub: &stubSumByPeriod{sum: decimal.Zero},
 	})
 	ctx := auth.ContextWithClaims(context.Background(), testClaims())

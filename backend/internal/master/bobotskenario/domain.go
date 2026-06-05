@@ -157,7 +157,7 @@ type BobotSkenario struct {
 
 	// Business fields.
 	Skenario             Skenario        `db:"skenario"`
-	Bobot                decimal.Decimal `db:"bobot"`   // NUMERIC(10,8), [0,1]
+	Bobot                decimal.Decimal `db:"bobot"`                  // NUMERIC(10,8), [0,1]
 	PeriodeBerlakuDari   string          `db:"periode_berlaku_dari"`   // DATE → "YYYY-MM-DD"
 	PeriodeBerlakuSampai *string         `db:"periode_berlaku_sampai"` // nullable = currently active
 	Catatan              *string         `db:"catatan"`                // free text, nullable
@@ -328,16 +328,16 @@ type AuditHistoryItem struct {
 
 // WorkflowActionRequest is the request body for submit/review/approve/approve2/reject.
 type WorkflowActionRequest struct {
-	Comment        *string `json:"comment"`
+	Comment         *string `json:"comment"`
 	SignatureMethod string  `json:"signatureMethod"`
-	RowVersion     *int64  `json:"rowVersion"`
+	RowVersion      *int64  `json:"rowVersion"`
 }
 
 // WorkflowRejectRequest adds the mandatory comment for reject.
 type WorkflowRejectRequest struct {
-	Comment        string `json:"comment"        binding:"required,min=10"`
+	Comment         string `json:"comment"        binding:"required,min=10"`
 	SignatureMethod string `json:"signatureMethod"`
-	RowVersion     *int64 `json:"rowVersion"`
+	RowVersion      *int64 `json:"rowVersion"`
 }
 
 // SeedDefaultResult is returned by the seed-default endpoint.

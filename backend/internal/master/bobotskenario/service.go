@@ -440,7 +440,7 @@ func (s *Service) SeedDefault(ctx context.Context, req SeedDefaultRequest) (*See
 		return nil, fmt.Errorf("service.SeedDefault: begin tx: %w", err)
 	}
 
-	var createdIDs []string
+	createdIDs := make([]string, 0, len(AllSkenarios))
 	for _, sk := range AllSkenarios {
 		e := &BobotSkenario{
 			ID:                   uuid.New(),
@@ -725,7 +725,7 @@ func (s *Service) validateUpdate(req UpdateRequest) (*decimal.Decimal, error) {
 	var bobotPtr *decimal.Decimal
 	if req.Bobot != nil {
 		d, err := decimal.NewFromString(*req.Bobot)
-		if err != nil {
+		if err != nil { //nolint:gocritic // chained conditions check different fields
 			details = append(details, domainerrors.Detail{
 				Field:   "body.bobot",
 				Rule:    "decimal",

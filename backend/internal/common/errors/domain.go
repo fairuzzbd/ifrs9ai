@@ -43,15 +43,10 @@ const (
 	CodeEntityInUse             Code = "ENTITY_IN_USE"
 	CodeMasterApprovedNoEdit    Code = "MASTER_APPROVED_NO_EDIT"
 
-	// LGD Basel period overlap (lgdbasel module). HTTP 422.
-	CodeLGDPeriodOverlap Code = "LGD_PERIOD_OVERLAP"
-
-	// Bobot Skenario specific codes. HTTP 422.
-	// CodeBobotSumInvariantViolated is returned when G+N+B bobot ≠ 1.0 (DEC-010).
-	CodeBobotSumInvariantViolated Code = "BOBOT_SUM_INVARIANT_VIOLATED"
-	// CodeBobotPeriodOverlap is returned when a skenario has an overlapping period.
-	CodeBobotPeriodOverlap Code = "BOBOT_PERIOD_OVERLAP"
-	// CodeBobotDuplicateSkenarioPeriod is returned when same (skenario, period) tuple already exists.
+	// ECL parameter module codes — HTTP 422.
+	CodeLGDPeriodOverlap             Code = "LGD_PERIOD_OVERLAP"
+	CodeBobotSumInvariantViolated    Code = "BOBOT_SUM_INVARIANT_VIOLATED"
+	CodeBobotPeriodOverlap           Code = "BOBOT_PERIOD_OVERLAP"
 	CodeBobotDuplicateSkenarioPeriod Code = "BOBOT_DUPLICATE_SKENARIO_PERIOD"
 )
 

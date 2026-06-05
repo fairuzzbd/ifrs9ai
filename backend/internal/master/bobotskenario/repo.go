@@ -381,7 +381,8 @@ func (r *DBRepository) CountReferences(ctx context.Context, id uuid.UUID) (int64
 		return 0, nil
 	}
 
-	q := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE bobot_skenario_id = $1", refTable.String)
+	// #nosec G201 -- refTable from information_schema (trusted catalog source).
+	q := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE bobot_skenario_id = $1", refTable.String) //nolint:gosec
 	var count int64
 	if err := r.db.QueryRowContext(ctx, q, id).Scan(&count); err != nil {
 		return 0, fmt.Errorf("repo.CountReferences bobot_skenario: %w", err)
