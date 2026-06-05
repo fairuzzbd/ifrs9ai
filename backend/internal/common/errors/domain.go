@@ -43,11 +43,11 @@ const (
 	CodeEntityInUse             Code = "ENTITY_IN_USE"
 	CodeMasterApprovedNoEdit    Code = "MASTER_APPROVED_NO_EDIT"
 
-	// ECL parameter module codes
-	// CodeLGDPeriodOverlap is returned when a new lgd_basel entry has a period that
-	// overlaps an existing entry of the same tipe_eksposur. HTTP 422: caller must
-	// verify with ALCO before proceeding.
-	CodeLGDPeriodOverlap Code = "LGD_PERIOD_OVERLAP"
+	// ECL parameter module codes — HTTP 422.
+	CodeLGDPeriodOverlap             Code = "LGD_PERIOD_OVERLAP"
+	CodeBobotSumInvariantViolated    Code = "BOBOT_SUM_INVARIANT_VIOLATED"
+	CodeBobotPeriodOverlap           Code = "BOBOT_PERIOD_OVERLAP"
+	CodeBobotDuplicateSkenarioPeriod Code = "BOBOT_DUPLICATE_SKENARIO_PERIOD"
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
@@ -73,6 +73,7 @@ func (c Code) HTTPStatus() int {
 		return http.StatusOK // replay: return original status
 	case CodeIdempotencyMismatch, CodeWorkflowInvalidTransition,
 		CodeSPPITestIncomplete, CodeBMAssessmentRequired, CodeJobNotCancellable,
+		CodeBobotSumInvariantViolated, CodeBobotPeriodOverlap, CodeBobotDuplicateSkenarioPeriod,
 		CodeLGDPeriodOverlap:
 		return http.StatusUnprocessableEntity
 	case CodePeriodeClosed, CodeECLParamFrozen:

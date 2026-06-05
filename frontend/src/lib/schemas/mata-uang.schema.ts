@@ -122,6 +122,7 @@ export interface WorkflowStatus {
   makerId: string | null;
   reviewerId: string | null;
   approverId: string | null;
+  approverId2?: string | null;
   history: WorkflowHistoryEntry[];
 }
 

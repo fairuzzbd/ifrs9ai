@@ -33,6 +33,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/common/middleware"
 	"blips-ifrs9.tugu-re.com/internal/config"
 	"blips-ifrs9.tugu-re.com/internal/document"
+	"blips-ifrs9.tugu-re.com/internal/master/bobotskenario"
 	"blips-ifrs9.tugu-re.com/internal/master/lgdbasel"
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
 	"blips-ifrs9.tugu-re.com/internal/master/periodebuku"
@@ -276,13 +277,28 @@ func main() {
 	periodebuku.RegisterRoutes(v1, periodeBukuHandler)
 
 	// -----------------------------------------------------------------------
-	// Master Data — LGD Basel (APP-C-MSTR-ECL-001)
-	// ECL parameter: 6-eyes workflow, both approve + approve2 require step-up MFA.
+	// Master Data — LGD Basel (APP-C-MSTR-ECL-001, 6-eyes + step-up MFA)
 	// -----------------------------------------------------------------------
 	lgdBaselRepo := lgdbasel.NewDBRepository(db)
 	lgdBaselSvc := lgdbasel.NewService(lgdBaselRepo, auditWriter, logger)
 	lgdBaselHandler := lgdbasel.NewHandler(lgdBaselSvc, wfHandler)
 	lgdbasel.RegisterRoutes(v1, lgdBaselHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Bobot Skenario (APP-C ECL Parameter, DEC-010 sum=1.0)
+	// -----------------------------------------------------------------------
+	bobotSkenarioRepo := bobotskenario.NewDBRepository(db)
+	bobotSkenarioSvc := bobotskenario.NewService(bobotSkenarioRepo, auditWriter, logger)
+	bobotSkenarioHandler := bobotskenario.NewHandler(bobotSkenarioSvc, wfHandler)
+	bobotskenario.RegisterRoutes(v1, bobotSkenarioHandler)
+
+	// Wire entity hook (post-commit pattern from lgd_basel merge).
+	// NOTE: original bobot design used pre-commit (BLOCKER 1+2 fix); after lgd_basel
+	// landed first with post-commit EntityHook interface, this adapts to that. The
+	// DEC-010 sum=1.0 invariant is now checked post-commit with a TOCTOU window
+	// documented as a follow-up ticket for Phase 5 hardening.
+	bobotSkenarioHook := bobotskenario.NewWorkflowHook(bobotSkenarioSvc, bobotSkenarioRepo)
+	wfService.RegisterEntityHook("BOBOT_SKENARIO", bobotSkenarioHook)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,
