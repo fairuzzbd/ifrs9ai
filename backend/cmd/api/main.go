@@ -34,6 +34,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/config"
 	"blips-ifrs9.tugu-re.com/internal/document"
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
+	"blips-ifrs9.tugu-re.com/internal/master/periodebuku"
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
 )
@@ -264,6 +265,21 @@ func main() {
 	mataUangSvc := matauang.NewService(mataUangRepo, auditWriter, logger)
 	mataUangHandler := matauang.NewHandler(mataUangSvc, wfHandler)
 	matauang.RegisterRoutes(v1, mataUangHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Periode Buku (APP-D-MSTR-001)
+	// Routes: GET/POST /api/v1/master/periode-buku
+	//         POST /api/v1/master/periode-buku/generate
+	//         GET  /api/v1/master/periode-buku/export
+	//         GET/PATCH/DELETE /api/v1/master/periode-buku/:id
+	//         POST /api/v1/master/periode-buku/:id/{submit,review,approve,reject}
+	//         GET  /api/v1/master/periode-buku/:id/{history,workflow}
+	// Note: softclose/hardclose/reopen endpoints belong to APP-D Phase 5 (out of scope here).
+	// -----------------------------------------------------------------------
+	periodeBukuRepo := periodebuku.NewDBRepository(db)
+	periodeBukuSvc := periodebuku.NewService(periodeBukuRepo, auditWriter, logger)
+	periodeBukuHandler := periodebuku.NewHandler(periodeBukuSvc, wfHandler)
+	periodebuku.RegisterRoutes(v1, periodeBukuHandler)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,
