@@ -285,5 +285,24 @@ func DefaultConfigs() map[string]*Config {
 				Approver2NotAnyPrevious:    true,
 			},
 		},
+		// KURS — 4-eyes manual override.
+		// BI JISDOR feed auto-approves via integration worker (bypasses workflow).
+		"KURS": {
+			EntityType:  "KURS",
+			Eyes:        4,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":  "kurs.submit",
+				"review":  "kurs.review",
+				"approve": "kurs.approve",
+				"reject":  "kurs.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": false},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    false,
+			},
+		},
 	}
 }

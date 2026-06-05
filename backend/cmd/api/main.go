@@ -33,6 +33,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/common/middleware"
 	"blips-ifrs9.tugu-re.com/internal/config"
 	"blips-ifrs9.tugu-re.com/internal/document"
+	"blips-ifrs9.tugu-re.com/internal/master/kurs"
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
@@ -264,6 +265,22 @@ func main() {
 	mataUangSvc := matauang.NewService(mataUangRepo, auditWriter, logger)
 	mataUangHandler := matauang.NewHandler(mataUangSvc, wfHandler)
 	matauang.RegisterRoutes(v1, mataUangHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Kurs / FX Rates (APP-A-MSTR-009)
+	// Routes: GET/POST /api/v1/master/kurs
+	//         POST    /api/v1/master/kurs/jisdor-sync
+	//         GET     /api/v1/master/kurs/export
+	//         GET/PUT/DELETE /api/v1/master/kurs/:id
+	//         POST    /api/v1/master/kurs/:id/{submit,review,approve,reject}
+	//         GET     /api/v1/master/kurs/:id/{history,workflow}
+	// -----------------------------------------------------------------------
+	kursRepo := kurs.NewDBRepository(db)
+	kursSvc := kurs.NewService(kursRepo, auditWriter, logger)
+	kursHook := kurs.NewWorkflowHook(kursSvc)
+	wfService.RegisterEntityHook("KURS", kursHook)
+	kursHandler := kurs.NewHandler(kursSvc, wfHandler)
+	kurs.RegisterRoutes(v1, kursHandler)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,
