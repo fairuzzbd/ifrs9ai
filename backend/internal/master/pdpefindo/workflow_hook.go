@@ -2,40 +2,30 @@ package pdpefindo
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
-	"github.com/google/uuid"
+	"blips-ifrs9.tugu-re.com/internal/workflow"
 )
 
-// WorkflowHook implements the workflow.EntityHook interface for mst.pd_pefindo.
-// It keeps workflow_status on the entity row in sync with sys.workflow_instance.
-//
-// Pattern: after each successful workflow transition, the workflow.Service calls
-// OnTransition on all registered entity hooks. This hook updates
-// mst.pd_pefindo.workflow_status so CRUD endpoints can filter by it without
-// joining to sys.workflow_instance on every query.
-//
-// Registration in main.go:
-//
-//	pdPefindoHook := pdpefindo.NewWorkflowHook(pdPefindoSvc)
-//	wfService.RegisterEntityHook("PD_PEFINDO", pdPefindoHook)
+// WorkflowHook implements workflow.EntityHook for PD_PEFINDO entities.
+// BeforeCommit runs inside the workflow transaction to keep
+// mst.pd_pefindo.workflow_status in sync atomically.
 type WorkflowHook struct {
-	svc *Service
+	svc  *Service
+	repo Repository
 }
 
-// NewWorkflowHook constructs a WorkflowHook backed by the pd_pefindo Service.
-func NewWorkflowHook(svc *Service) *WorkflowHook {
-	return &WorkflowHook{svc: svc}
+// NewWorkflowHook constructs a WorkflowHook bound to the given service + repo.
+func NewWorkflowHook(svc *Service, repo Repository) *WorkflowHook {
+	return &WorkflowHook{svc: svc, repo: repo}
 }
 
-// OnTransition is called by workflow.Service after each state transition commit.
-// It syncs mst.pd_pefindo.workflow_status to match the new workflow state.
-//
-// The ctx passed here already contains the actor's JWT claims (propagated from
-// the original HTTP request context), so requireActor() in service will succeed.
-func (h *WorkflowHook) OnTransition(ctx context.Context, entityID uuid.UUID, newState string, action string) error {
-	if err := h.svc.SyncWorkflowStatus(ctx, entityID, newState, action); err != nil {
-		return fmt.Errorf("pdpefindo WorkflowHook.OnTransition: %w", err)
+// BeforeCommit syncs workflow_status on mst.pd_pefindo inside the workflow tx.
+func (h *WorkflowHook) BeforeCommit(ctx context.Context, tx *sql.Tx, evt workflow.HookEvent) error {
+	wfStatus := mapWorkflowState(string(evt.NewState))
+	if err := h.repo.UpdateWorkflowStatus(ctx, tx, evt.EntityID, wfStatus, evt.ActorID); err != nil {
+		return fmt.Errorf("pdpefindo.WorkflowHook.BeforeCommit: %w", err)
 	}
 	return nil
 }

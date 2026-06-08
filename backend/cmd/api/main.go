@@ -33,8 +33,12 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/common/middleware"
 	"blips-ifrs9.tugu-re.com/internal/config"
 	"blips-ifrs9.tugu-re.com/internal/document"
+	"blips-ifrs9.tugu-re.com/internal/master/bobotskenario"
+	"blips-ifrs9.tugu-re.com/internal/master/lgdbasel"
+	"blips-ifrs9.tugu-re.com/internal/master/lpscoverage"
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
 	"blips-ifrs9.tugu-re.com/internal/master/pdpefindo"
+	"blips-ifrs9.tugu-re.com/internal/master/periodebuku"
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
 )
@@ -267,24 +271,53 @@ func main() {
 	matauang.RegisterRoutes(v1, mataUangHandler)
 
 	// -----------------------------------------------------------------------
+	// Master Data — Periode Buku (APP-D-MSTR-001)
+	// -----------------------------------------------------------------------
+	periodeBukuRepo := periodebuku.NewDBRepository(db)
+	periodeBukuSvc := periodebuku.NewService(periodeBukuRepo, auditWriter, logger)
+	periodeBukuHandler := periodebuku.NewHandler(periodeBukuSvc, wfHandler)
+	periodebuku.RegisterRoutes(v1, periodeBukuHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — LGD Basel (APP-C-MSTR-ECL-001, 6-eyes + step-up MFA)
+	// -----------------------------------------------------------------------
+	lgdBaselRepo := lgdbasel.NewDBRepository(db)
+	lgdBaselSvc := lgdbasel.NewService(lgdBaselRepo, auditWriter, logger)
+	lgdBaselHandler := lgdbasel.NewHandler(lgdBaselSvc, wfHandler)
+	lgdbasel.RegisterRoutes(v1, lgdBaselHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Bobot Skenario (APP-C ECL Parameter, DEC-010 sum=1.0)
+	// -----------------------------------------------------------------------
+	bobotSkenarioRepo := bobotskenario.NewDBRepository(db)
+	bobotSkenarioSvc := bobotskenario.NewService(bobotSkenarioRepo, auditWriter, logger)
+	bobotSkenarioHandler := bobotskenario.NewHandler(bobotSkenarioSvc, wfHandler)
+	bobotskenario.RegisterRoutes(v1, bobotSkenarioHandler)
+
+	bobotSkenarioHook := bobotskenario.NewWorkflowHook(bobotSkenarioSvc, bobotSkenarioRepo)
+	wfService.RegisterEntityHook("BOBOT_SKENARIO", bobotSkenarioHook)
+
+	// -----------------------------------------------------------------------
+	// Master Data — LPS Coverage (APP-C ECL Parameter, DEC-014 IDR 2M cap)
+	// -----------------------------------------------------------------------
+	lpsCoverageRepo := lpscoverage.NewDBRepository(db)
+	lpsCoverageSvc := lpscoverage.NewService(lpsCoverageRepo, auditWriter, logger)
+	lpsCoverageHook := lpscoverage.NewWorkflowHook(lpsCoverageSvc, lpsCoverageRepo)
+	wfService.RegisterEntityHook("LPS_COVERAGE", lpsCoverageHook)
+	lpsCoverageHandler := lpscoverage.NewHandler(lpsCoverageSvc, wfHandler)
+	lpscoverage.RegisterRoutes(v1, lpsCoverageHandler)
+
+	// -----------------------------------------------------------------------
 	// Master Data — PD Pefindo (APP-A ECL Param, MSTR-PDPefindo)
 	// 6-eyes workflow: ROLE-RISK → ROLE-AKUN-CTL → ROLE-ALCO × 2
 	// Both approve + approve2 require step-up MFA (DEC-027).
-	// Routes: GET/POST /api/v1/master/pd-pefindo
-	//         POST     /api/v1/master/pd-pefindo/upload-xlsx
-	//         GET      /api/v1/master/pd-pefindo/upload-jobs/:jobId
-	//         GET/PATCH/DELETE /api/v1/master/pd-pefindo/:id
-	//         POST     /api/v1/master/pd-pefindo/:id/{submit,review,approve,approve2,reject}
-	//         GET      /api/v1/master/pd-pefindo/:id/{history,workflow}
 	// -----------------------------------------------------------------------
 	pdPefindoRepo := pdpefindo.NewDBRepository(db)
 	pdPefindoSvc := pdpefindo.NewService(pdPefindoRepo, auditWriter, logger)
 	pdPefindoUploadSvc := pdpefindo.NewUploadService(pdPefindoRepo, auditWriter, logger)
 	pdPefindoHandler := pdpefindo.NewHandler(pdPefindoSvc, pdPefindoUploadSvc, wfHandler, nil /* asynq: nil = sync fallback in dev */)
 	pdpefindo.RegisterRoutes(v1, pdPefindoHandler)
-
-	// Register EntityHook so workflow transitions sync mst.pd_pefindo.workflow_status.
-	pdPefindoHook := pdpefindo.NewWorkflowHook(pdPefindoSvc)
+	pdPefindoHook := pdpefindo.NewWorkflowHook(pdPefindoSvc, pdPefindoRepo)
 	wfService.RegisterEntityHook("PD_PEFINDO", pdPefindoHook)
 
 	srv := &http.Server{

@@ -285,9 +285,64 @@ func DefaultConfigs() map[string]*Config {
 				Approver2NotAnyPrevious:    true,
 			},
 		},
-		// PD_PEFINDO — 6-eyes: ROLE-RISK → ROLE-AKUN-CTL(review) → ROLE-ALCO(approve) → ROLE-ALCO2(approve2)
-		// Both approve + approve2 require step-up MFA (DEC-027).
-		// Source: migration 0007 sys.config seed WORKFLOW_CONFIG_PD_PEFINDO.
+		// LGD_BASEL — 6-eyes ECL parameter. Both approvals require step-up MFA (DEC-027).
+		"LGD_BASEL": {
+			EntityType:  "LGD_BASEL",
+			Eyes:        6,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":   "ecl_parameter.submit",
+				"review":   "ecl_parameter.review",
+				"approve":  "ecl_parameter.approve",
+				"approve2": "ecl_parameter.approve",
+				"reject":   "ecl_parameter.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": true, "approve2": true},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    true,
+			},
+		},
+		// BOBOT_SKENARIO — 6-eyes ECL parameter (DEC-010 sum=1.0).
+		"BOBOT_SKENARIO": {
+			EntityType:  "BOBOT_SKENARIO",
+			Eyes:        6,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":   "ecl_parameter.submit",
+				"review":   "ecl_parameter.review",
+				"approve":  "ecl_parameter.approve",
+				"approve2": "ecl_parameter.approve",
+				"reject":   "ecl_parameter.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": true, "approve2": true},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    true,
+			},
+		},
+		// LPS_COVERAGE — 6-eyes ECL parameter (DEC-014 IDR 2M cap).
+		"LPS_COVERAGE": {
+			EntityType:  "LPS_COVERAGE",
+			Eyes:        6,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":   "ecl_parameter.submit",
+				"review":   "ecl_parameter.review",
+				"approve":  "ecl_parameter.approve",
+				"approve2": "ecl_parameter.approve",
+				"reject":   "ecl_parameter.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": true, "approve2": true},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    true,
+			},
+		},
+		// PD_PEFINDO — 6-eyes ECL parameter (DEC-027 step-up MFA on approve + approve2).
 		"PD_PEFINDO": {
 			EntityType:  "PD_PEFINDO",
 			Eyes:        6,

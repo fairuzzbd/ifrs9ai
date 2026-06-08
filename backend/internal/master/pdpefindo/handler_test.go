@@ -674,21 +674,21 @@ func TestCreate_IdD_PD1_IsValid(t *testing.T) {
 	}
 }
 
-// ─── Workflow EntityHook test ─────────────────────────────────────────────────
+// ─── Workflow EntityHook test (BeforeCommit) ─────────────────────────────────
 
-func TestWorkflowHook_OnTransition_CallsSyncWorkflowStatus(t *testing.T) {
+func TestWorkflowHook_BeforeCommit_CallsRepoUpdate(t *testing.T) {
 	p := testPDPefindo()
 	adapter := &repoAdapter{getByID: &stubGetByID{result: p}}
 	svc := pdpefindo.NewService(adapter, audit.NewWriter(nil), slog.Default())
-	hook := pdpefindo.NewWorkflowHook(svc)
+	hook := pdpefindo.NewWorkflowHook(svc, adapter)
 
-	ctx := auth.ContextWithClaims(context.Background(), testClaims())
-	// SyncWorkflowStatus calls BeginTx which returns errTestNoDB,
-	// so we expect an error — but importantly, the hook was invoked and hit the right path.
-	err := hook.OnTransition(ctx, p.ID, "PENDING_REVIEW", "SUBMIT")
-	// Should fail at BeginTx (no DB) but not panic.
-	if err == nil {
-		t.Error("expected error from BeginTx (no DB), got nil")
+	evt := workflow.HookEvent{
+		EntityID: p.ID,
+		NewState: workflow.State("PENDING_REVIEW"),
+		ActorID:  uuid.New(),
+	}
+	if err := hook.BeforeCommit(context.Background(), nil, evt); err != nil {
+		t.Errorf("BeforeCommit returned error: %v", err)
 	}
 }
 

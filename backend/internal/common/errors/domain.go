@@ -42,9 +42,15 @@ const (
 	CodeSystemCurrencyProtected Code = "SYSTEM_CURRENCY_PROTECTED"
 	CodeEntityInUse             Code = "ENTITY_IN_USE"
 	CodeMasterApprovedNoEdit    Code = "MASTER_APPROVED_NO_EDIT"
-	// ECL parameter module codes (mst.pd_pefindo, mst.lgd_basel, etc.)
-	CodePDMonotonicityViolated Code = "PD_MONOTONICITY_VIOLATED"
-	CodePDPeriodOverlap        Code = "PD_PERIOD_OVERLAP"
+
+	// ECL parameter module codes (mst.pd_pefindo, mst.lgd_basel, etc.) — HTTP 422.
+	CodePDMonotonicityViolated       Code = "PD_MONOTONICITY_VIOLATED"
+	CodePDPeriodOverlap              Code = "PD_PERIOD_OVERLAP"
+	CodeLGDPeriodOverlap             Code = "LGD_PERIOD_OVERLAP"
+	CodeBobotSumInvariantViolated    Code = "BOBOT_SUM_INVARIANT_VIOLATED"
+	CodeBobotPeriodOverlap           Code = "BOBOT_PERIOD_OVERLAP"
+	CodeBobotDuplicateSkenarioPeriod Code = "BOBOT_DUPLICATE_SKENARIO_PERIOD"
+	CodeLPSPeriodOverlap             Code = "LPS_PERIOD_OVERLAP"
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
@@ -70,7 +76,9 @@ func (c Code) HTTPStatus() int {
 		return http.StatusOK // replay: return original status
 	case CodeIdempotencyMismatch, CodeWorkflowInvalidTransition,
 		CodeSPPITestIncomplete, CodeBMAssessmentRequired, CodeJobNotCancellable,
-		CodePDMonotonicityViolated, CodePDPeriodOverlap:
+		CodePDMonotonicityViolated, CodePDPeriodOverlap,
+		CodeBobotSumInvariantViolated, CodeBobotPeriodOverlap, CodeBobotDuplicateSkenarioPeriod,
+		CodeLGDPeriodOverlap, CodeLPSPeriodOverlap:
 		return http.StatusUnprocessableEntity
 	case CodePeriodeClosed, CodeECLParamFrozen:
 		return 423 // Locked
