@@ -35,6 +35,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/document"
 	"blips-ifrs9.tugu-re.com/internal/master/bobotskenario"
 	"blips-ifrs9.tugu-re.com/internal/master/lgdbasel"
+	"blips-ifrs9.tugu-re.com/internal/master/lpscoverage"
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
 	"blips-ifrs9.tugu-re.com/internal/master/periodebuku"
 	"blips-ifrs9.tugu-re.com/internal/notification"
@@ -299,6 +300,16 @@ func main() {
 	// documented as a follow-up ticket for Phase 5 hardening.
 	bobotSkenarioHook := bobotskenario.NewWorkflowHook(bobotSkenarioSvc, bobotSkenarioRepo)
 	wfService.RegisterEntityHook("BOBOT_SKENARIO", bobotSkenarioHook)
+
+	// -----------------------------------------------------------------------
+	// Master Data — LPS Coverage (APP-C ECL Parameter, DEC-014 IDR 2M cap)
+	// -----------------------------------------------------------------------
+	lpsCoverageRepo := lpscoverage.NewDBRepository(db)
+	lpsCoverageSvc := lpscoverage.NewService(lpsCoverageRepo, auditWriter, logger)
+	lpsCoverageHook := lpscoverage.NewWorkflowHook(lpsCoverageSvc, lpsCoverageRepo)
+	wfService.RegisterEntityHook("LPS_COVERAGE", lpsCoverageHook)
+	lpsCoverageHandler := lpscoverage.NewHandler(lpsCoverageSvc, wfHandler)
+	lpscoverage.RegisterRoutes(v1, lpsCoverageHandler)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,

@@ -323,5 +323,24 @@ func DefaultConfigs() map[string]*Config {
 				Approver2NotAnyPrevious:    true,
 			},
 		},
+		// LPS_COVERAGE — 6-eyes ECL parameter (DEC-014 IDR 2M cap).
+		"LPS_COVERAGE": {
+			EntityType:  "LPS_COVERAGE",
+			Eyes:        6,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":   "ecl_parameter.submit",
+				"review":   "ecl_parameter.review",
+				"approve":  "ecl_parameter.approve",
+				"approve2": "ecl_parameter.approve",
+				"reject":   "ecl_parameter.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": true, "approve2": true},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    true,
+			},
+		},
 	}
 }
