@@ -115,7 +115,7 @@ Tabel `mst.pd_pefindo` lama di-deprecate (tidak di-drop, data lama dipertahankan
 - Worker receives task `pefindo.parse_release` dengan `releaseId` dan `fileKey` (MinIO path)
 - Worker download file dari MinIO, buka dengan `excelize`
 - Header validation: cek kolom wajib (rating_code, default_rate_1y, default_rate_3y, dst.)
-- Untuk setiap baris: parse `rating_code` → map ke internal kode (lihat §10 OQ-1), parse PD values
+- Untuk setiap baris: parse `rating_code` → strip prefix `id` jika ada (OQ-1 RESOLVED) → validate against internal enum, parse PD values
 - Insert rows ke `mst.pd_pefindo_curve` dengan `NUMERIC(10,8)` precision
 - Kalibrasi check: bandingkan PD per bucket dengan reference Pefindo published rate (dari PDF §4 table). Jika delta > 1e-8 → flag `calibration_warning` di `sys.job.result_jsonb` (tidak block, tapi harus dilaporkan ke reviewer)
 - Update `sys.job` status bertahap: `progress 0→100`, `currentStep` deskriptif
@@ -247,8 +247,8 @@ Matrix PD per baris `(release_id, rating_code, tenor_bucket)`.
 Kolom wajib:
 - `id UUID PK DEFAULT uuidv7()`
 - `release_id UUID NOT NULL REFERENCES mst.pd_pefindo_release(id) ON DELETE RESTRICT`
-- `rating_code VARCHAR(10) NOT NULL` — Pefindo codes: `AAA`, `AA+`, `AA`, `AA-`, `A+`, `A`, `A-`, `BBB+`, `BBB`, `BBB-`, `BB+`, `BB`, `BB-`, `B+`, `B`, `B-`, `CCC`, `D`, `idAAA`, dsb. (lihat §10 OQ-1)
-- `tenor_bucket VARCHAR(10) NOT NULL` — `1Y`, `2Y`, `3Y`, `5Y`, `7Y`, `10Y`, `LIFETIME` (lihat §10 OQ-2)
+- `rating_code VARCHAR(10) NOT NULL` — internal codes (post-strip `id` prefix): `AAA`, `AA+`, `AA`, `AA-`, `A+`, `A`, `A-`, `BBB+`, `BBB`, `BBB-`, `BB+`, `BB`, `BB-`, `B+`, `B`, `B-`, `CCC`, `D`. CHECK enum. (OQ-1 RESOLVED §10)
+- `tenor_bucket VARCHAR(10) NOT NULL` — enum: `1Y`, `2Y`, `3Y`, `5Y`, `7Y`, `10Y`. Tenor > 10y di ECL Phase 4 extrapolate ke `10Y`. (OQ-2 RESOLVED §10)
 - `pd_value NUMERIC(10,8) NOT NULL` — presisi DEC-016; constraint 0 ≤ pd_value ≤ 1
 - `published_reference NUMERIC(10,8)` — nilai dari PDF tabel Pefindo (untuk kalibrasi check; nullable jika tenor tidak dipublikasikan eksplisit)
 - `calibration_delta NUMERIC(10,8)` — `|pd_value - published_reference|`; null jika `published_reference` null
@@ -706,32 +706,32 @@ Modul ini TIDAK menyentuh auth, PII kolom terenkripsi, atau `aud.*` schema secar
 
 ## §10. Open Questions + Risk
 
-### Open Questions (butuh keputusan sebelum eksekusi)
+### Open Questions — RESOLVED 2026-06-08
 
-**OQ-1 — Rating code mapping**
-Pefindo menggunakan kode `idAAA`, `idAA+`, dsb. (dengan prefix `id`). BLIPS internal mungkin memakai `AAA`, `AA+`. Apakah `mst.rating_mapping` (dari instrumen/counterparty) sudah ada dan bisa dipakai, atau rating-code normalization dilakukan di worker secara hardcoded?
+**OQ-1 — Rating code mapping** ✅ RESOLVED
+Format storage di `pd_pefindo_curve.rating_code` = **internal** (`AAA`, `AA+`, `AA`, ...). Pefindo native (`idAAA`, dsb.) di-strip prefix oleh parser di integration-engineer layer sebelum INSERT. Konsisten dengan `mst.rating_mapping` (Phase 4 instrumen).
 
-**Sementara**: integration-engineer buat `rating_mapping.go` hardcoded map (`idAAA`→`AAA`, dst.) di worker package. Jika `mst.rating_mapping` tersedia di Phase 4 instrumen, refactor saat itu.
+**Action**: parser worker hold deterministic map `idAAA`→`AAA`, dst. Unit test wajib cover semua 18 kode + 4 sub-tier `+/-`.
 
-**OQ-2 — Tenor bucket granularity**
-Pefindo PDF menyajikan 1Y, 2Y, 3Y, 5Y, 7Y, 10Y. Apakah BLIPS butuh bucket `LIFETIME` terpisah, atau `LIFETIME` = max tenor (10Y)?
+**OQ-2 — Tenor bucket granularity** ✅ RESOLVED
+Tenor max = **10 tahun** (`10Y`). Sesuai Pefindo Annual Default Study publish 1Y-10Y cumulative default rate. Tenor instrumen > 10y di Phase 4 ECL engine: **extrapolate ke nilai `10Y`** (flat, bukan asymptotic). Bucket `LIFETIME` = alias `10Y` di lookup, bukan kolom terpisah.
 
-**Sementara**: tambahkan bucket `LIFETIME` sebagai optional — jika Pefindo tidak publish nilai Lifetime, null di DB. ECL engine Phase 4 akan gunakan max tenor yang tersedia sebagai fallback.
+**Action**: drop `LIFETIME` dari enum tenor_bucket di schema. Whitelist: `1Y, 2Y, 3Y, 5Y, 7Y, 10Y`.
 
-**OQ-3 — Multi-currency PD**
-Pefindo Annual Default Study adalah IDR-denominated issuer. Untuk FCY exposure, apakah PD dari Pefindo berlaku, atau ada adjustment? Ini open untuk ECL engine Phase 4, bukan untuk modul 5.
+**OQ-3 — Multi-currency PD** ✅ RESOLVED — DEFER Phase 4
+Phase 3 IDR-only. FCY exposure (USD/SGD/JPY) pakai PD IDR sebagai proxy sementara di ECL engine Phase 4. Adjustment policy (sovereign spread, dsb.) didefinisikan di Phase 4 saat counterparty + FX rate terintegrasi.
 
-**Sementara**: modul 5 hanya menyimpan PD seperti yang dipublikasi Pefindo (IDR context). FCY adjustment = Phase 4 ECL engine concern.
+**Action**: tidak ada perubahan schema; documented as Phase 4 dependency di SoW.
 
-**OQ-4 — Backfill historis 2007-2025**
-Apakah perlu bulk import semua release 2007-2025 dari PDF, atau cukup mulai dari release terbaru (2025-Q4)?
+**OQ-4 — Backfill historis 2007-2025** ✅ RESOLVED — DEFER Phase 5
+Phase 3 cukup ingest rilis terbaru (2025-Q4) sebagai release pertama via workflow normal. Backfill 2007-2024 = one-time migration job di Phase 5 saat butuh historical ECL recompute. Tidak via 6-eyes workflow (impractical untuk 18 tahun); direct SQL insert dengan audit trail manual + ALCO sign-off batch.
 
-**Sementara**: Phase 3 = hanya release terbaru. Backfill historis = separate task, diusulkan sebagai Phase 5 data migration. Workflow 6-eyes tidak cocok untuk 18 tahun data; backfill via direct SQL insert dengan audit trail manual.
+**Action**: tidak ada perubahan Phase 3. Ditulis di RESUME-phase-3 sebagai Phase 5 backlog.
 
-**OQ-5 — Approver1 Role (RISK vs AKUN-CTL)**
-Instruksi menyebut "Approver1 = RISK, Approver2 = ALCO" tapi lps_coverage pakai dua ALCO approver. Perlu konfirmasi dengan RACI owner: apakah approval pertama PD adalah RISK Officer (teknikal) atau AKUN-CTL (prosedural)?
+**OQ-5 — Approver1 Role (RISK vs AKUN-CTL)** ✅ RESOLVED
+Approver1 = **ROLE-RISK** (Risk Officer). Validasi teknis kalibrasi PD curve vs Pefindo published rate adalah domain Risk. Approver2 = ROLE-ALCO (kebijakan + cutover authorization).
 
-**Sementara**: Approver1 = ROLE-RISK (karena ini validasi teknis kalibrasi PD — domain Risk). Tandai untuk konfirmasi user.
+**Action**: `WORKFLOW_CONFIG_PD_PEFINDO.approve.role = "ROLE-RISK"`, `approve.requireStepUp = true` (DEC-027 step-up mandatory untuk ECL param). Permission `ecl_parameter.approve` already covers ROLE-RISK per personas.md.
 
 ### Risk Matrix
 
