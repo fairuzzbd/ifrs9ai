@@ -150,6 +150,7 @@ func (r *DBRepository) GetByID(ctx context.Context, id uuid.UUID, includeDeleted
 	if includeDeleted {
 		deletedFilter = ""
 	}
+	// #nosec G202 -- both operands are package constants, no user input
 	query := baseSelect + " WHERE id = $1" + deletedFilter
 	row := r.db.QueryRowContext(ctx, query, id)
 	lc, err := scanLPSCoverage(row)
@@ -321,6 +322,7 @@ func (r *DBRepository) getOneTx(ctx context.Context, tx *sql.Tx, id uuid.UUID, i
 	if includeDeleted {
 		deletedFilter = ""
 	}
+	// #nosec G202 -- both operands are package constants, no user input
 	query := baseSelect + " WHERE id = $1" + deletedFilter
 	row := tx.QueryRowContext(ctx, query, id)
 	lc, err := scanLPSCoverage(row)

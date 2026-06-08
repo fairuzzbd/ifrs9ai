@@ -496,19 +496,20 @@ func (s *Service) validateCreate(req CreateRequest) (decimal.Decimal, error) {
 		amount = defaultCoverageAmount
 	} else {
 		parsed, parseErr := decimal.NewFromString(req.CoverageAmount)
-		if parseErr != nil {
+		switch {
+		case parseErr != nil:
 			details = append(details, domainerrors.Detail{
 				Field:   "body.coverageAmount",
 				Rule:    "format",
 				Message: "coverageAmount harus berupa angka desimal valid",
 			})
-		} else if !parsed.IsPositive() {
+		case !parsed.IsPositive():
 			details = append(details, domainerrors.Detail{
 				Field:   "body.coverageAmount",
 				Rule:    "positive",
 				Message: "coverageAmount harus lebih besar dari 0",
 			})
-		} else {
+		default:
 			amount = parsed
 		}
 	}
