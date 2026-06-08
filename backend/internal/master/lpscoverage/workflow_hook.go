@@ -9,28 +9,19 @@ import (
 )
 
 // WorkflowHook implements workflow.EntityHook for LPS_COVERAGE entities.
-//
-// Pattern: On every workflow state transition (submit/review/approve/approve2/reject),
-// the workflow engine calls BeforeCommit inside the same transaction that updates
-// sys.workflow_instance. This keeps mst.lps_coverage.workflow_status in sync
-// atomically with the workflow state.
-//
-// LPS Coverage has NO cross-row sum invariant (unlike bobot_skenario),
-// so BeforeCommit only syncs the status column — no additional validation needed.
+// BeforeCommit runs inside the workflow transaction to keep
+// mst.lps_coverage.workflow_status in sync atomically.
 type WorkflowHook struct {
+	svc  *Service
 	repo Repository
 }
 
-// NewWorkflowHook creates a WorkflowHook backed by the given repository.
-func NewWorkflowHook(repo Repository) *WorkflowHook {
-	return &WorkflowHook{repo: repo}
+// NewWorkflowHook creates a WorkflowHook bound to the given service.
+func NewWorkflowHook(svc *Service, repo Repository) *WorkflowHook {
+	return &WorkflowHook{svc: svc, repo: repo}
 }
 
-// BeforeCommit is called by the workflow service inside the active transaction
-// before it commits the state transition. It syncs mst.lps_coverage.workflow_status
-// to match the new workflow state.
-//
-// Returns an error to abort the transaction if the sync fails.
+// BeforeCommit syncs workflow_status on mst.lps_coverage inside the workflow tx.
 func (h *WorkflowHook) BeforeCommit(ctx context.Context, tx *sql.Tx, evt workflow.HookEvent) error {
 	wfStatus := mapWorkflowState(string(evt.NewState))
 	if err := h.repo.UpdateWorkflowStatusTx(ctx, tx, evt.EntityID, wfStatus); err != nil {

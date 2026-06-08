@@ -562,13 +562,13 @@ func (r *DBRepository) ExportAll(ctx context.Context, q listquery.Query) (io.Rea
 	count := 0
 	for rows.Next() {
 		var (
-			id            uuid.UUID
-			amount        decimal.Decimal
-			mataUang      string
-			dari          string
-			sampai        *string
-			regulasi      *string
-			wfStatus      string
+			id       uuid.UUID
+			amount   decimal.Decimal
+			mataUang string
+			dari     string
+			sampai   *string
+			regulasi *string
+			wfStatus string
 		)
 		if err := rows.Scan(&id, &amount, &mataUang, &dari, &sampai, &regulasi, &wfStatus); err != nil {
 			return nil, 0, fmt.Errorf("repo.ExportAll lps_coverage scan: %w", err)

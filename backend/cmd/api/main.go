@@ -33,8 +33,11 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/common/middleware"
 	"blips-ifrs9.tugu-re.com/internal/config"
 	"blips-ifrs9.tugu-re.com/internal/document"
+	"blips-ifrs9.tugu-re.com/internal/master/bobotskenario"
+	"blips-ifrs9.tugu-re.com/internal/master/lgdbasel"
 	"blips-ifrs9.tugu-re.com/internal/master/lpscoverage"
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
+	"blips-ifrs9.tugu-re.com/internal/master/periodebuku"
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
 )
@@ -267,17 +270,43 @@ func main() {
 	matauang.RegisterRoutes(v1, mataUangHandler)
 
 	// -----------------------------------------------------------------------
-	// Master Data — LPS Coverage (APP-A, DEC-014)
-	// Routes: GET/POST /api/v1/master/lps-coverage
-	//         GET/PUT/DELETE /api/v1/master/lps-coverage/:id
-	//         GET /api/v1/master/lps-coverage/export
-	//         POST /api/v1/master/lps-coverage/:id/{submit,review,approve,approve2,reject}
-	//         GET  /api/v1/master/lps-coverage/:id/{history,workflow}
-	// Workflow: 6-eyes (LPS_COVERAGE config), both APPROVE steps require step-up MFA.
+	// Master Data — Periode Buku (APP-D-MSTR-001)
+	// -----------------------------------------------------------------------
+	periodeBukuRepo := periodebuku.NewDBRepository(db)
+	periodeBukuSvc := periodebuku.NewService(periodeBukuRepo, auditWriter, logger)
+	periodeBukuHandler := periodebuku.NewHandler(periodeBukuSvc, wfHandler)
+	periodebuku.RegisterRoutes(v1, periodeBukuHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — LGD Basel (APP-C-MSTR-ECL-001, 6-eyes + step-up MFA)
+	// -----------------------------------------------------------------------
+	lgdBaselRepo := lgdbasel.NewDBRepository(db)
+	lgdBaselSvc := lgdbasel.NewService(lgdBaselRepo, auditWriter, logger)
+	lgdBaselHandler := lgdbasel.NewHandler(lgdBaselSvc, wfHandler)
+	lgdbasel.RegisterRoutes(v1, lgdBaselHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Bobot Skenario (APP-C ECL Parameter, DEC-010 sum=1.0)
+	// -----------------------------------------------------------------------
+	bobotSkenarioRepo := bobotskenario.NewDBRepository(db)
+	bobotSkenarioSvc := bobotskenario.NewService(bobotSkenarioRepo, auditWriter, logger)
+	bobotSkenarioHandler := bobotskenario.NewHandler(bobotSkenarioSvc, wfHandler)
+	bobotskenario.RegisterRoutes(v1, bobotSkenarioHandler)
+
+	// Wire entity hook (post-commit pattern from lgd_basel merge).
+	// NOTE: original bobot design used pre-commit (BLOCKER 1+2 fix); after lgd_basel
+	// landed first with post-commit EntityHook interface, this adapts to that. The
+	// DEC-010 sum=1.0 invariant is now checked post-commit with a TOCTOU window
+	// documented as a follow-up ticket for Phase 5 hardening.
+	bobotSkenarioHook := bobotskenario.NewWorkflowHook(bobotSkenarioSvc, bobotSkenarioRepo)
+	wfService.RegisterEntityHook("BOBOT_SKENARIO", bobotSkenarioHook)
+
+	// -----------------------------------------------------------------------
+	// Master Data — LPS Coverage (APP-C ECL Parameter, DEC-014 IDR 2M cap)
 	// -----------------------------------------------------------------------
 	lpsCoverageRepo := lpscoverage.NewDBRepository(db)
 	lpsCoverageSvc := lpscoverage.NewService(lpsCoverageRepo, auditWriter, logger)
-	lpsCoverageHook := lpscoverage.NewWorkflowHook(lpsCoverageRepo)
+	lpsCoverageHook := lpscoverage.NewWorkflowHook(lpsCoverageSvc, lpsCoverageRepo)
 	wfService.RegisterEntityHook("LPS_COVERAGE", lpsCoverageHook)
 	lpsCoverageHandler := lpscoverage.NewHandler(lpsCoverageSvc, wfHandler)
 	lpscoverage.RegisterRoutes(v1, lpsCoverageHandler)

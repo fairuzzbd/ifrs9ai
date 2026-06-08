@@ -36,7 +36,7 @@ func (h *hookRepoAdapter) UpdateWorkflowStatusTx(_ context.Context, _ *sql.Tx, i
 
 func TestWorkflowHook_BeforeCommit_SyncsDraft(t *testing.T) {
 	repo := &hookRepoAdapter{}
-	hook := lpscoverage.NewWorkflowHook(repo)
+	hook := lpscoverage.NewWorkflowHook(nil, repo)
 
 	entityID := uuid.New()
 	err := hook.BeforeCommit(context.Background(), nil, mkEvt(entityID, "DRAFT"))
@@ -53,7 +53,7 @@ func TestWorkflowHook_BeforeCommit_SyncsDraft(t *testing.T) {
 
 func TestWorkflowHook_BeforeCommit_SyncsApproved(t *testing.T) {
 	repo := &hookRepoAdapter{}
-	hook := lpscoverage.NewWorkflowHook(repo)
+	hook := lpscoverage.NewWorkflowHook(nil, repo)
 
 	entityID := uuid.New()
 	err := hook.BeforeCommit(context.Background(), nil, mkEvt(entityID, "APPROVED"))
@@ -68,7 +68,7 @@ func TestWorkflowHook_BeforeCommit_SyncsApproved(t *testing.T) {
 func TestWorkflowHook_BeforeCommit_PropagatesRepoError(t *testing.T) {
 	expectedErr := errTestNoDB
 	repo := &hookRepoAdapter{updateErr: expectedErr}
-	hook := lpscoverage.NewWorkflowHook(repo)
+	hook := lpscoverage.NewWorkflowHook(nil, repo)
 
 	err := hook.BeforeCommit(context.Background(), nil, mkEvt(uuid.New(), "APPROVED"))
 	if err == nil {
@@ -83,7 +83,7 @@ func TestWorkflowHook_BeforeCommit_PropagatesRepoError(t *testing.T) {
 
 func TestWorkflowHook_BeforeCommit_PendingApproval2(t *testing.T) {
 	repo := &hookRepoAdapter{}
-	hook := lpscoverage.NewWorkflowHook(repo)
+	hook := lpscoverage.NewWorkflowHook(nil, repo)
 
 	entityID := uuid.New()
 	err := hook.BeforeCommit(context.Background(), nil, mkEvt(entityID, "PENDING_APPROVAL_2"))
@@ -97,7 +97,7 @@ func TestWorkflowHook_BeforeCommit_PendingApproval2(t *testing.T) {
 
 func TestWorkflowHook_BeforeCommit_RejectedState(t *testing.T) {
 	repo := &hookRepoAdapter{}
-	hook := lpscoverage.NewWorkflowHook(repo)
+	hook := lpscoverage.NewWorkflowHook(nil, repo)
 
 	entityID := uuid.New()
 	err := hook.BeforeCommit(context.Background(), nil, mkEvt(entityID, "REJECTED"))

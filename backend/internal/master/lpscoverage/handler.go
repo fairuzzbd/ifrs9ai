@@ -350,6 +350,7 @@ func (h *Handler) WorkflowStatus(c *gin.Context) {
 // delegateWorkflow rewrites gin params and forwards to the generic workflow handler.
 // After a successful response, workflow_status is synced by the WorkflowHook
 // (registered on the workflow service); no additional sync is needed here.
+//nolint:unparam // resource is fixed but kept for future multi-tenant routing
 func (h *Handler) delegateWorkflow(c *gin.Context, entityID uuid.UUID, resource string, wfFunc gin.HandlerFunc, _ string) {
 	c.Params = gin.Params{
 		{Key: "resource", Value: resource},
@@ -361,6 +362,7 @@ func (h *Handler) delegateWorkflow(c *gin.Context, entityID uuid.UUID, resource 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 // parseUUIDParam parses a UUID path parameter, writing a 400 error response if invalid.
+//nolint:unparam // paramName fixed but kept for consistency with sibling modules
 func parseUUIDParam(c *gin.Context, paramName string) (uuid.UUID, bool) {
 	raw := c.Param(paramName)
 	id, err := uuid.Parse(raw)

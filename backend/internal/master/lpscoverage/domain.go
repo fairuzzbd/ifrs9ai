@@ -78,12 +78,12 @@ type LPSCoverage struct {
 	ID uuid.UUID `db:"id"`
 
 	// Core business fields
-	CoverageAmount        decimal.Decimal `db:"coverage_amount"`
-	MataUang              string          `db:"mata_uang"`
-	PeriodeBerlakuDari    string          `db:"periode_berlaku_dari"`     // DATE → "YYYY-MM-DD"
-	PeriodeBerlakuSampai  *string         `db:"periode_berlaku_sampai"`   // DATE nullable
-	RegulasiReferensi     *string         `db:"regulasi_referensi"`
-	DokumenPendukungID    *uuid.UUID      `db:"dokumen_pendukung_id"`
+	CoverageAmount       decimal.Decimal `db:"coverage_amount"`
+	MataUang             string          `db:"mata_uang"`
+	PeriodeBerlakuDari   string          `db:"periode_berlaku_dari"`   // DATE → "YYYY-MM-DD"
+	PeriodeBerlakuSampai *string         `db:"periode_berlaku_sampai"` // DATE nullable
+	RegulasiReferensi    *string         `db:"regulasi_referensi"`
+	DokumenPendukungID   *uuid.UUID      `db:"dokumen_pendukung_id"`
 
 	// Legacy fields (kept, not actively used in service logic)
 	MakerID    uuid.UUID  `db:"maker_id"`

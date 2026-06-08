@@ -14,7 +14,7 @@ import (
 )
 
 // repoAdapter is a flexible Repository stub for unit tests.
-// Each sub-stub controls the behaviour of one method group.
+// Each sub-stub controls the behavior of one method group.
 type repoAdapter struct {
 	stub       *stubCreate
 	getByID    *stubGetByID
