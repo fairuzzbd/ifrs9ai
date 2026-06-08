@@ -104,17 +104,17 @@ type PDPefindo struct {
 	Rating string `db:"rating"`
 
 	// PD values — NUMERIC(10,8) in DB → decimal.Decimal in Go
-	PD12Month    decimal.Decimal  `db:"pd_12month"`
-	PDLifetime3Y *decimal.Decimal `db:"pd_lifetime_3y"`
-	PDLifetime5Y *decimal.Decimal `db:"pd_lifetime_5y"`
-	PDLifetime7Y *decimal.Decimal `db:"pd_lifetime_7y"`
+	PD12Month     decimal.Decimal  `db:"pd_12month"`
+	PDLifetime3Y  *decimal.Decimal `db:"pd_lifetime_3y"`
+	PDLifetime5Y  *decimal.Decimal `db:"pd_lifetime_5y"`
+	PDLifetime7Y  *decimal.Decimal `db:"pd_lifetime_7y"`
 	PDLifetime10Y *decimal.Decimal `db:"pd_lifetime_10y"`
 
 	// Metadata
-	Sumber              string     `db:"sumber"`
-	TanggalPublikasi    *string    `db:"tanggal_publikasi"`   // DATE → "YYYY-MM-DD"
-	PeriodeBerlakuDari  string     `db:"periode_berlaku_dari"` // DATE
-	PeriodeBerlakuSampai *string   `db:"periode_berlaku_sampai"` // DATE, nullable
+	Sumber               string  `db:"sumber"`
+	TanggalPublikasi     *string `db:"tanggal_publikasi"`      // DATE → "YYYY-MM-DD"
+	PeriodeBerlakuDari   string  `db:"periode_berlaku_dari"`   // DATE
+	PeriodeBerlakuSampai *string `db:"periode_berlaku_sampai"` // DATE, nullable
 
 	// Document reference
 	DokumenPendukungID *uuid.UUID `db:"dokumen_pendukung_id"`
@@ -295,29 +295,29 @@ type UploadXLSXResponse struct {
 
 // JobStatusResponse is returned by GET /upload-jobs/:jobId.
 type JobStatusResponse struct {
-	JobID                string      `json:"jobId"`
-	Type                 string      `json:"type"`
-	Status               string      `json:"status"`
-	Progress             int         `json:"progress"`
-	CurrentStep          *string     `json:"currentStep"`
-	StartedAt            *string     `json:"startedAt"`
-	EstimatedCompletionAt *string    `json:"estimatedCompletionAt"`
-	Result               interface{} `json:"result"`
-	Error                interface{} `json:"error"`
-	CanCancel            bool        `json:"canCancel"`
+	JobID                 string      `json:"jobId"`
+	Type                  string      `json:"type"`
+	Status                string      `json:"status"`
+	Progress              int         `json:"progress"`
+	CurrentStep           *string     `json:"currentStep"`
+	StartedAt             *string     `json:"startedAt"`
+	EstimatedCompletionAt *string     `json:"estimatedCompletionAt"`
+	Result                interface{} `json:"result"`
+	Error                 interface{} `json:"error"`
+	CanCancel             bool        `json:"canCancel"`
 }
 
 // WorkflowActionRequest is the request body for submit/review/approve/approve2/reject.
 type WorkflowActionRequest struct {
 	Comment         *string `json:"comment"`
-	SignatureMethod  string  `json:"signatureMethod"`
+	SignatureMethod string  `json:"signatureMethod"`
 	RowVersion      *int64  `json:"rowVersion"`
 }
 
 // WorkflowRejectRequest adds mandatory comment for reject.
 type WorkflowRejectRequest struct {
 	Comment         string `json:"comment"        binding:"required,min=10"`
-	SignatureMethod  string `json:"signatureMethod"`
+	SignatureMethod string `json:"signatureMethod"`
 	RowVersion      *int64 `json:"rowVersion"`
 }
 

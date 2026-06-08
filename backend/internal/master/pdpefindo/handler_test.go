@@ -399,10 +399,10 @@ func TestMonotonicity_Violated_Returns422(t *testing.T) {
 			pd3y: ptr(decimal.NewFromFloat(0.01)), // violation
 		},
 		{
-			name:  "pd3y > pd5y",
-			pd12:  decimal.NewFromFloat(0.01),
-			pd3y:  ptr(decimal.NewFromFloat(0.05)),
-			pd5y:  ptr(decimal.NewFromFloat(0.03)), // violation
+			name: "pd3y > pd5y",
+			pd12: decimal.NewFromFloat(0.01),
+			pd3y: ptr(decimal.NewFromFloat(0.05)),
+			pd5y: ptr(decimal.NewFromFloat(0.03)), // violation
 		},
 		{
 			name:  "pd5y > pd7y",

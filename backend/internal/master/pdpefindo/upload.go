@@ -101,11 +101,11 @@ func (u *UploadService) SubmitUploadJob(
 	}
 
 	payload := map[string]interface{}{
-		"file_hash":               fileHash,
-		"file_name":               req.FileName,
-		"tanggal_publikasi":       req.TanggalPublikasi,
-		"periode_berlaku_dari":    req.PeriodeBerlakuDari,
-		"periode_berlaku_sampai":  nil,
+		"file_hash":              fileHash,
+		"file_name":              req.FileName,
+		"tanggal_publikasi":      req.TanggalPublikasi,
+		"periode_berlaku_dari":   req.PeriodeBerlakuDari,
+		"periode_berlaku_sampai": nil,
 	}
 	if req.PeriodeBerlakuSampai != nil {
 		payload["periode_berlaku_sampai"] = *req.PeriodeBerlakuSampai
@@ -118,15 +118,15 @@ func (u *UploadService) SubmitUploadJob(
 
 	now := time.Now()
 	jobRow := &JobRow{
-		ID:        jobID,
-		Type:      "PD_PEFINDO_UPLOAD_XLSX",
-		Status:    "queued",
-		Progress:  0,
+		ID:          jobID,
+		Type:        "PD_PEFINDO_UPLOAD_XLSX",
+		Status:      "queued",
+		Progress:    0,
 		PayloadJSON: payloadJSON,
-		CanCancel:  false,
-		CreatedBy:  actorID,
-		CreatedAt:  now,
-		TenantID:   tenantID(claims),
+		CanCancel:   false,
+		CreatedBy:   actorID,
+		CreatedAt:   now,
+		TenantID:    tenantID(claims),
 	}
 
 	tx, err := u.repo.BeginTx(ctx)
@@ -229,9 +229,9 @@ func (u *UploadService) ProcessUploadJob(ctx context.Context, jobID string, req 
 	dataRows := rows[1:]
 	total := len(dataRows)
 
+	rowResults := make([]XLSXRowResult, 0, total)
+	toPersist := make([]*PDPefindo, 0, total)
 	var (
-		rowResults   []XLSXRowResult
-		toPersist    []*PDPefindo
 		createdCount int
 		skippedCount int
 		errCount     int
@@ -295,7 +295,9 @@ func (u *UploadService) ProcessUploadJob(ctx context.Context, jobID string, req 
 		// The actual actor context may not carry a valid DB user during async processing.
 		var actorID uuid.UUID
 		if cl := auth.ClaimsFromContext(ctx); cl != nil {
-			actorID, _ = uuid.Parse(cl.Sub)
+			if parsed, perr := uuid.Parse(cl.Sub); perr == nil {
+				actorID = parsed
+			}
 		}
 		if actorID == uuid.Nil {
 			actorID = uuid.MustParse("00000000-0000-0000-0000-000000000001") // system user placeholder
@@ -359,7 +361,11 @@ func (u *UploadService) ProcessUploadJob(ctx context.Context, jobID string, req 
 		ErrorCount:   errCount,
 		Rows:         rowResults,
 	}
-	resultJSON, _ := json.Marshal(result)
+	resultJSON, mErr := json.Marshal(result)
+	if mErr != nil {
+		u.logger.WarnContext(ctx, "ProcessUploadJob: result marshal failed", "jobId", jobID, "error", mErr)
+		resultJSON = []byte("{}")
+	}
 
 	if err := u.repo.CompleteJob(ctx, jobID, resultJSON); err != nil {
 		u.logger.WarnContext(ctx, "ProcessUploadJob: CompleteJob failed", "jobId", jobID, "error", err)
@@ -369,10 +375,14 @@ func (u *UploadService) ProcessUploadJob(ctx context.Context, jobID string, req 
 }
 
 func (u *UploadService) failJob(ctx context.Context, jobID string, cause error) error {
-	errJSON, _ := json.Marshal(map[string]interface{}{
+	errJSON, mErr := json.Marshal(map[string]interface{}{
 		"code":    "XLSX_PARSE_ERROR",
 		"message": cause.Error(),
 	})
+	if mErr != nil {
+		u.logger.WarnContext(ctx, "failJob: error marshal failed", "jobId", jobID, "error", mErr)
+		errJSON = []byte(`{"code":"XLSX_PARSE_ERROR"}`)
+	}
 	if err := u.repo.FailJob(ctx, jobID, errJSON); err != nil {
 		u.logger.WarnContext(ctx, "failJob: FailJob DB update failed", "jobId", jobID, "error", err)
 	}
@@ -465,13 +475,6 @@ func trimLower(s string) string {
 		return string(out[:lastNonSpace+1])
 	}
 	return ""
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // bytesReader wraps a []byte to implement io.Reader.

@@ -29,9 +29,9 @@ const (
 
 // Handler is the HTTP handler for pd_pefindo endpoints.
 type Handler struct {
-	svc          *Service
-	uploadSvc    *UploadService
-	wfHandler    *workflow.Handler
+	svc           *Service
+	uploadSvc     *UploadService
+	wfHandler     *workflow.Handler
 	asynqEnqueuer AsynqEnqueuer // nil = sync fallback in dev
 }
 
@@ -286,7 +286,7 @@ func (h *Handler) GetUploadJobStatus(c *gin.Context) {
 
 // GetByID handles GET /api/v1/master/pd-pefindo/:id.
 func (h *Handler) GetByID(c *gin.Context) {
-	id, ok := parseUUID(c, "id")
+	id, ok := parseUUID(c)
 	if !ok {
 		return
 	}
@@ -304,7 +304,7 @@ func (h *Handler) GetByID(c *gin.Context) {
 
 // Update handles PATCH /api/v1/master/pd-pefindo/:id.
 func (h *Handler) Update(c *gin.Context) {
-	id, ok := parseUUID(c, "id")
+	id, ok := parseUUID(c)
 	if !ok {
 		return
 	}
@@ -329,7 +329,7 @@ func (h *Handler) Update(c *gin.Context) {
 
 // Delete handles DELETE /api/v1/master/pd-pefindo/:id.
 func (h *Handler) Delete(c *gin.Context) {
-	id, ok := parseUUID(c, "id")
+	id, ok := parseUUID(c)
 	if !ok {
 		return
 	}
@@ -350,7 +350,7 @@ func (h *Handler) Delete(c *gin.Context) {
 
 // History handles GET /api/v1/master/pd-pefindo/:id/history.
 func (h *Handler) History(c *gin.Context) {
-	id, ok := parseUUID(c, "id")
+	id, ok := parseUUID(c)
 	if !ok {
 		return
 	}
@@ -390,7 +390,7 @@ func (h *Handler) History(c *gin.Context) {
 
 // Submit handles POST /api/v1/master/pd-pefindo/:id/submit.
 func (h *Handler) Submit(c *gin.Context) {
-	id, ok := parseUUID(c, "id")
+	id, ok := parseUUID(c)
 	if !ok {
 		return
 	}
@@ -403,7 +403,7 @@ func (h *Handler) Submit(c *gin.Context) {
 
 // Review handles POST /api/v1/master/pd-pefindo/:id/review.
 func (h *Handler) Review(c *gin.Context) {
-	id, ok := parseUUID(c, "id")
+	id, ok := parseUUID(c)
 	if !ok {
 		return
 	}
@@ -416,7 +416,7 @@ func (h *Handler) Review(c *gin.Context) {
 
 // Approve handles POST /api/v1/master/pd-pefindo/:id/approve.
 func (h *Handler) Approve(c *gin.Context) {
-	id, ok := parseUUID(c, "id")
+	id, ok := parseUUID(c)
 	if !ok {
 		return
 	}
@@ -429,7 +429,7 @@ func (h *Handler) Approve(c *gin.Context) {
 
 // Approve2 handles POST /api/v1/master/pd-pefindo/:id/approve2 (6-eyes second approver).
 func (h *Handler) Approve2(c *gin.Context) {
-	id, ok := parseUUID(c, "id")
+	id, ok := parseUUID(c)
 	if !ok {
 		return
 	}
@@ -442,7 +442,7 @@ func (h *Handler) Approve2(c *gin.Context) {
 
 // Reject handles POST /api/v1/master/pd-pefindo/:id/reject.
 func (h *Handler) Reject(c *gin.Context) {
-	id, ok := parseUUID(c, "id")
+	id, ok := parseUUID(c)
 	if !ok {
 		return
 	}
@@ -455,7 +455,7 @@ func (h *Handler) Reject(c *gin.Context) {
 
 // WorkflowStatus handles GET /api/v1/master/pd-pefindo/:id/workflow.
 func (h *Handler) WorkflowStatus(c *gin.Context) {
-	id, ok := parseUUID(c, "id")
+	id, ok := parseUUID(c)
 	if !ok {
 		return
 	}
@@ -468,7 +468,8 @@ func (h *Handler) WorkflowStatus(c *gin.Context) {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-func parseUUID(c *gin.Context, param string) (uuid.UUID, bool) {
+func parseUUID(c *gin.Context) (uuid.UUID, bool) {
+	const param = "id"
 	raw := c.Param(param)
 	id, err := uuid.Parse(raw)
 	if err != nil {
@@ -508,4 +509,3 @@ func toJobStatusResponse(j *JobRow) JobStatusResponse {
 	}
 	return r
 }
-

@@ -15,15 +15,15 @@ import (
 )
 
 // repoAdapter is a flexible Repository stub for unit tests.
-// Only set the stubs needed for each test; zero-value behaviour is safe.
+// Only set the stubs needed for each test; zero-value behavior is safe.
 type repoAdapter struct {
-	getByID       *stubGetByID
-	list          *stubList
-	update        *stubUpdate
-	softDelete    *stubSoftDelete
-	export        *stubExport
-	countOverlap  *stubCountOverlap
-	getJobByID    *stubGetJobByID
+	getByID      *stubGetByID
+	list         *stubList
+	update       *stubUpdate
+	softDelete   *stubSoftDelete
+	export       *stubExport
+	countOverlap *stubCountOverlap
+	getJobByID   *stubGetJobByID
 }
 
 var _ pdpefindo.Repository = (*repoAdapter)(nil)
@@ -86,10 +86,10 @@ func (a *repoAdapter) Update(_ context.Context, _ *sql.Tx, _ uuid.UUID, _ pdpefi
 // ─── SoftDelete ───────────────────────────────────────────────────────────────
 
 type stubSoftDelete struct {
-	getByIDResult     *pdpefindo.PDPefindo
-	countRefsVal      int64
-	softDeleteResult  *pdpefindo.PDPefindo
-	softDeleteErr     error
+	getByIDResult    *pdpefindo.PDPefindo
+	countRefsVal     int64
+	softDeleteResult *pdpefindo.PDPefindo
+	softDeleteErr    error
 }
 
 func (a *repoAdapter) SoftDelete(_ context.Context, _ *sql.Tx, _ uuid.UUID, _ uuid.UUID) (*pdpefindo.PDPefindo, error) {

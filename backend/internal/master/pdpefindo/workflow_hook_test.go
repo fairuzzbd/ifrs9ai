@@ -6,10 +6,11 @@ import (
 
 	"github.com/google/uuid"
 
+	"log/slog"
+
 	"blips-ifrs9.tugu-re.com/internal/audit"
 	"blips-ifrs9.tugu-re.com/internal/auth"
 	"blips-ifrs9.tugu-re.com/internal/master/pdpefindo"
-	"log/slog"
 )
 
 // TestWorkflowHook_NewWorkflowHook verifies constructor returns non-nil.

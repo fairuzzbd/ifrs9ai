@@ -195,6 +195,7 @@ func (r *DBRepository) GetByID(ctx context.Context, id uuid.UUID, includeDeleted
 	if includeDeleted {
 		deletedFilter = ""
 	}
+	// #nosec G202 — deletedFilter is a constant whitelist (empty or " AND deleted_at IS NULL"); no user input.
 	q := baseSelect + " WHERE id = $1" + deletedFilter
 	row := r.db.QueryRowContext(ctx, q, id)
 	p, err := scanPDPefindo(row)
@@ -338,9 +339,10 @@ func (r *DBRepository) Update(ctx context.Context, tx *sql.Tx, id uuid.UUID, f U
 		setClauses = append(setClauses, fmt.Sprintf("dokumen_pendukung_id = $%d", idx))
 		if *f.DokumenPendukungID == "" {
 			args = append(args, nil)
-		} else {
-			docID, _ := uuid.Parse(*f.DokumenPendukungID)
+		} else if docID, perr := uuid.Parse(*f.DokumenPendukungID); perr == nil {
 			args = append(args, docID)
+		} else {
+			args = append(args, nil)
 		}
 		idx++
 	}
@@ -630,18 +632,18 @@ func (r *DBRepository) ExportAll(ctx context.Context, q listquery.Query) (io.Rea
 	count := 0
 	for rows.Next() {
 		var (
-			id           string
-			rating       string
-			pd12          string
-			pd3y         *string
-			pd5y         *string
-			pd7y         *string
-			pd10y        *string
-			sumber       string
-			tanggalPub   *string
-			periodeD     string
-			periodeS     *string
-			wfStatus     string
+			id         string
+			rating     string
+			pd12       string
+			pd3y       *string
+			pd5y       *string
+			pd7y       *string
+			pd10y      *string
+			sumber     string
+			tanggalPub *string
+			periodeD   string
+			periodeS   *string
+			wfStatus   string
 		)
 		if err := rows.Scan(&id, &rating, &pd12, &pd3y, &pd5y, &pd7y, &pd10y,
 			&sumber, &tanggalPub, &periodeD, &periodeS, &wfStatus); err != nil {
@@ -768,11 +770,6 @@ func (r *DBRepository) FailJob(ctx context.Context, jobID string, errJSON []byte
 
 // ─── Scan helpers ─────────────────────────────────────────────────────────────
 
-// querier abstracts *sql.DB and *sql.Tx for single-row reads.
-type querier interface {
-	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
-}
-
 func scanPDPefindo(row *sql.Row) (*PDPefindo, error) {
 	return scanOnePD(func(dest ...interface{}) error {
 		return row.Scan(dest...)
@@ -788,25 +785,25 @@ func scanPDPefindoRow(rows *sql.Rows) (*PDPefindo, error) {
 func scanOnePD(scanFn func(...interface{}) error) (*PDPefindo, error) {
 	p := &PDPefindo{}
 	var (
-		pd12          string
-		pd3y          *string
-		pd5y          *string
-		pd7y          *string
-		pd10y         *string
-		tanggalPub    *string
-		periodeD      string
-		periodeS      *string
-		docID         *uuid.UUID
-		uploadedBy    uuid.UUID
-		uploadedAt    time.Time
-		approvedBy    *uuid.UUID
-		approvedAt    *time.Time
-		wfStatus      string
-		createdBy     *uuid.UUID
-		updatedAt     *time.Time
-		updatedBy     *uuid.UUID
-		deletedAt     *time.Time
-		deletedBy     *uuid.UUID
+		pd12       string
+		pd3y       *string
+		pd5y       *string
+		pd7y       *string
+		pd10y      *string
+		tanggalPub *string
+		periodeD   string
+		periodeS   *string
+		docID      *uuid.UUID
+		uploadedBy uuid.UUID
+		uploadedAt time.Time
+		approvedBy *uuid.UUID
+		approvedAt *time.Time
+		wfStatus   string
+		createdBy  *uuid.UUID
+		updatedAt  *time.Time
+		updatedBy  *uuid.UUID
+		deletedAt  *time.Time
+		deletedBy  *uuid.UUID
 	)
 
 	err := scanFn(
@@ -848,8 +845,7 @@ func scanOnePD(scanFn func(...interface{}) error) (*PDPefindo, error) {
 // ─── Decimal helpers ──────────────────────────────────────────────────────────
 
 func mustDecimal(s string) decimal.Decimal {
-	d, _ := decimal.NewFromString(s)
-	return d
+	return decimal.RequireFromString(s)
 }
 
 func maybeDecimal(s *string) *decimal.Decimal {
@@ -875,14 +871,4 @@ func nvl(s *string) string {
 		return ""
 	}
 	return *s
-}
-
-// isUniqueViolation checks for PostgreSQL unique constraint violation.
-func isUniqueViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), "23505") ||
-		strings.Contains(err.Error(), "duplicate key") ||
-		strings.Contains(err.Error(), "unique constraint")
 }
