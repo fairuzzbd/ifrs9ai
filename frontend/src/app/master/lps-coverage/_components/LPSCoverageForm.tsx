@@ -433,7 +433,7 @@ export function LPSCoverageForm({ mode, defaultValues }: LPSCoverageFormProps) {
                     </FormControl>
                     <FormDescription>
                       Nomor/nama peraturan LPS atau regulasi terkait (opsional,
-                      maks 500 karakter)
+                      maks 200 karakter)
                     </FormDescription>
                     <FormMessage />
                   </FormItem>
