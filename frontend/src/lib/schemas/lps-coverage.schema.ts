@@ -40,11 +40,11 @@ export const lpsCoverageCreateSchema = z
   .object({
     coverageAmount: decimalPositiveString,
     // mata_uang is always IDR per DEC-014, sent as read-only info
-    periodeBlakuDari: z
+    periodeBerlakuDari: z
       .string()
       .date("Format tanggal tidak valid (YYYY-MM-DD)")
       .min(1, "Tanggal mulai berlaku wajib diisi"),
-    periodeBlakuSampai: z
+    periodeBerlakuSampai: z
       .string()
       .date("Format tanggal tidak valid (YYYY-MM-DD)")
       .nullable()
@@ -57,12 +57,12 @@ export const lpsCoverageCreateSchema = z
   })
   .refine(
     (data) => {
-      if (!data.periodeBlakuSampai) return true;
-      return data.periodeBlakuDari <= data.periodeBlakuSampai;
+      if (!data.periodeBerlakuSampai) return true;
+      return data.periodeBerlakuDari <= data.periodeBerlakuSampai;
     },
     {
       message: "Tanggal akhir tidak boleh sebelum tanggal mulai",
-      path: ["periodeBlakuSampai"],
+      path: ["periodeBerlakuSampai"],
     },
   );
 
@@ -153,8 +153,8 @@ export interface LPSCoverageItem {
   id: string;
   coverageAmount: string;         // decimal string, never number
   mataUang: "IDR";               // always IDR per DEC-014
-  periodeBlakuDari: string;       // date string YYYY-MM-DD
-  periodeBlakuSampai: string | null; // null = currently active
+  periodeBerlakuDari: string;       // date string YYYY-MM-DD
+  periodeBerlakuSampai: string | null; // null = currently active
   regulasiReferensi: string | null;
   workflowStatus: LPSWorkflowState;
   workflowInstanceId: string | null;

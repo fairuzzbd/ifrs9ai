@@ -52,7 +52,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -278,19 +277,7 @@ func assertPeriodeBukuWF(t *testing.T, db *sql.DB, kode, expected string) {
 	}
 }
 
-// ─── PATCH helper (no PUT for periode_buku; handler uses PATCH) ──────────────
-
-func patchJSON(router *gin.Engine, path, claimsJSON, idempKey, body string) *httptest.ResponseRecorder {
-	w := httptest.NewRecorder()
-	req, _ := http.NewRequest(http.MethodPatch, path, strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Test-Claims", claimsJSON)
-	if idempKey != "" {
-		req.Header.Set("Idempotency-Key", idempKey)
-	}
-	router.ServeHTTP(w, req)
-	return w
-}
+// patchJSON helper defined in bobotskenario_test.go (shared across package).
 
 // ─── readIDFromCreateResponse extracts data.id from a POST response body. ────
 

@@ -53,7 +53,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -308,20 +307,7 @@ func lgdPath(entityID uuid.UUID) string {
 	return "/api/v1/master/lgd-basel/" + entityID.String()
 }
 
-// ─── HTTP helpers (lgd-specific shortcuts) ───────────────────────────────────
-
-// patchJSON sends PATCH with JSON body.
-func patchJSON(router *gin.Engine, path, claimsJSON, idempKey, body string) *httptest.ResponseRecorder {
-	w := httptest.NewRecorder()
-	req, _ := http.NewRequest(http.MethodPatch, path, strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Test-Claims", claimsJSON)
-	if idempKey != "" {
-		req.Header.Set("Idempotency-Key", idempKey)
-	}
-	router.ServeHTTP(w, req)
-	return w
-}
+// patchJSON helper defined in bobotskenario_test.go (shared across package).
 
 // ─── Test 1: Period overlap → 422 ─────────────────────────────────────────────
 

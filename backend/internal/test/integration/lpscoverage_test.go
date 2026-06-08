@@ -610,16 +610,11 @@ func TestLPSCoverage_SixEyesCycle_Full_WithStepUpMFA(t *testing.T) {
 	cfgLoader := workflow.NewInMemoryConfigLoader(workflow.DefaultConfigs())
 	wfEngine := workflow.NewEngine(cfgLoader)
 
-	// Register EntityHook so BeforeCommit syncs mst.lps_coverage.workflow_status.
-	hook := lpscoverage.NewWorkflowHook(lpsRepo)
+	// Register EntityHook so BeforeCommit syncs mst.lps_coverage.workflow_status
+	// atomically inside the workflow transaction (production wiring).
 	wfSvc := workflow.NewService(wfEngine, wfRepo, auditWriter, nil)
-	// Attach the hook via the workflow repo for transactions (BeforeCommit path).
-	// The hook is exercised through UpdateWorkflowStatusTx called inside wfRepo's
-	// UpdateState when a registered hook is present. For this test we drive the
-	// status sync by calling lpsRepo.UpdateWorkflowStatusTx directly inside a
-	// tx — which is exactly what BeforeCommit does in production.
-	// We verify both sides (workflow_instance + lps_coverage) align after each step.
-	_ = hook // present to confirm hook type compiles correctly with BeforeCommit sig
+	hook := lpscoverage.NewWorkflowHook(lpsSvc, lpsRepo)
+	wfSvc.RegisterEntityHook("LPS_COVERAGE", hook)
 
 	makerID := seedUserSQL(t, infra.DB, fmt.Sprintf("lps_6eyes_maker_%d", time.Now().UnixNano()))
 	reviewerID := seedUserSQL(t, infra.DB, fmt.Sprintf("lps_6eyes_rev_%d", time.Now().UnixNano()))

@@ -149,7 +149,7 @@ function DeleteDialog({
 }
 
 // ---------------------------------------------------------------------------
-// Active badge for currently-active coverage (periodeBlakuSampai = null)
+// Active badge for currently-active coverage (periodeBerlakuSampai = null)
 // ---------------------------------------------------------------------------
 
 function ActiveCoverageBadge() {
@@ -426,7 +426,7 @@ function LPSCoverageListContent() {
             <span className="font-mono font-medium tabular-nums">
               {formatIDR(row.original.coverageAmount)}
             </span>
-            {row.original.periodeBlakuSampai === null &&
+            {row.original.periodeBerlakuSampai === null &&
               row.original.workflowStatus === "APPROVED" && (
                 <ActiveCoverageBadge />
               )}
@@ -443,7 +443,7 @@ function LPSCoverageListContent() {
         ),
       },
       {
-        accessorKey: "periodeBlakuDari",
+        accessorKey: "periodeBerlakuDari",
         header: () => (
           <SortHeader
             label="Berlaku Dari"
@@ -454,12 +454,12 @@ function LPSCoverageListContent() {
         ),
         cell: ({ row }) => (
           <span className="tabular-nums">
-            {fmtDate(row.original.periodeBlakuDari)}
+            {fmtDate(row.original.periodeBerlakuDari)}
           </span>
         ),
       },
       {
-        accessorKey: "periodeBlakuSampai",
+        accessorKey: "periodeBerlakuSampai",
         header: () => (
           <SortHeader
             label="Berlaku Sampai"
@@ -470,8 +470,8 @@ function LPSCoverageListContent() {
         ),
         cell: ({ row }) => (
           <span className="tabular-nums">
-            {row.original.periodeBlakuSampai
-              ? fmtDate(row.original.periodeBlakuSampai)
+            {row.original.periodeBerlakuSampai
+              ? fmtDate(row.original.periodeBerlakuSampai)
               : "—"}
           </span>
         ),

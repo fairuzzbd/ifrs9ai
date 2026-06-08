@@ -250,7 +250,7 @@ export default function LPSCoverageDetailPage() {
   const isDraft =
     item.workflowStatus === "DRAFT" || item.workflowStatus === "RETURNED";
   const isActive =
-    item.periodeBlakuSampai === null && item.workflowStatus === "APPROVED";
+    item.periodeBerlakuSampai === null && item.workflowStatus === "APPROVED";
   const canEdit = perms.canUpdate("ecl_parameter") && isDraft;
   const canDelete = perms.canDelete("ecl_parameter") && isDraft;
   const canSubmit = perms.canSubmit("ecl_parameter") && isDraft;
@@ -382,13 +382,13 @@ export default function LPSCoverageDetailPage() {
                 />
                 <DetailRow
                   label="Berlaku Dari"
-                  value={formatDate(item.periodeBlakuDari)}
+                  value={formatDate(item.periodeBerlakuDari)}
                 />
                 <DetailRow
                   label="Berlaku Sampai"
                   value={
-                    item.periodeBlakuSampai ? (
-                      formatDate(item.periodeBlakuSampai)
+                    item.periodeBerlakuSampai ? (
+                      formatDate(item.periodeBerlakuSampai)
                     ) : (
                       <span className="inline-flex items-center gap-1.5 text-green-700 font-semibold">
                         <Info className="h-3.5 w-3.5" aria-hidden />

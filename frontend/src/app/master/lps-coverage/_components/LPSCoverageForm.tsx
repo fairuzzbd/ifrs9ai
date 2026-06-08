@@ -72,10 +72,10 @@ export function LPSCoverageForm({ mode, defaultValues }: LPSCoverageFormProps) {
     defaultValues: {
       coverageAmount:
         defaultValues?.coverageAmount ?? DEFAULT_COVERAGE_AMOUNT,
-      periodeBlakuDari:
-        defaultValues?.periodeBlakuDari ??
+      periodeBerlakuDari:
+        defaultValues?.periodeBerlakuDari ??
         new Date().toISOString().split("T")[0],
-      periodeBlakuSampai: defaultValues?.periodeBlakuSampai ?? null,
+      periodeBerlakuSampai: defaultValues?.periodeBerlakuSampai ?? null,
       regulasiReferensi: defaultValues?.regulasiReferensi ?? "",
     },
   });
@@ -170,7 +170,7 @@ export function LPSCoverageForm({ mode, defaultValues }: LPSCoverageFormProps) {
         });
 
         if (err.code === "LPS_PERIOD_OVERLAP") {
-          form.setError("periodeBlakuDari", {
+          form.setError("periodeBerlakuDari", {
             message:
               "Periode berlaku overlap dengan LPS coverage yang sudah aktif. Tutup periode sebelumnya terlebih dahulu.",
           });
@@ -353,7 +353,7 @@ export function LPSCoverageForm({ mode, defaultValues }: LPSCoverageFormProps) {
                 {/* Periode Berlaku Dari */}
                 <FormField
                   control={form.control}
-                  name="periodeBlakuDari"
+                  name="periodeBerlakuDari"
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel>
@@ -380,7 +380,7 @@ export function LPSCoverageForm({ mode, defaultValues }: LPSCoverageFormProps) {
                 {/* Periode Berlaku Sampai */}
                 <FormField
                   control={form.control}
-                  name="periodeBlakuSampai"
+                  name="periodeBerlakuSampai"
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel>Berlaku Sampai</FormLabel>
@@ -391,7 +391,7 @@ export function LPSCoverageForm({ mode, defaultValues }: LPSCoverageFormProps) {
                           onChange={(e) =>
                             field.onChange(e.target.value || null)
                           }
-                          min={form.watch("periodeBlakuDari")}
+                          min={form.watch("periodeBerlakuDari")}
                         />
                       </FormControl>
                       <FormDescription>

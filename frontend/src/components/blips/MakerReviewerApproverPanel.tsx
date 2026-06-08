@@ -165,7 +165,7 @@ export function MakerReviewerApproverPanel({
   const submitEntry = history.find((h) => h.action === "SUBMIT");
   const reviewEntry = history.find((h) => h.action === "REVIEW");
   const approveEntry = history.find((h) => h.action === "APPROVE");
-  const approve2Entry = history.find((h) => h.action === "APPROVE_2");
+  const approve2Entry = history.find((h) => h.action === "APPROVE2");
   const rejectEntry = [...history].reverse().find((h) => h.action === "REJECT");
 
   // Determine step states
