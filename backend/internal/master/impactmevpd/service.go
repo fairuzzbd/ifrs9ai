@@ -58,7 +58,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*ImpactMevPd, 
 	}
 
 	// Duplicate check: (periode_id, skenario) must not have an active/pending row.
-	dupCount, err := s.repo.CountDuplicate(ctx, periodeID, skenario, uuid.Nil)
+	dupCount, err := s.repo.CountDuplicate(ctx, periodeID, skenario, uuid.Nil, tenantID(claims))
 	if err != nil {
 		return nil, fmt.Errorf("service.Create duplicate check: %w", err)
 	}
@@ -148,7 +148,8 @@ type ListResult struct {
 
 // List fetches paginated/filtered records.
 func (s *Service) List(ctx context.Context, q listquery.Query, cursor string, limit int, includeDeleted bool) (*ListResult, error) {
-	items, err := s.repo.List(ctx, q, cursor, limit, includeDeleted)
+	claims := auth.ClaimsFromContext(ctx)
+	items, err := s.repo.List(ctx, q, cursor, limit, includeDeleted, tenantID(claims))
 	if err != nil {
 		return nil, fmt.Errorf("service.List: %w", err)
 	}
@@ -221,7 +222,7 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		return nil, fmt.Errorf("service.Update: begin tx: %w", err)
 	}
 
-	updated, err := s.repo.Update(ctx, tx, id, fields)
+	updated, err := s.repo.Update(ctx, tx, id, fields, tenantID(claims))
 	if err != nil {
 		rollbackTx(ctx, tx, s.logger)
 		if err == ErrNotFound {
@@ -278,7 +279,7 @@ func (s *Service) SoftDelete(ctx context.Context, id uuid.UUID) error {
 		return fmt.Errorf("service.SoftDelete: begin tx: %w", err)
 	}
 
-	deleted, err := s.repo.SoftDelete(ctx, tx, id, actorID)
+	deleted, err := s.repo.SoftDelete(ctx, tx, id, actorID, tenantID(claims))
 	if err != nil {
 		rollbackTx(ctx, tx, s.logger)
 		return fmt.Errorf("service.SoftDelete: %w", err)
@@ -305,10 +306,19 @@ func (s *Service) SoftDelete(ctx context.Context, id uuid.UUID) error {
 
 // GetActive returns APPROVED rows for the given periode_id.
 // Used by ECL engine Phase 4 (OQ-5: two separate endpoints).
+// Returns 404 NOT_FOUND when no APPROVED rows exist for the period.
 func (s *Service) GetActive(ctx context.Context, periodeID uuid.UUID) (*ActiveResponse, error) {
-	rows, err := s.repo.GetActive(ctx, periodeID)
+	claims := auth.ClaimsFromContext(ctx)
+	rows, err := s.repo.GetActive(ctx, periodeID, tenantID(claims))
 	if err != nil {
 		return nil, fmt.Errorf("service.GetActive: %w", err)
+	}
+
+	// F2: return 404 when no APPROVED row found.
+	if len(rows) == 0 {
+		return nil, domainerrors.New(domainerrors.CodeNotFound,
+			fmt.Sprintf("Tidak ada impact_mev_pd APPROVED aktif untuk periode %s.", periodeID),
+		)
 	}
 
 	result := &ActiveResponse{
@@ -345,7 +355,8 @@ func (s *Service) SyncWorkflowStatus(ctx context.Context, entityID uuid.UUID, ne
 		return fmt.Errorf("service.SyncWorkflowStatus: begin tx: %w", err)
 	}
 
-	if err := s.repo.UpdateWorkflowStatusTx(ctx, tx, entityID, wfStatus); err != nil {
+	claimsSvc := auth.ClaimsFromContext(ctx)
+	if err := s.repo.UpdateWorkflowStatusTx(ctx, tx, entityID, wfStatus, tenantID(claimsSvc)); err != nil {
 		rollbackTx(ctx, tx, s.logger)
 		return fmt.Errorf("service.SyncWorkflowStatus: %w", err)
 	}
@@ -391,7 +402,7 @@ func (s *Service) ExportCSV(ctx context.Context, q listquery.Query) (interface{ 
 		return nil, 0, err
 	}
 
-	reader, count, err := s.repo.ExportAll(ctx, q)
+	reader, count, err := s.repo.ExportAll(ctx, q, tenantID(claims))
 	if err != nil {
 		return nil, 0, fmt.Errorf("service.ExportCSV: %w", err)
 	}

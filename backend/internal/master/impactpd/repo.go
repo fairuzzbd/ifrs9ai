@@ -21,18 +21,20 @@ import (
 type Repository interface {
 	Create(ctx context.Context, tx *sql.Tx, e *ImpactPd) error
 	GetByID(ctx context.Context, id uuid.UUID, includeDeleted bool) (*ImpactPd, error)
-	List(ctx context.Context, q listquery.Query, cursor string, limit int, includeDeleted bool) ([]*ImpactPd, error)
-	Update(ctx context.Context, tx *sql.Tx, id uuid.UUID, f UpdateFields) (*ImpactPd, error)
-	SoftDelete(ctx context.Context, tx *sql.Tx, id uuid.UUID, deletedBy uuid.UUID) (*ImpactPd, error)
-	UpdateWorkflowStatusTx(ctx context.Context, tx *sql.Tx, id uuid.UUID, status WorkflowStatus) error
+	List(ctx context.Context, q listquery.Query, cursor string, limit int, includeDeleted bool, tenantID string) ([]*ImpactPd, error)
+	Update(ctx context.Context, tx *sql.Tx, id uuid.UUID, f UpdateFields, tenantID string) (*ImpactPd, error)
+	SoftDelete(ctx context.Context, tx *sql.Tx, id uuid.UUID, deletedBy uuid.UUID, tenantID string) (*ImpactPd, error)
+	UpdateWorkflowStatusTx(ctx context.Context, tx *sql.Tx, id uuid.UUID, status WorkflowStatus, tenantID string) error
 	// CountDuplicate returns count of non-deleted rows with periode_id that have
 	// workflow_status NOT IN ('REJECTED','RETURNED'), excluding excludeID.
-	CountDuplicate(ctx context.Context, periodeID uuid.UUID, excludeID uuid.UUID) (int64, error)
+	CountDuplicate(ctx context.Context, periodeID uuid.UUID, excludeID uuid.UUID, tenantID string) (int64, error)
+	// CountDuplicateTx is the tx-aware version of CountDuplicate, called inside BeforeCommit.
+	CountDuplicateTx(ctx context.Context, tx *sql.Tx, periodeID uuid.UUID, excludeID uuid.UUID, tenantID string) (int64, error)
 	// GetActive returns the APPROVED row for the given periode_id (nil if none).
-	GetActive(ctx context.Context, periodeID uuid.UUID) (*ImpactPd, error)
+	GetActive(ctx context.Context, periodeID uuid.UUID, tenantID string) (*ImpactPd, error)
 	BeginTx(ctx context.Context) (*sql.Tx, error)
 	ListAuditHistory(ctx context.Context, entityID uuid.UUID, cursor string, limit int, isAuditRole bool) ([]AuditHistoryItem, bool, error)
-	ExportAll(ctx context.Context, q listquery.Query) (io.Reader, int, error)
+	ExportAll(ctx context.Context, q listquery.Query, tenantID string) (io.Reader, int, error)
 }
 
 // UpdateFields captures mutable columns.
@@ -109,7 +111,7 @@ func (r *DBRepository) GetByID(ctx context.Context, id uuid.UUID, includeDeleted
 	return e, nil
 }
 
-func (r *DBRepository) List(ctx context.Context, q listquery.Query, cursor string, limit int, includeDeleted bool) ([]*ImpactPd, error) {
+func (r *DBRepository) List(ctx context.Context, q listquery.Query, cursor string, limit int, includeDeleted bool, tenantID string) ([]*ImpactPd, error) {
 	where, args, orderBy := q.WithAllowed(AllAllowedCols).ToSQL("t")
 
 	var conditions []string
@@ -117,17 +119,22 @@ func (r *DBRepository) List(ctx context.Context, q listquery.Query, cursor strin
 		conditions = append(conditions, "t.deleted_at IS NULL")
 	}
 
+	// F3: tenant isolation
+	argIdx := len(args) + 1
+	conditions = append(conditions, fmt.Sprintf("t.tenant_id = $%d", argIdx))
+	args = append(args, tenantID)
+
 	if cursor != "" {
 		cd, err := pagination.DecodeCursor(cursor)
 		if err == nil && cd.ID != "" {
-			argIdx := len(args) + 1
+			argIdx = len(args) + 1
 			conditions = append(conditions, fmt.Sprintf("t.id > $%d", argIdx))
 			args = append(args, cd.ID)
 		}
 	}
 
 	if q.Search != "" {
-		argIdx := len(args) + 1
+		argIdx = len(args) + 1
 		var searchParts []string
 		for _, col := range SearchCols {
 			searchParts = append(searchParts, fmt.Sprintf("t.%s ILIKE $%d", col, argIdx))
@@ -148,7 +155,7 @@ func (r *DBRepository) List(ctx context.Context, q listquery.Query, cursor strin
 		orderBy = "t.created_at DESC, t.id ASC"
 	}
 
-	argIdx := len(args) + 1
+	argIdx = len(args) + 1
 	query := fmt.Sprintf( //nolint:gosec
 		`SELECT t.id, t.periode_id, t.impact_multiplier,
 		    t.catatan, t.dokumen_pendukung_id,
@@ -181,7 +188,7 @@ func (r *DBRepository) List(ctx context.Context, q listquery.Query, cursor strin
 	return items, nil
 }
 
-func (r *DBRepository) Update(ctx context.Context, tx *sql.Tx, id uuid.UUID, f UpdateFields) (*ImpactPd, error) {
+func (r *DBRepository) Update(ctx context.Context, tx *sql.Tx, id uuid.UUID, f UpdateFields, tenantID string) (*ImpactPd, error) {
 	var setClauses []string
 	var args []interface{}
 	idx := 1
@@ -214,10 +221,11 @@ func (r *DBRepository) Update(ctx context.Context, tx *sql.Tx, id uuid.UUID, f U
 	args = append(args, time.Now(), f.UpdatedBy)
 	idx += 2
 
-	args = append(args, id, f.ExpectedVersion)
+	// F3: tenant isolation
+	args = append(args, id, f.ExpectedVersion, tenantID)
 	query := fmt.Sprintf( //nolint:gosec
-		`UPDATE mst.impact_pd SET %s WHERE id = $%d AND row_version = $%d AND deleted_at IS NULL`,
-		strings.Join(setClauses, ", "), idx, idx+1,
+		`UPDATE mst.impact_pd SET %s WHERE id = $%d AND row_version = $%d AND deleted_at IS NULL AND tenant_id = $%d`,
+		strings.Join(setClauses, ", "), idx, idx+1, idx+2,
 	)
 
 	result, err := tx.ExecContext(ctx, query, args...)
@@ -241,12 +249,12 @@ func (r *DBRepository) Update(ctx context.Context, tx *sql.Tx, id uuid.UUID, f U
 	return r.GetByID(ctx, id, false)
 }
 
-func (r *DBRepository) SoftDelete(ctx context.Context, tx *sql.Tx, id uuid.UUID, deletedBy uuid.UUID) (*ImpactPd, error) {
+func (r *DBRepository) SoftDelete(ctx context.Context, tx *sql.Tx, id uuid.UUID, deletedBy uuid.UUID, tenantID string) (*ImpactPd, error) {
 	now := time.Now()
 	_, err := tx.ExecContext(ctx,
 		`UPDATE mst.impact_pd SET deleted_at=$1, deleted_by=$2, updated_at=$1, row_version=row_version+1
-		 WHERE id=$3 AND deleted_at IS NULL`,
-		now, deletedBy, id,
+		 WHERE id=$3 AND deleted_at IS NULL AND tenant_id=$4`,
+		now, deletedBy, id, tenantID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("repo.SoftDelete impact_pd: %w", err)
@@ -254,10 +262,10 @@ func (r *DBRepository) SoftDelete(ctx context.Context, tx *sql.Tx, id uuid.UUID,
 	return r.GetByID(ctx, id, true)
 }
 
-func (r *DBRepository) UpdateWorkflowStatusTx(ctx context.Context, tx *sql.Tx, id uuid.UUID, status WorkflowStatus) error {
+func (r *DBRepository) UpdateWorkflowStatusTx(ctx context.Context, tx *sql.Tx, id uuid.UUID, status WorkflowStatus, tenantID string) error {
 	_, err := tx.ExecContext(ctx,
-		`UPDATE mst.impact_pd SET workflow_status=$1, updated_at=now(), row_version=row_version+1 WHERE id=$2`,
-		string(status), id,
+		`UPDATE mst.impact_pd SET workflow_status=$1, updated_at=now(), row_version=row_version+1 WHERE id=$2 AND tenant_id=$3`,
+		string(status), id, tenantID,
 	)
 	if err != nil {
 		return fmt.Errorf("repo.UpdateWorkflowStatusTx impact_pd: %w", err)
@@ -265,15 +273,16 @@ func (r *DBRepository) UpdateWorkflowStatusTx(ctx context.Context, tx *sql.Tx, i
 	return nil
 }
 
-func (r *DBRepository) CountDuplicate(ctx context.Context, periodeID uuid.UUID, excludeID uuid.UUID) (int64, error) {
+func (r *DBRepository) CountDuplicate(ctx context.Context, periodeID uuid.UUID, excludeID uuid.UUID, tenantID string) (int64, error) {
 	var count int64
 	err := r.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM mst.impact_pd
 		 WHERE periode_id=$1
 		   AND workflow_status NOT IN ('REJECTED','RETURNED')
 		   AND deleted_at IS NULL
-		   AND ($2::uuid IS NULL OR id != $2)`,
-		periodeID, nullIfNil(excludeID),
+		   AND tenant_id=$2
+		   AND ($3::uuid IS NULL OR id != $3)`,
+		periodeID, tenantID, nullIfNil(excludeID),
 	).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("repo.CountDuplicate impact_pd: %w", err)
@@ -281,9 +290,27 @@ func (r *DBRepository) CountDuplicate(ctx context.Context, periodeID uuid.UUID, 
 	return count, nil
 }
 
-func (r *DBRepository) GetActive(ctx context.Context, periodeID uuid.UUID) (*ImpactPd, error) {
-	query := baseSelect + ` WHERE periode_id=$1 AND workflow_status='APPROVED' AND deleted_at IS NULL LIMIT 1`
-	row := r.db.QueryRowContext(ctx, query, periodeID)
+// CountDuplicateTx is the tx-aware version used inside BeforeCommit overlap guard (F1).
+func (r *DBRepository) CountDuplicateTx(ctx context.Context, tx *sql.Tx, periodeID uuid.UUID, excludeID uuid.UUID, tenantID string) (int64, error) {
+	var count int64
+	err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM mst.impact_pd
+		 WHERE periode_id=$1
+		   AND workflow_status='APPROVED'
+		   AND deleted_at IS NULL
+		   AND tenant_id=$2
+		   AND ($3::uuid IS NULL OR id != $3)`,
+		periodeID, tenantID, nullIfNil(excludeID),
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("repo.CountDuplicateTx impact_pd: %w", err)
+	}
+	return count, nil
+}
+
+func (r *DBRepository) GetActive(ctx context.Context, periodeID uuid.UUID, tenantID string) (*ImpactPd, error) {
+	query := baseSelect + ` WHERE periode_id=$1 AND workflow_status='APPROVED' AND deleted_at IS NULL AND tenant_id=$2 LIMIT 1`
+	row := r.db.QueryRowContext(ctx, query, periodeID, tenantID)
 	e, err := scanRow(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -352,9 +379,12 @@ func (r *DBRepository) ListAuditHistory(ctx context.Context, entityID uuid.UUID,
 	return items, hasMore, nil
 }
 
-func (r *DBRepository) ExportAll(ctx context.Context, q listquery.Query) (io.Reader, int, error) {
+func (r *DBRepository) ExportAll(ctx context.Context, q listquery.Query, tenantID string) (io.Reader, int, error) {
 	where, args, orderBy := q.WithAllowed(AllAllowedCols).ToSQL("t")
-	conditions := []string{"t.deleted_at IS NULL"}
+	// F3: tenant isolation
+	argIdx := len(args) + 1
+	conditions := []string{"t.deleted_at IS NULL", fmt.Sprintf("t.tenant_id = $%d", argIdx)}
+	args = append(args, tenantID)
 	if where != "" {
 		conditions = append(conditions, where)
 	}

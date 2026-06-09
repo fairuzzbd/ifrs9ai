@@ -228,3 +228,23 @@ func TestGetActive_NoPeriodeID_Returns400(t *testing.T) {
 		t.Errorf("expected 400 got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TC-008 (F2): GET /active when no APPROVED row exists for the period → 404 NOT_FOUND.
+func TestGetActive_NoApprovedRecord_Returns404(t *testing.T) {
+	periodeID := uuid.New()
+	// activeRows is nil / empty — no APPROVED rows in DB.
+	r := newRouter(buildSvc(&repoAdapter{activeRows: nil}))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/master/impact-mev-pd/active?periode_id="+periodeID.String(), nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]interface{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	errObj := resp["error"].(map[string]interface{})
+	if errObj["code"] != "NOT_FOUND" {
+		t.Errorf("expected NOT_FOUND got %v", errObj["code"])
+	}
+}
