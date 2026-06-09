@@ -37,6 +37,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/master/lgdbasel"
 	"blips-ifrs9.tugu-re.com/internal/master/lpscoverage"
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
+	"blips-ifrs9.tugu-re.com/internal/master/pdpefindo"
 	"blips-ifrs9.tugu-re.com/internal/master/periodebuku"
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
@@ -293,11 +294,6 @@ func main() {
 	bobotSkenarioHandler := bobotskenario.NewHandler(bobotSkenarioSvc, wfHandler)
 	bobotskenario.RegisterRoutes(v1, bobotSkenarioHandler)
 
-	// Wire entity hook (post-commit pattern from lgd_basel merge).
-	// NOTE: original bobot design used pre-commit (BLOCKER 1+2 fix); after lgd_basel
-	// landed first with post-commit EntityHook interface, this adapts to that. The
-	// DEC-010 sum=1.0 invariant is now checked post-commit with a TOCTOU window
-	// documented as a follow-up ticket for Phase 5 hardening.
 	bobotSkenarioHook := bobotskenario.NewWorkflowHook(bobotSkenarioSvc, bobotSkenarioRepo)
 	wfService.RegisterEntityHook("BOBOT_SKENARIO", bobotSkenarioHook)
 
@@ -310,6 +306,19 @@ func main() {
 	wfService.RegisterEntityHook("LPS_COVERAGE", lpsCoverageHook)
 	lpsCoverageHandler := lpscoverage.NewHandler(lpsCoverageSvc, wfHandler)
 	lpscoverage.RegisterRoutes(v1, lpsCoverageHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — PD Pefindo (APP-A ECL Param, MSTR-PDPefindo)
+	// 6-eyes workflow: ROLE-RISK → ROLE-AKUN-CTL → ROLE-ALCO × 2
+	// Both approve + approve2 require step-up MFA (DEC-027).
+	// -----------------------------------------------------------------------
+	pdPefindoRepo := pdpefindo.NewDBRepository(db)
+	pdPefindoSvc := pdpefindo.NewService(pdPefindoRepo, auditWriter, logger)
+	pdPefindoUploadSvc := pdpefindo.NewUploadService(pdPefindoRepo, auditWriter, logger)
+	pdPefindoHandler := pdpefindo.NewHandler(pdPefindoSvc, pdPefindoUploadSvc, wfHandler, nil /* asynq: nil = sync fallback in dev */)
+	pdpefindo.RegisterRoutes(v1, pdPefindoHandler)
+	pdPefindoHook := pdpefindo.NewWorkflowHook(pdPefindoSvc, pdPefindoRepo)
+	wfService.RegisterEntityHook("PD_PEFINDO", pdPefindoHook)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,

@@ -342,5 +342,24 @@ func DefaultConfigs() map[string]*Config {
 				Approver2NotAnyPrevious:    true,
 			},
 		},
+		// PD_PEFINDO — 6-eyes ECL parameter (DEC-027 step-up MFA on approve + approve2).
+		"PD_PEFINDO": {
+			EntityType:  "PD_PEFINDO",
+			Eyes:        6,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":   "ecl_parameter.submit",
+				"review":   "ecl_parameter.review",
+				"approve":  "ecl_parameter.approve",
+				"approve2": "ecl_parameter.approve",
+				"reject":   "ecl_parameter.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": true, "approve2": true},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    true,
+			},
+		},
 	}
 }

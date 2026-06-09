@@ -38,7 +38,7 @@ permissions:
   pull-requests: read
 
 env:
-  GO_VERSION: "1.22"
+  GO_VERSION: "1.24"
   NODE_VERSION: "20"
   PNPM_VERSION: "9"
 
@@ -86,7 +86,7 @@ jobs:
       - uses: golangci/golangci-lint-action@v6
         if: steps.changed.outputs.backend == 'true'
         with:
-          version: v1.59.1
+          version: v1.64.5
           working-directory: backend
           args: ./...
           # skip-cache: prevents golangci-lint-action from restoring its own

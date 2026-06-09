@@ -356,7 +356,7 @@ func (s *Service) performTransition(ctx context.Context, p transitionParams) (*A
 		}
 	}
 
-	return &ActionResult{
+	actionResult := &ActionResult{
 		EntityID:        inst.EntityID,
 		EntityType:      inst.EntityType,
 		PreviousState:   result.PreviousState,
@@ -368,7 +368,9 @@ func (s *Service) performTransition(ctx context.Context, p transitionParams) (*A
 		SignatureMethod: result.SignatureMethod,
 		NextActions:     result.NextActions,
 		WorkflowEyes:    inst.Eyes,
-	}, nil
+	}
+
+	return actionResult, nil
 }
 
 // applyActorToUpdate sets the actor + timestamp fields on StateUpdate based on action.
