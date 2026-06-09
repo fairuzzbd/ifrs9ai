@@ -24,7 +24,14 @@ import (
 )
 
 const (
-	maxUploadBytes = 10 * 1024 * 1024 // 10 MB
+	maxUploadBytes = 50 * 1024 * 1024 // 50 MB per plan §1 AC + F-005 fix
+
+	// xlsxMagicZIP is the magic bytes prefix for ZIP-based formats (XLSX is ZIP).
+	xlsxMagicZIP = "\x50\x4B\x03\x04"
+	// xlsxMagicZIPEmpty is the "empty archive" variant.
+	xlsxMagicZIPEmpty = "\x50\x4B\x05\x06"
+	// xlsxMagicZIPSpanned is the spanned archive variant.
+	xlsxMagicZIPSpanned = "\x50\x4B\x07\x08"
 )
 
 // Handler is the HTTP handler for pd_pefindo endpoints.
@@ -171,7 +178,7 @@ func (h *Handler) Export(c *gin.Context) {
 func (h *Handler) UploadXLSX(c *gin.Context) {
 	if err := c.Request.ParseMultipartForm(maxUploadBytes); err != nil {
 		response.Error(c, domainerrors.New(domainerrors.CodeValidationFailed,
-			"File terlalu besar atau form tidak valid (max 10 MB): "+err.Error()))
+			"File terlalu besar atau form tidak valid (max 50 MB): "+err.Error()))
 		return
 	}
 
@@ -185,7 +192,7 @@ func (h *Handler) UploadXLSX(c *gin.Context) {
 	}
 	if fileHeader.Size > maxUploadBytes {
 		response.Error(c, domainerrors.New(domainerrors.CodeValidationFailed,
-			fmt.Sprintf("File terlalu besar: %d bytes (max %d bytes)", fileHeader.Size, maxUploadBytes),
+			fmt.Sprintf("File terlalu besar: %d bytes (max %d bytes = 50 MB)", fileHeader.Size, maxUploadBytes),
 		))
 		return
 	}
@@ -211,6 +218,17 @@ func (h *Handler) UploadXLSX(c *gin.Context) {
 	if err != nil {
 		response.Error(c, domainerrors.New(domainerrors.CodeInternal,
 			"Gagal membaca file upload."))
+		return
+	}
+
+	// Magic-bytes validation: XLSX is a ZIP archive; validate using file content
+	// rather than trusting the Content-Type header or extension alone (F-005).
+	if !isValidXLSXMagic(fileContent) {
+		response.Error(c, domainerrors.New(domainerrors.CodeValidationFailed,
+			"File tidak terdeteksi sebagai format XLSX/ZIP yang valid. "+
+				"Pastikan file adalah XLSX asli, bukan file yang diubah ekstensinya.",
+			domainerrors.Detail{Field: "file", Rule: "mime_magic", Message: "Magic bytes tidak sesuai format XLSX (ZIP)"},
+		))
 		return
 	}
 
@@ -279,6 +297,29 @@ func (h *Handler) GetUploadJobStatus(c *gin.Context) {
 	}
 
 	resp := toJobStatusResponse(j)
+	response.OK(c, resp)
+}
+
+// ─── GET /master/pd-pefindo/active ───────────────────────────────────────────
+
+// GetActive handles GET /api/v1/master/pd-pefindo/active?tanggal=YYYY-MM-DD.
+// Returns all APPROVED pd_pefindo records active on the given date.
+// Used by ECL engine (Phase 4 placeholder contract — TC-015).
+// Permission: ecl_parameter.read.
+func (h *Handler) GetActive(c *gin.Context) {
+	tanggal := c.Query("tanggal")
+
+	items, err := h.svc.GetActive(c.Request.Context(), tanggal)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+
+	resp := make([]ActiveCurveResponse, 0, len(items))
+	for _, p := range items {
+		resp = append(resp, ToActiveCurveResponse(p))
+	}
+
 	response.OK(c, resp)
 }
 
@@ -480,6 +521,17 @@ func parseUUID(c *gin.Context) (uuid.UUID, bool) {
 		return uuid.Nil, false
 	}
 	return id, true
+}
+
+// isValidXLSXMagic checks that content starts with a ZIP magic signature.
+// XLSX files are ZIP archives (OOXML), so they must start with PK\x03\x04.
+// This validates magic bytes rather than trusting the extension or Content-Type header.
+func isValidXLSXMagic(content []byte) bool {
+	if len(content) < 4 {
+		return false
+	}
+	prefix := string(content[:4])
+	return prefix == xlsxMagicZIP || prefix == xlsxMagicZIPEmpty || prefix == xlsxMagicZIPSpanned
 }
 
 func toJobStatusResponse(j *JobRow) JobStatusResponse {

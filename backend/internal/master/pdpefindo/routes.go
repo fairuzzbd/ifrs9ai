@@ -16,6 +16,7 @@ import (
 //	GET    /master/pd-pefindo                               → List              (ecl_parameter.read)
 //	POST   /master/pd-pefindo                               → Create            (ecl_parameter.submit)
 //	GET    /master/pd-pefindo/export                        → Export CSV        (ecl_parameter.read)
+//	GET    /master/pd-pefindo/active                        → GetActive         (ecl_parameter.read)
 //	POST   /master/pd-pefindo/upload-xlsx                   → UploadXLSX        (ecl_parameter.submit)
 //	GET    /master/pd-pefindo/upload-jobs/:jobId            → GetUploadJobStatus(ecl_parameter.read)
 //	GET    /master/pd-pefindo/:id                           → GetByID           (ecl_parameter.read)
@@ -40,6 +41,7 @@ func RegisterRoutes(v1 *gin.RouterGroup, h *Handler) {
 
 	// Static sub-paths — registered BEFORE /:id
 	mg.GET("/export", auth.RequirePermission("ecl_parameter.read"), h.Export)
+	mg.GET("/active", auth.RequirePermission("ecl_parameter.read"), h.GetActive)
 	mg.POST("/upload-xlsx", auth.RequirePermission("ecl_parameter.submit"), h.UploadXLSX)
 	mg.GET("/upload-jobs/:jobId", auth.RequirePermission("ecl_parameter.read"), h.GetUploadJobStatus)
 

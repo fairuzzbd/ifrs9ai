@@ -278,6 +278,16 @@ func (s *Service) SoftDelete(ctx context.Context, id uuid.UUID) error {
 		return domainerrors.ErrNotFound("PD Pefindo " + id.String())
 	}
 
+	// Guard: APPROVED records must not be soft-deleted directly.
+	// They must be superseded through a new workflow cycle.
+	if existing.WorkflowStatus == WorkflowStatusApproved {
+		return domainerrors.New(
+			domainerrors.CodeMasterApprovedNoEdit,
+			fmt.Sprintf("PD Pefindo %s sudah disetujui (APPROVED) dan tidak dapat dihapus langsung. "+
+				"Buat rilis baru untuk menggantikannya.", id),
+		)
+	}
+
 	refCount, err := s.repo.CountReferences(ctx, id)
 	if err != nil {
 		return fmt.Errorf("service.SoftDelete pd_pefindo count refs: %w", err)
@@ -417,6 +427,31 @@ func (s *Service) ExportCSV(ctx context.Context, q listquery.Query) (interface{ 
 	}
 
 	return reader, count, nil
+}
+
+// GetActive returns all APPROVED pd_pefindo records active on tanggal (all ratings).
+// tanggal must be in YYYY-MM-DD format; empty string defaults to today.
+// Returns ErrNotFound when no active records exist.
+// Designed for ECL engine consumption (Phase 4 placeholder contract).
+func (s *Service) GetActive(ctx context.Context, tanggal string) ([]*PDPefindo, error) {
+	if tanggal != "" && !dateRe.MatchString(tanggal) {
+		return nil, domainerrors.New(domainerrors.CodeValidationFailed,
+			"Parameter tanggal harus dalam format YYYY-MM-DD.",
+			domainerrors.Detail{Field: "query.tanggal", Rule: "format", Message: "Format YYYY-MM-DD"},
+		)
+	}
+	items, err := s.repo.GetActive(ctx, tanggal)
+	if err != nil {
+		return nil, fmt.Errorf("service.GetActive pd_pefindo: %w", err)
+	}
+	if len(items) == 0 {
+		msg := "Tidak ada PD Pefindo APPROVED aktif"
+		if tanggal != "" {
+			msg += " pada tanggal " + tanggal
+		}
+		return nil, domainerrors.ErrNotFound(msg)
+	}
+	return items, nil
 }
 
 // GetJobStatus returns the status of an upload job.
@@ -620,8 +655,8 @@ func validateMonotonicity(pd12 decimal.Decimal, pd3y, pd5y, pd7y, pd10y *decimal
 	return nil
 }
 
-// checkPeriodOverlap returns PD_PERIOD_OVERLAP if another record for the same rating
-// has an overlapping valid period.
+// checkPeriodOverlap returns PD_PERIOD_OVERLAP if another APPROVED record for the same
+// rating has an overlapping valid period.
 func (s *Service) checkPeriodOverlap(ctx context.Context, rating, dari string, sampai *string, excludeID *uuid.UUID) error {
 	count, err := s.repo.CountOverlap(ctx, rating, dari, sampai, excludeID)
 	if err != nil {
@@ -629,12 +664,23 @@ func (s *Service) checkPeriodOverlap(ctx context.Context, rating, dari string, s
 	}
 	if count > 0 {
 		msg := fmt.Sprintf("Terdapat %d record PD untuk rating '%s' dengan periode yang overlap. "+
-			"Tutup periode record lama sebelum membuat record baru.", count, rating)
+			"Tutup periode record lama sebelum mengaktifkan record baru.", count, rating)
 		return domainerrors.New(domainerrors.CodePDPeriodOverlap, msg,
 			domainerrors.Detail{Field: "body.periodeBerlakuDari", Rule: "period_overlap", Message: msg},
 		)
 	}
 	return nil
+}
+
+// AssertNoApprovedOverlapForRating checks that no APPROVED record for the same rating
+// overlaps the given period, excluding the record being approved (excludeID).
+// Called by WorkflowHook.BeforeCommit on the approve2 transition (F-006).
+func (s *Service) AssertNoApprovedOverlapForRating(ctx context.Context, rating, dari string, sampai *string, excludeID uuid.UUID) error {
+	excl := &excludeID
+	if excludeID == uuid.Nil {
+		excl = nil
+	}
+	return s.checkPeriodOverlap(ctx, rating, dari, sampai, excl)
 }
 
 // buildMergedForValidation builds a PDPefindo snapshot with the update fields applied

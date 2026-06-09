@@ -122,6 +122,10 @@ func (a *repoAdapter) CountReferences(_ context.Context, _ uuid.UUID) (int64, er
 	return 0, nil
 }
 
+func (a *repoAdapter) GetActive(_ context.Context, _ string) ([]*pdpefindo.PDPefindo, error) {
+	return nil, nil
+}
+
 func (a *repoAdapter) BeginTx(_ context.Context) (*sql.Tx, error) {
 	// Return error so service code that reaches BeginTx after passing guard checks
 	// fails gracefully (tests don't need a real DB).

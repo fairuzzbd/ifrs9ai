@@ -273,6 +273,52 @@ type DeleteResponse struct {
 	EntityID  string `json:"entityId"`
 }
 
+// ActiveCurveResponse is one item in the GET /master/pd-pefindo/active response.
+// Shape is designed for ECL engine consumption (Phase 4 placeholder contract).
+type ActiveCurveResponse struct {
+	ID                   string  `json:"id"`
+	Rating               string  `json:"rating"`
+	PeriodeBerlakuDari   string  `json:"periodeBerlakuDari"`
+	PeriodeBerlakuSampai *string `json:"periodeBerlakuSampai"`
+	PD12Month            string  `json:"pd12Month"`
+	PDLifetime3Y         *string `json:"pdLifetime3Y"`
+	PDLifetime5Y         *string `json:"pdLifetime5Y"`
+	PDLifetime7Y         *string `json:"pdLifetime7Y"`
+	PDLifetime10Y        *string `json:"pdLifetime10Y"`
+	WorkflowStatus       string  `json:"workflowStatus"`
+}
+
+// ToActiveCurveResponse converts a PDPefindo entity to the active-curve response shape.
+func ToActiveCurveResponse(p *PDPefindo) ActiveCurveResponse {
+	r := ActiveCurveResponse{
+		ID:                 p.ID.String(),
+		Rating:             p.Rating,
+		PeriodeBerlakuDari: p.PeriodeBerlakuDari,
+		PD12Month:          p.PD12Month.String(),
+		WorkflowStatus:     string(p.WorkflowStatus),
+	}
+	if p.PeriodeBerlakuSampai != nil {
+		r.PeriodeBerlakuSampai = p.PeriodeBerlakuSampai
+	}
+	if p.PDLifetime3Y != nil {
+		s := p.PDLifetime3Y.String()
+		r.PDLifetime3Y = &s
+	}
+	if p.PDLifetime5Y != nil {
+		s := p.PDLifetime5Y.String()
+		r.PDLifetime5Y = &s
+	}
+	if p.PDLifetime7Y != nil {
+		s := p.PDLifetime7Y.String()
+		r.PDLifetime7Y = &s
+	}
+	if p.PDLifetime10Y != nil {
+		s := p.PDLifetime10Y.String()
+		r.PDLifetime10Y = &s
+	}
+	return r
+}
+
 // AuditHistoryItem is one aud.audit_log row for pd_pefindo.
 type AuditHistoryItem struct {
 	EventID     string      `json:"eventId"`

@@ -46,6 +46,11 @@ type Repository interface {
 	// Used for period-overlap validation.
 	CountOverlap(ctx context.Context, rating string, dari string, sampai *string, excludeID *uuid.UUID) (int64, error)
 
+	// GetActive returns all APPROVED pd_pefindo records whose period is active on
+	// tanggal (YYYY-MM-DD). Returns empty slice when none exist.
+	// tanggal = "" defaults to today.
+	GetActive(ctx context.Context, tanggal string) ([]*PDPefindo, error)
+
 	// CountReferences returns active FK references — used by delete guard.
 	// pd_pefindo rows are referenced by ecl.ecl_calc_result_line via rating+period.
 	CountReferences(ctx context.Context, id uuid.UUID) (int64, error)
@@ -423,12 +428,16 @@ func (r *DBRepository) UpdateWorkflowStatus(ctx context.Context, tx *sql.Tx, id 
 	return nil
 }
 
-// CountOverlap counts pd_pefindo rows for the same rating whose period overlaps [dari, sampai].
+// CountOverlap counts APPROVED pd_pefindo rows for the same rating whose period
+// overlaps [dari, sampai]. Only APPROVED records enforce the single-active invariant;
+// DRAFT/PENDING records do not block a new submission.
+//
 // "Overlap" definition: NOT (sampai < dari_new OR dari > sampai_new).
 // When sampai_new is nil (open-ended), it overlaps any row where dari >= dari_new.
 func (r *DBRepository) CountOverlap(ctx context.Context, rating string, dari string, sampai *string, excludeID *uuid.UUID) (int64, error) {
-	args := []interface{}{rating, dari}
-	idx := 3
+	// $1 = rating, $2 = dari, $3 = workflow_status (APPROVED)
+	args := []interface{}{rating, dari, "APPROVED"}
+	idx := 4
 
 	// Build overlap condition.
 	// Existing row overlaps new [dari, sampai] if:
@@ -436,8 +445,8 @@ func (r *DBRepository) CountOverlap(ctx context.Context, rating string, dari str
 	// When sampai_new is nil (open-ended): everything >= dari_new overlaps.
 	var overlapCond string
 	if sampai == nil {
-		// New record is open-ended: overlaps any row whose dari >= dari_new
-		// OR whose sampai IS NULL (both open-ended is always overlap)
+		// New record is open-ended: overlaps any row whose sampai IS NULL
+		// OR whose sampai >= dari_new
 		overlapCond = `(periode_berlaku_sampai IS NULL OR periode_berlaku_sampai >= $2)`
 	} else {
 		args = append(args, *sampai)
@@ -456,7 +465,7 @@ func (r *DBRepository) CountOverlap(ctx context.Context, rating string, dari str
 
 	query := fmt.Sprintf( //nolint:gosec
 		`SELECT COUNT(*) FROM mst.pd_pefindo
-        WHERE rating = $1 AND deleted_at IS NULL AND %s%s`,
+        WHERE rating = $1 AND deleted_at IS NULL AND workflow_status = $3 AND %s%s`,
 		overlapCond, excludeCond,
 	)
 
@@ -466,6 +475,52 @@ func (r *DBRepository) CountOverlap(ctx context.Context, rating string, dari str
 		return 0, fmt.Errorf("repo.CountOverlap pd_pefindo: %w", err)
 	}
 	return count, nil
+}
+
+// GetActive returns all APPROVED pd_pefindo rows that are active on tanggal.
+// Active = workflow_status = 'APPROVED' AND periode_berlaku_dari <= tanggal
+// AND (periode_berlaku_sampai IS NULL OR periode_berlaku_sampai >= tanggal).
+//
+// Returns empty slice when no active records exist.
+func (r *DBRepository) GetActive(ctx context.Context, tanggal string) ([]*PDPefindo, error) {
+	if tanggal == "" {
+		tanggal = time.Now().Format("2006-01-02")
+	}
+	q := `
+SELECT
+    id, rating,
+    pd_12month, pd_lifetime_3y, pd_lifetime_5y, pd_lifetime_7y, pd_lifetime_10y,
+    sumber, tanggal_publikasi, periode_berlaku_dari, periode_berlaku_sampai,
+    dokumen_pendukung_id,
+    uploaded_by, uploaded_at, approved_by, approved_at,
+    workflow_status,
+    created_at, created_by, updated_at, updated_by,
+    deleted_at, deleted_by, row_version, tenant_id
+FROM mst.pd_pefindo
+WHERE deleted_at IS NULL
+  AND workflow_status = 'APPROVED'
+  AND periode_berlaku_dari <= $1
+  AND (periode_berlaku_sampai IS NULL OR periode_berlaku_sampai >= $1)
+ORDER BY rating ASC, periode_berlaku_dari DESC`
+
+	rows, err := r.db.QueryContext(ctx, q, tanggal)
+	if err != nil {
+		return nil, fmt.Errorf("repo.GetActive pd_pefindo: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var items []*PDPefindo
+	for rows.Next() {
+		p, err := scanPDPefindoRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("repo.GetActive pd_pefindo scan: %w", err)
+		}
+		items = append(items, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repo.GetActive pd_pefindo rows.Err: %w", err)
+	}
+	return items, nil
 }
 
 // CountReferences counts active FK references to pd_pefindo.id.
