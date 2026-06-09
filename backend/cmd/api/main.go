@@ -34,6 +34,8 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/config"
 	"blips-ifrs9.tugu-re.com/internal/document"
 	"blips-ifrs9.tugu-re.com/internal/master/bobotskenario"
+	"blips-ifrs9.tugu-re.com/internal/master/impactmevpd"
+	"blips-ifrs9.tugu-re.com/internal/master/impactpd"
 	"blips-ifrs9.tugu-re.com/internal/master/lgdbasel"
 	"blips-ifrs9.tugu-re.com/internal/master/lpscoverage"
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
@@ -319,6 +321,36 @@ func main() {
 	pdpefindo.RegisterRoutes(v1, pdPefindoHandler)
 	pdPefindoHook := pdpefindo.NewWorkflowHook(pdPefindoSvc, pdPefindoRepo)
 	wfService.RegisterEntityHook("PD_PEFINDO", pdPefindoHook)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Impact MEV PD (APP-A ECL Param, DEC-010 dual FL multiplier)
+	// mst.impact_mev_pd: MEV-to-PD impact per skenario GOOD/BAD per periode.
+	// NORMAL implicitly 1.0 (no row stored — OQ-1 resolved 2026-06-09).
+	// Independent from impact_pd (OQ-2 resolved 2026-06-09).
+	// 6-eyes: Maker(RISK) → Reviewer(AKUN-CTL) → Approver1(RISK) → Approver2(ALCO).
+	// Both approve steps require step-up MFA (DEC-027).
+	// -----------------------------------------------------------------------
+	impactMevPdRepo := impactmevpd.NewDBRepository(db)
+	impactMevPdSvc := impactmevpd.NewService(impactMevPdRepo, auditWriter, logger)
+	impactMevPdHook := impactmevpd.NewWorkflowHook(impactMevPdSvc, impactMevPdRepo)
+	wfService.RegisterEntityHook("IMPACT_MEV_PD", impactMevPdHook)
+	impactMevPdHandler := impactmevpd.NewHandler(impactMevPdSvc, wfHandler)
+	impactmevpd.RegisterRoutes(v1, impactMevPdHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Impact PD (APP-A ECL Param, DEC-010 final FL PD multiplier)
+	// mst.impact_pd: Final FL PD multiplier per periode, applied as:
+	//   ECL_FL_skenario = ECL_skenario × impact_pd.impact_multiplier
+	// Independent from impact_mev_pd (OQ-2). Range [0.5, 2.0] (OQ-3).
+	// 6-eyes: same config as IMPACT_MEV_PD. Both approve steps step-up MFA.
+	// ECL engine Phase 4 consumes GET /master/impact-pd/active (OQ-5).
+	// -----------------------------------------------------------------------
+	impactPdRepo := impactpd.NewDBRepository(db)
+	impactPdSvc := impactpd.NewService(impactPdRepo, auditWriter, logger)
+	impactPdHook := impactpd.NewWorkflowHook(impactPdSvc, impactPdRepo)
+	wfService.RegisterEntityHook("IMPACT_PD", impactPdHook)
+	impactPdHandler := impactpd.NewHandler(impactPdSvc, wfHandler)
+	impactpd.RegisterRoutes(v1, impactPdHandler)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,
