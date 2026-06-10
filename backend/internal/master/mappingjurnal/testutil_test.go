@@ -17,18 +17,18 @@ import (
 // repoAdapter is a flexible Repository stub that delegates each call to the
 // sub-stub that is set; unset stubs return zero values / nil errors.
 type repoAdapter struct {
-	createHeader    *stubCreateHeader
-	getHeader       *stubGetHeader
-	getDetails      *stubGetDetails
-	listHeaders     *stubListHeaders
-	updateHeader    *stubUpdateHeader
-	softDelete      *stubSoftDelete
-	countRefs       *stubCountRefs
-	checkCoA        *stubCheckCoA
-	workflowStatus  *stubWorkflowStatus
-	bulkReplace     *stubBulkReplace
-	exportStub      *stubExport
-	auditHistory    *stubAuditHistory
+	createHeader   *stubCreateHeader
+	getHeader      *stubGetHeader
+	getDetails     *stubGetDetails
+	listHeaders    *stubListHeaders
+	updateHeader   *stubUpdateHeader
+	softDelete     *stubSoftDelete
+	countRefs      *stubCountRefs
+	checkCoA       *stubCheckCoA
+	workflowStatus *stubWorkflowStatus
+	bulkReplace    *stubBulkReplace
+	exportStub     *stubExport
+	auditHistory   *stubAuditHistory
 }
 
 var _ mappingjurnal.Repository = (*repoAdapter)(nil)

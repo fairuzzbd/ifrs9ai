@@ -42,13 +42,13 @@ const (
 type WorkflowStatus string
 
 const (
-	WorkflowStatusDraft             WorkflowStatus = "DRAFT"
-	WorkflowStatusPendingReview     WorkflowStatus = "PENDING_REVIEW"
-	WorkflowStatusPendingApproval   WorkflowStatus = "PENDING_APPROVAL"
-	WorkflowStatusPendingApproval2  WorkflowStatus = "PENDING_APPROVAL_2"
-	WorkflowStatusApproved          WorkflowStatus = "APPROVED"
-	WorkflowStatusRejected          WorkflowStatus = "REJECTED"
-	WorkflowStatusReturned          WorkflowStatus = "RETURNED" // display alias for REJECTED
+	WorkflowStatusDraft            WorkflowStatus = "DRAFT"
+	WorkflowStatusPendingReview    WorkflowStatus = "PENDING_REVIEW"
+	WorkflowStatusPendingApproval  WorkflowStatus = "PENDING_APPROVAL"
+	WorkflowStatusPendingApproval2 WorkflowStatus = "PENDING_APPROVAL_2"
+	WorkflowStatusApproved         WorkflowStatus = "APPROVED"
+	WorkflowStatusRejected         WorkflowStatus = "REJECTED"
+	WorkflowStatusReturned         WorkflowStatus = "RETURNED" // display alias for REJECTED
 )
 
 // editableStatuses: only DRAFT or RETURNED (DB: REJECTED) can be edited.
@@ -67,18 +67,18 @@ func (s WorkflowStatus) IsEditable() bool {
 
 // Header is the domain entity for mst.mapping_jurnal_header.
 type Header struct {
-	ID                   uuid.UUID  `db:"id"`
-	EventIDKode          string     `db:"event_id_kode"`
-	EventCode            string     `db:"event_code"`
-	NamaEvent            string     `db:"nama_event"`
-	KategoriEvent        string     `db:"kategori_event"`
-	TriggerSource        string     `db:"trigger_source"`
-	TipeInstrumenBerlaku []string   `db:"tipe_instrumen_berlaku"`
-	KlasifikasiBerlaku   []string   `db:"klasifikasi_berlaku"`
-	AktifFlag            bool       `db:"aktif_flag"`
-	Catatan              *string    `db:"catatan"`
+	ID                   uuid.UUID      `db:"id"`
+	EventIDKode          string         `db:"event_id_kode"`
+	EventCode            string         `db:"event_code"`
+	NamaEvent            string         `db:"nama_event"`
+	KategoriEvent        string         `db:"kategori_event"`
+	TriggerSource        string         `db:"trigger_source"`
+	TipeInstrumenBerlaku []string       `db:"tipe_instrumen_berlaku"`
+	KlasifikasiBerlaku   []string       `db:"klasifikasi_berlaku"`
+	AktifFlag            bool           `db:"aktif_flag"`
+	Catatan              *string        `db:"catatan"`
 	WorkflowStatus       WorkflowStatus `db:"workflow_status"`
-	WorkflowInstanceID   *uuid.UUID `db:"workflow_instance_id"`
+	WorkflowInstanceID   *uuid.UUID     `db:"workflow_instance_id"`
 
 	// Audit fields
 	CreatedAt  time.Time  `db:"created_at"`
@@ -94,19 +94,19 @@ type Header struct {
 // Detail is the domain entity for mst.mapping_jurnal_detail.
 // Detail rows do NOT carry workflow_status — they inherit from the header.
 type Detail struct {
-	ID                  uuid.UUID       `db:"id"`
-	EventHeaderID       uuid.UUID       `db:"event_header_id"`
-	Urutan              int             `db:"urutan"`
-	KodeAkunID          uuid.UUID       `db:"kode_akun_id"`
-	DKIndicator         string          `db:"dk_indicator"` // DEBIT | KREDIT
-	SumberAmount        string          `db:"sumber_amount"`
-	KlasifikasiFilter   *string         `db:"klasifikasi_filter"`
-	TipeInstrumenFilter []string        `db:"tipe_instrumen_filter"`
-	UnderlyingTypeFilter *string        `db:"underlying_type_filter"`
-	Multiplier          decimal.Decimal `db:"multiplier"` // NUMERIC(8,4) — shopspring/decimal
-	MataUangPosting     string          `db:"mata_uang_posting"`
-	AktifFlag           bool            `db:"aktif_flag"`
-	Catatan             *string         `db:"catatan"`
+	ID                   uuid.UUID       `db:"id"`
+	EventHeaderID        uuid.UUID       `db:"event_header_id"`
+	Urutan               int             `db:"urutan"`
+	KodeAkunID           uuid.UUID       `db:"kode_akun_id"`
+	DKIndicator          string          `db:"dk_indicator"` // DEBIT | KREDIT
+	SumberAmount         string          `db:"sumber_amount"`
+	KlasifikasiFilter    *string         `db:"klasifikasi_filter"`
+	TipeInstrumenFilter  []string        `db:"tipe_instrumen_filter"`
+	UnderlyingTypeFilter *string         `db:"underlying_type_filter"`
+	Multiplier           decimal.Decimal `db:"multiplier"` // NUMERIC(8,4) — shopspring/decimal
+	MataUangPosting      string          `db:"mata_uang_posting"`
+	AktifFlag            bool            `db:"aktif_flag"`
+	Catatan              *string         `db:"catatan"`
 
 	// Audit fields (no workflow_status — detail inherits from header)
 	CreatedAt  time.Time  `db:"created_at"`
@@ -129,17 +129,17 @@ type HeaderWithDetails struct {
 
 // DetailRequest is the detail row sub-object in create/update requests.
 type DetailRequest struct {
-	Urutan               int     `json:"urutan"              binding:"required,min=1"`
-	KodeAkunID           string  `json:"kodeAkunId"          binding:"required,uuid"`
-	DKIndicator          string  `json:"dkIndicator"         binding:"required,oneof=DEBIT KREDIT"`
-	SumberAmount         string  `json:"sumberAmount"        binding:"required,min=1,max=50"`
-	KlasifikasiFilter    *string `json:"klasifikasiFilter"`
+	Urutan               int      `json:"urutan"              binding:"required,min=1"`
+	KodeAkunID           string   `json:"kodeAkunId"          binding:"required,uuid"`
+	DKIndicator          string   `json:"dkIndicator"         binding:"required,oneof=DEBIT KREDIT"`
+	SumberAmount         string   `json:"sumberAmount"        binding:"required,min=1,max=50"`
+	KlasifikasiFilter    *string  `json:"klasifikasiFilter"`
 	TipeInstrumenFilter  []string `json:"tipeInstrumenFilter"`
-	UnderlyingTypeFilter *string `json:"underlyingTypeFilter"`
-	Multiplier           string  `json:"multiplier"          binding:"required"` // parsed as decimal
-	MataUangPosting      string  `json:"mataUangPosting"     binding:"required,len=3"`
-	AktifFlag            *bool   `json:"aktifFlag"`
-	Catatan              *string `json:"catatan"`
+	UnderlyingTypeFilter *string  `json:"underlyingTypeFilter"`
+	Multiplier           string   `json:"multiplier"          binding:"required"` // parsed as decimal
+	MataUangPosting      string   `json:"mataUangPosting"     binding:"required,len=3"`
+	AktifFlag            *bool    `json:"aktifFlag"`
+	Catatan              *string  `json:"catatan"`
 }
 
 // CreateRequest is the POST /master/mapping-jurnal request body.
@@ -177,20 +177,20 @@ type UpdateRequest struct {
 
 // DetailResponse is the JSON shape for one detail row.
 type DetailResponse struct {
-	ID                   string  `json:"id"`
-	EventHeaderID        string  `json:"eventHeaderId"`
-	Urutan               int     `json:"urutan"`
-	KodeAkunID           string  `json:"kodeAkunId"`
-	DKIndicator          string  `json:"dkIndicator"`
-	SumberAmount         string  `json:"sumberAmount"`
-	KlasifikasiFilter    *string `json:"klasifikasiFilter"`
+	ID                   string   `json:"id"`
+	EventHeaderID        string   `json:"eventHeaderId"`
+	Urutan               int      `json:"urutan"`
+	KodeAkunID           string   `json:"kodeAkunId"`
+	DKIndicator          string   `json:"dkIndicator"`
+	SumberAmount         string   `json:"sumberAmount"`
+	KlasifikasiFilter    *string  `json:"klasifikasiFilter"`
 	TipeInstrumenFilter  []string `json:"tipeInstrumenFilter"`
-	UnderlyingTypeFilter *string `json:"underlyingTypeFilter"`
-	Multiplier           string  `json:"multiplier"` // decimal string, 4dp
-	MataUangPosting      string  `json:"mataUangPosting"`
-	AktifFlag            bool    `json:"aktifFlag"`
-	Catatan              *string `json:"catatan"`
-	RowVersion           int64   `json:"rowVersion"`
+	UnderlyingTypeFilter *string  `json:"underlyingTypeFilter"`
+	Multiplier           string   `json:"multiplier"` // decimal string, 4dp
+	MataUangPosting      string   `json:"mataUangPosting"`
+	AktifFlag            bool     `json:"aktifFlag"`
+	Catatan              *string  `json:"catatan"`
+	RowVersion           int64    `json:"rowVersion"`
 }
 
 // HeaderResponse is the JSON shape for a header (with nested details).
@@ -384,13 +384,13 @@ func displayWorkflowStatus(s WorkflowStatus) WorkflowStatus {
 // WorkflowActionRequest is the body for submit/review/approve/reject.
 type WorkflowActionRequest struct {
 	Comment         *string `json:"comment"`
-	SignatureMethod  string  `json:"signatureMethod"`
+	SignatureMethod string  `json:"signatureMethod"`
 	RowVersion      *int64  `json:"rowVersion"`
 }
 
 // WorkflowRejectRequest adds the mandatory comment for reject.
 type WorkflowRejectRequest struct {
-	Comment         string  `json:"comment"        binding:"required,min=10"`
-	SignatureMethod  string  `json:"signatureMethod"`
-	RowVersion      *int64  `json:"rowVersion"`
+	Comment         string `json:"comment"        binding:"required,min=10"`
+	SignatureMethod string `json:"signatureMethod"`
+	RowVersion      *int64 `json:"rowVersion"`
 }
