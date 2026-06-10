@@ -26,12 +26,12 @@ const TaskTypeCoAImportXLSX = "coa:import_xlsx"
 
 // ImportPayload is the Asynq task payload for XLSX import.
 type ImportPayload struct {
-	JobID     string    `json:"jobId"`
-	ActorID   string    `json:"actorId"`
-	TenantID  string    `json:"tenantId"`
-	SumberCoa string    `json:"sumberCoa"`
-	FileSHA   string    `json:"fileSha256"` // idempotency: skip if already processed
-	FileBytes []byte    `json:"fileBytes"`  // embedded; small XLSX only (≤ 10MB)
+	JobID      string    `json:"jobId"`
+	ActorID    string    `json:"actorId"`
+	TenantID   string    `json:"tenantId"`
+	SumberCoa  string    `json:"sumberCoa"`
+	FileSHA    string    `json:"fileSha256"` // idempotency: skip if already processed
+	FileBytes  []byte    `json:"fileBytes"`  // embedded; small XLSX only (≤ 10MB)
 	EnqueuedAt time.Time `json:"enqueuedAt"`
 }
 
@@ -41,7 +41,7 @@ type ImportPayload struct {
 // Exported so test stubs can implement JobRepository without reflection.
 type JobState struct {
 	ID          string
-	Status      string // queued|running|completed|failed|cancelled
+	Status      string // queued|running|completed|failed|canceled
 	Progress    int
 	CurrentStep string
 	RowsTotal   int
@@ -105,12 +105,15 @@ func (r *DBJobRepository) UpdateJobProgress(ctx context.Context, id string, prog
 }
 
 func (r *DBJobRepository) CompleteJob(ctx context.Context, id string, rowsTotal, rowsDone, rowsError int) error {
-	resultJSON, _ := json.Marshal(map[string]int{
+	resultJSON, err := json.Marshal(map[string]int{
 		"rowsTotal": rowsTotal,
 		"rowsDone":  rowsDone,
 		"rowsError": rowsError,
 	})
-	_, err := r.db.ExecContext(ctx, `
+	if err != nil {
+		return fmt.Errorf("DBJobRepository.CompleteJob: marshal result: %w", err)
+	}
+	_, err = r.db.ExecContext(ctx, `
 		UPDATE sys.job
 		SET status = 'completed', progress = 100, completed_at = now(),
 		    result_jsonb = $2::jsonb, updated_at = now()
@@ -123,8 +126,11 @@ func (r *DBJobRepository) CompleteJob(ctx context.Context, id string, rowsTotal,
 }
 
 func (r *DBJobRepository) FailJob(ctx context.Context, id string, detail string) error {
-	errJSON, _ := json.Marshal(map[string]string{"message": detail})
-	_, err := r.db.ExecContext(ctx, `
+	errJSON, err := json.Marshal(map[string]string{"message": detail})
+	if err != nil {
+		return fmt.Errorf("DBJobRepository.FailJob: marshal error: %w", err)
+	}
+	_, err = r.db.ExecContext(ctx, `
 		UPDATE sys.job
 		SET status = 'failed', completed_at = now(),
 		    error_jsonb = $2::jsonb, updated_at = now()
@@ -338,7 +344,9 @@ func (im *Importer) runImport(ctx context.Context, p ImportPayload) error {
 	rows, err := parseXLSX(bytes.NewReader(p.FileBytes))
 	if err != nil {
 		if im.jobRepo != nil {
-			_ = im.jobRepo.FailJob(ctx, jobID, fmt.Sprintf("Gagal parse XLSX: %v", err))
+			if failErr := im.jobRepo.FailJob(ctx, jobID, fmt.Sprintf("Gagal parse XLSX: %v", err)); failErr != nil {
+				im.logger.WarnContext(ctx, "coa import: FailJob after parse error failed", "error", failErr)
+			}
 		}
 		return fmt.Errorf("coa import runImport parse: %w", err)
 	}
@@ -347,16 +355,20 @@ func (im *Importer) runImport(ctx context.Context, p ImportPayload) error {
 	updateProgress(10, fmt.Sprintf("Ditemukan %d baris. Memulai validasi dan import...", total), 0, 0)
 
 	// Build context with actor claims for audit writes.
-	actorUUID, _ := uuid.Parse(p.ActorID)
+	actorUUID, err := uuid.Parse(p.ActorID)
+	if err != nil {
+		return fmt.Errorf("coa import runImport: invalid actorId %q: %w", p.ActorID, err)
+	}
 	importClaims := &auth.Claims{Sub: p.ActorID, TenantID: p.TenantID}
 	importCtx := auth.ContextWithClaims(ctx, importClaims)
 
 	done := 0
 	errCount := 0
 
-	for i, row := range rows {
+	for i := range rows {
+		row := &rows[i]
 		// Validate row-level fields.
-		if err := validateXLSXRow(row); err != nil {
+		if err := validateXLSXRow(*row); err != nil {
 			im.logger.WarnContext(ctx, "coa import: row validation failed",
 				"row", row.RowNum, "error", err)
 			errCount++
@@ -412,7 +424,9 @@ func (im *Importer) runImport(ctx context.Context, p ImportPayload) error {
 
 		createErr := im.repo.Create(importCtx, tx, c)
 		if createErr != nil {
-			_ = tx.Rollback()
+			if rbErr := tx.Rollback(); rbErr != nil {
+				im.logger.WarnContext(ctx, "coa import: rollback failed", "row", row.RowNum, "error", rbErr)
+			}
 			if isErrDuplicate(createErr) {
 				im.logger.InfoContext(ctx, "coa import: skipping duplicate kode", "kode", row.KodeAkun)
 				// Skip duplicate — not counted as error (idempotent import).
@@ -442,9 +456,9 @@ func (im *Importer) runImport(ctx context.Context, p ImportPayload) error {
 		done++
 
 		// Report progress every 5% or every 50 rows, whichever is smaller.
-		step := max(total/20, 50)
+		step := maxInt(total/20, 50)
 		if (i+1)%step == 0 {
-			pct := 10 + ((done * 85) / max(total, 1))
+			pct := 10 + ((done * 85) / maxInt(total, 1))
 			updateProgress(pct, fmt.Sprintf("Mengimport baris %d dari %d...", i+1, total), done, errCount)
 		}
 	}
@@ -452,7 +466,7 @@ func (im *Importer) runImport(ctx context.Context, p ImportPayload) error {
 	// Write job-level audit.
 	auditTx, auditTxErr := im.repo.BeginTx(importCtx)
 	if auditTxErr == nil {
-		_ = im.auditWriter.WithTx(auditTx).Write(importCtx, audit.Event{
+		if writeErr := im.auditWriter.WithTx(auditTx).Write(importCtx, audit.Event{
 			Action:     "CHART_OF_ACCOUNTS.IMPORT_XLSX",
 			EntityType: "mst.chart_of_accounts",
 			EntityID:   uuid.Nil,
@@ -464,12 +478,18 @@ func (im *Importer) runImport(ctx context.Context, p ImportPayload) error {
 				"rows_done":   done,
 				"rows_error":  errCount,
 			},
-		})
-		_ = auditTx.Commit()
+		}); writeErr != nil {
+			im.logger.WarnContext(ctx, "coa import: job-level audit write failed", "error", writeErr)
+		}
+		if commitErr := auditTx.Commit(); commitErr != nil {
+			im.logger.WarnContext(ctx, "coa import: audit tx commit failed", "error", commitErr)
+		}
 	}
 
 	if im.jobRepo != nil {
-		_ = im.jobRepo.CompleteJob(ctx, jobID, total, done, errCount)
+		if completeErr := im.jobRepo.CompleteJob(ctx, jobID, total, done, errCount); completeErr != nil {
+			im.logger.WarnContext(ctx, "coa import: CompleteJob failed", "jobId", jobID, "error", completeErr)
+		}
 	}
 
 	return nil
@@ -533,8 +553,9 @@ func validateXLSXRow(row XLSXRow) error {
 	return nil
 }
 
-// max returns the larger of two ints (Go 1.21+ has builtin max, but we target 1.22 so it's fine).
-func max(a, b int) int {
+// maxInt returns the larger of two ints.
+// Named maxInt to avoid shadowing Go 1.21+ builtin max.
+func maxInt(a, b int) int {
 	if a > b {
 		return a
 	}

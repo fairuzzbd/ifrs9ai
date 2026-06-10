@@ -364,15 +364,15 @@ func TestValidate_KodeAkun_Format(t *testing.T) {
 		kode     string
 		wantFail bool
 	}{
-		{"1", false},           // valid single digit
-		{"1.1", false},          // valid two-level
-		{"1.1.01.001", false},   // valid four-level
-		{"abc", true},           // letters not allowed
-		{"1.", true},            // trailing dot
-		{".1", true},            // leading dot
-		{"1..1", true},          // double dot
-		{"", true},              // empty
-		{"1.A", true},           // letter in segment
+		{"1", false},          // valid single digit
+		{"1.1", false},        // valid two-level
+		{"1.1.01.001", false}, // valid four-level
+		{"abc", true},         // letters not allowed
+		{"1.", true},          // trailing dot
+		{".1", true},          // leading dot
+		{"1..1", true},        // double dot
+		{"", true},            // empty
+		{"1.A", true},         // letter in segment
 	}
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("kode=%q", tc.kode), func(t *testing.T) {

@@ -546,17 +546,17 @@ func (r *DBRepository) ExportAll(ctx context.Context, q listquery.Query) (io.Rea
 	count := 0
 	for rows.Next() {
 		var (
-			kode          string
-			nama          string
-			tipe          string
-			subTipe       string
-			kategori      *string
-			mataUang      string
-			posisi        string
-			aktif         bool
-			sumber        string
-			tanggal       string
-			wfStatus      string
+			kode     string
+			nama     string
+			tipe     string
+			subTipe  string
+			kategori *string
+			mataUang string
+			posisi   string
+			aktif    bool
+			sumber   string
+			tanggal  string
+			wfStatus string
 		)
 		if err := rows.Scan(&kode, &nama, &tipe, &subTipe, &kategori, &mataUang,
 			&posisi, &aktif, &sumber, &tanggal, &wfStatus); err != nil {
@@ -595,14 +595,14 @@ type querier interface {
 func scanRow(row *sql.Row) (*ChartOfAccount, error) {
 	c := &ChartOfAccount{}
 	var (
-		tipeStr        string
-		posisiStr      string
-		wfStr          string
-		tanggalStr     string
-		updatedBy      *uuid.UUID
-		updatedAt      *time.Time
-		deletedAt      *time.Time
-		deletedBy      *uuid.UUID
+		tipeStr    string
+		posisiStr  string
+		wfStr      string
+		tanggalStr string
+		updatedBy  *uuid.UUID
+		updatedAt  *time.Time
+		deletedAt  *time.Time
+		deletedBy  *uuid.UUID
 	)
 	err := row.Scan(
 		&c.ID, &c.KodeAkun, &c.NamaAkun, &tipeStr, &c.SubTipeAkun,

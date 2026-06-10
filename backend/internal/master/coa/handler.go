@@ -25,8 +25,8 @@ import (
 
 // Handler is the HTTP handler for chart_of_accounts endpoints.
 type Handler struct {
-	svc      *Service
-	importer *Importer
+	svc       *Service
+	importer  *Importer
 	wfHandler *workflow.Handler
 }
 
@@ -270,7 +270,7 @@ func (h *Handler) Submit(c *gin.Context) {
 	if !ok {
 		return
 	}
-	h.forwardToWorkflow(c, id, "CHART_OF_ACCOUNTS", h.wfHandler.Submit)
+	h.forwardToWorkflow(c, id, h.wfHandler.Submit)
 }
 
 // Review handles POST /api/v1/master/coa/:id/review.
@@ -279,7 +279,7 @@ func (h *Handler) Review(c *gin.Context) {
 	if !ok {
 		return
 	}
-	h.forwardToWorkflow(c, id, "CHART_OF_ACCOUNTS", h.wfHandler.Review)
+	h.forwardToWorkflow(c, id, h.wfHandler.Review)
 }
 
 // Approve handles POST /api/v1/master/coa/:id/approve.
@@ -288,7 +288,7 @@ func (h *Handler) Approve(c *gin.Context) {
 	if !ok {
 		return
 	}
-	h.forwardToWorkflow(c, id, "CHART_OF_ACCOUNTS", h.wfHandler.Approve)
+	h.forwardToWorkflow(c, id, h.wfHandler.Approve)
 }
 
 // Reject handles POST /api/v1/master/coa/:id/reject.
@@ -297,7 +297,7 @@ func (h *Handler) Reject(c *gin.Context) {
 	if !ok {
 		return
 	}
-	h.forwardToWorkflow(c, id, "CHART_OF_ACCOUNTS", h.wfHandler.Reject)
+	h.forwardToWorkflow(c, id, h.wfHandler.Reject)
 }
 
 // WorkflowStatus handles GET /api/v1/master/coa/:id/workflow.
@@ -306,13 +306,14 @@ func (h *Handler) WorkflowStatus(c *gin.Context) {
 	if !ok {
 		return
 	}
-	h.forwardToWorkflow(c, id, "CHART_OF_ACCOUNTS", h.wfHandler.GetStatus)
+	h.forwardToWorkflow(c, id, h.wfHandler.GetStatus)
 }
 
 // forwardToWorkflow rewrites gin params and delegates to a generic workflow handler func.
-func (h *Handler) forwardToWorkflow(c *gin.Context, id uuid.UUID, resource string, fn func(*gin.Context)) {
+// The resource is always "CHART_OF_ACCOUNTS" for this module.
+func (h *Handler) forwardToWorkflow(c *gin.Context, id uuid.UUID, fn func(*gin.Context)) {
 	c.Params = gin.Params{
-		{Key: "resource", Value: resource},
+		{Key: "resource", Value: "CHART_OF_ACCOUNTS"},
 		{Key: "id", Value: id.String()},
 	}
 	fn(c)

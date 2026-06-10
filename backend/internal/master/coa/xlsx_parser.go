@@ -14,14 +14,15 @@ import (
 // Skips the header row (row 1). Empty rows (all blank cells) are skipped.
 //
 // Expected column order (A–H):
-//   A: kode_akun
-//   B: nama_akun
-//   C: tipe_akun
-//   D: sub_tipe_akun
-//   E: kategori_investasi (optional)
-//   F: mata_uang_native (optional)
-//   G: posisi_normal
-//   H: parent_akun_kode (optional)
+//
+//	A: kode_akun
+//	B: nama_akun
+//	C: tipe_akun
+//	D: sub_tipe_akun
+//	E: kategori_investasi (optional)
+//	F: mata_uang_native (optional)
+//	G: posisi_normal
+//	H: parent_akun_kode (optional)
 func xlsxBytesToRows(data []byte) ([]XLSXRow, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
@@ -41,7 +42,12 @@ func xlsxBytesToRows(data []byte) ([]XLSXRow, error) {
 	}
 
 	// 3. Convert raw XML rows to XLSXRow, skipping header.
-	var result []XLSXRow
+	// Pre-allocate with capacity = rawRows minus the header row (index 0).
+	expectedCap := len(rawRows) - 1
+	if expectedCap < 0 {
+		expectedCap = 0
+	}
+	result := make([]XLSXRow, 0, expectedCap)
 	for i, raw := range rawRows {
 		if i == 0 {
 			continue // skip header
@@ -86,13 +92,13 @@ func xlsxBytesToRows(data []byte) ([]XLSXRow, error) {
 // ─── XML structs for XLSX parsing ────────────────────────────────────────────
 
 type xlsxSst struct {
-	XMLName xml.Name  `xml:"sst"`
-	SI      []xlsxSi  `xml:"si"`
+	XMLName xml.Name `xml:"sst"`
+	SI      []xlsxSi `xml:"si"`
 }
 
 type xlsxSi struct {
-	T  string     `xml:"t"`
-	R  []xlsxRun  `xml:"r"`
+	T string    `xml:"t"`
+	R []xlsxRun `xml:"r"`
 }
 
 func (si xlsxSi) Value() string {
@@ -134,51 +140,61 @@ type xlsxCell struct {
 func loadSharedStrings(zr *zip.Reader) ([]string, error) {
 	for _, f := range zr.File {
 		if f.Name == "xl/sharedStrings.xml" {
-			rc, err := f.Open()
-			if err != nil {
-				return nil, err
-			}
-			defer rc.Close() //nolint:errcheck
-			b, err := io.ReadAll(rc)
-			if err != nil {
-				return nil, err
-			}
-			var sst xlsxSst
-			if err := xml.Unmarshal(b, &sst); err != nil {
-				return nil, fmt.Errorf("parse sharedStrings: %w", err)
-			}
-			result := make([]string, len(sst.SI))
-			for i, si := range sst.SI {
-				result[i] = si.Value()
-			}
-			return result, nil
+			return readSharedStrings(f)
 		}
 	}
 	// No shared strings — file may contain only inline strings.
 	return nil, nil
 }
 
+// readSharedStrings opens and parses a single ZIP file entry as the shared strings table.
+func readSharedStrings(f *zip.File) ([]string, error) {
+	rc, err := f.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close() //nolint:errcheck
+	b, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, err
+	}
+	var sst xlsxSst
+	if err := xml.Unmarshal(b, &sst); err != nil {
+		return nil, fmt.Errorf("parse sharedStrings: %w", err)
+	}
+	result := make([]string, len(sst.SI))
+	for i, si := range sst.SI {
+		result[i] = si.Value()
+	}
+	return result, nil
+}
+
 // loadSheet1 reads xl/worksheets/sheet1.xml from the ZIP.
 func loadSheet1(zr *zip.Reader) ([]xlsxRow, error) {
 	for _, f := range zr.File {
 		if f.Name == "xl/worksheets/sheet1.xml" {
-			rc, err := f.Open()
-			if err != nil {
-				return nil, err
-			}
-			defer rc.Close() //nolint:errcheck
-			b, err := io.ReadAll(rc)
-			if err != nil {
-				return nil, err
-			}
-			var ws xlsxWorksheet
-			if err := xml.Unmarshal(b, &ws); err != nil {
-				return nil, fmt.Errorf("parse sheet1: %w", err)
-			}
-			return ws.SheetData.Row, nil
+			return readSheet1(f)
 		}
 	}
 	return nil, fmt.Errorf("sheet1.xml not found in XLSX")
+}
+
+// readSheet1 opens and parses a single ZIP file entry as the first worksheet.
+func readSheet1(f *zip.File) ([]xlsxRow, error) {
+	rc, err := f.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close() //nolint:errcheck
+	b, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, err
+	}
+	var ws xlsxWorksheet
+	if err := xml.Unmarshal(b, &ws); err != nil {
+		return nil, fmt.Errorf("parse sheet1: %w", err)
+	}
+	return ws.SheetData.Row, nil
 }
 
 // resolveValue converts a cell value to a string, dereferencing shared strings.

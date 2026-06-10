@@ -47,12 +47,12 @@ const (
 type TipeAkun string
 
 const (
-	TipeAkunAset      TipeAkun = "ASET"
+	TipeAkunAset       TipeAkun = "ASET"
 	TipeAkunLiabilitas TipeAkun = "LIABILITAS"
-	TipeAkunEkuitas   TipeAkun = "EKUITAS"
+	TipeAkunEkuitas    TipeAkun = "EKUITAS"
 	TipeAkunPendapatan TipeAkun = "PENDAPATAN"
-	TipeAkunBeban     TipeAkun = "BEBAN"
-	TipeAkunKontinjen TipeAkun = "KONTINJEN"
+	TipeAkunBeban      TipeAkun = "BEBAN"
+	TipeAkunKontinjen  TipeAkun = "KONTINJEN"
 )
 
 // validTipeAkun is the canonical whitelist.
@@ -111,28 +111,28 @@ func (s WorkflowStatus) IsEditable() bool {
 // Note: the DB column for optimistic lock is 'version' INT (Phase 5 will rename to row_version).
 // Internally we call it Version; the API exposes it as rowVersion.
 type ChartOfAccount struct {
-	ID               uuid.UUID  `db:"id"`
-	KodeAkun         string     `db:"kode_akun"`
-	NamaAkun         string     `db:"nama_akun"`
-	TipeAkun         TipeAkun   `db:"tipe_akun"`
-	SubTipeAkun      string     `db:"sub_tipe_akun"`
-	KategoriInvestasi *string   `db:"kategori_investasi"`
-	MataUangNative   string     `db:"mata_uang_native"`
-	PosisiNormal     PosisiNormal `db:"posisi_normal"`
-	AktifFlag        bool       `db:"aktif_flag"`
-	ParentAkunID     *uuid.UUID `db:"parent_akun_id"`
-	SumberCoa        string     `db:"sumber_coa"`
-	TanggalMulaiAktif string    `db:"tanggal_mulai_aktif"` // DATE → "YYYY-MM-DD"
+	ID                uuid.UUID    `db:"id"`
+	KodeAkun          string       `db:"kode_akun"`
+	NamaAkun          string       `db:"nama_akun"`
+	TipeAkun          TipeAkun     `db:"tipe_akun"`
+	SubTipeAkun       string       `db:"sub_tipe_akun"`
+	KategoriInvestasi *string      `db:"kategori_investasi"`
+	MataUangNative    string       `db:"mata_uang_native"`
+	PosisiNormal      PosisiNormal `db:"posisi_normal"`
+	AktifFlag         bool         `db:"aktif_flag"`
+	ParentAkunID      *uuid.UUID   `db:"parent_akun_id"`
+	SumberCoa         string       `db:"sumber_coa"`
+	TanggalMulaiAktif string       `db:"tanggal_mulai_aktif"` // DATE → "YYYY-MM-DD"
 
 	// Audit fields (from migration 0001 + 0016)
-	CreatedBy  uuid.UUID  `db:"created_by"`
-	CreatedAt  time.Time  `db:"created_at"`
-	UpdatedBy  *uuid.UUID `db:"updated_by"`
-	UpdatedAt  *time.Time `db:"updated_at"`
-	DeletedAt  *time.Time `db:"deleted_at"`
-	DeletedBy  *uuid.UUID `db:"deleted_by"`
-	Version    int        `db:"version"` // optimistic lock; Phase 5 renames to row_version
-	TenantID   string     `db:"tenant_id"`
+	CreatedBy uuid.UUID  `db:"created_by"`
+	CreatedAt time.Time  `db:"created_at"`
+	UpdatedBy *uuid.UUID `db:"updated_by"`
+	UpdatedAt *time.Time `db:"updated_at"`
+	DeletedAt *time.Time `db:"deleted_at"`
+	DeletedBy *uuid.UUID `db:"deleted_by"`
+	Version   int        `db:"version"` // optimistic lock; Phase 5 renames to row_version
+	TenantID  string     `db:"tenant_id"`
 
 	// Workflow (from migration 0016)
 	WorkflowStatus     WorkflowStatus `db:"workflow_status"`
@@ -143,17 +143,17 @@ type ChartOfAccount struct {
 
 // CreateRequest is the POST /master/coa request body.
 type CreateRequest struct {
-	KodeAkun          string `json:"kodeAkun"          binding:"required,max=20"`
-	NamaAkun          string `json:"namaAkun"          binding:"required,min=2,max=200"`
-	TipeAkun          string `json:"tipeAkun"          binding:"required"`
-	SubTipeAkun       string `json:"subTipeAkun"       binding:"required,max=30"`
+	KodeAkun          string  `json:"kodeAkun"          binding:"required,max=20"`
+	NamaAkun          string  `json:"namaAkun"          binding:"required,min=2,max=200"`
+	TipeAkun          string  `json:"tipeAkun"          binding:"required"`
+	SubTipeAkun       string  `json:"subTipeAkun"       binding:"required,max=30"`
 	KategoriInvestasi *string `json:"kategoriInvestasi" binding:"omitempty,max=20"`
-	MataUangNative    string `json:"mataUangNative"    binding:"omitempty,len=3"`
-	PosisiNormal      string `json:"posisiNormal"      binding:"required"`
-	AktifFlag         *bool  `json:"aktifFlag"`
+	MataUangNative    string  `json:"mataUangNative"    binding:"omitempty,len=3"`
+	PosisiNormal      string  `json:"posisiNormal"      binding:"required"`
+	AktifFlag         *bool   `json:"aktifFlag"`
 	ParentAkunKode    *string `json:"parentAkunKode"   binding:"omitempty,max=20"`
-	SumberCoa         string `json:"sumberCoa"         binding:"required,max=30"`
-	TanggalMulaiAktif string `json:"tanggalMulaiAktif" binding:"required"`
+	SumberCoa         string  `json:"sumberCoa"         binding:"required,max=30"`
+	TanggalMulaiAktif string  `json:"tanggalMulaiAktif" binding:"required"`
 }
 
 // UpdateRequest is the PATCH /master/coa/:id request body.
@@ -172,27 +172,27 @@ type UpdateRequest struct {
 
 // Response is the JSON representation returned by all CRUD and workflow endpoints.
 type Response struct {
-	ID                string  `json:"id"`
-	KodeAkun          string  `json:"kodeAkun"`
-	NamaAkun          string  `json:"namaAkun"`
-	TipeAkun          string  `json:"tipeAkun"`
-	SubTipeAkun       string  `json:"subTipeAkun"`
-	KategoriInvestasi *string `json:"kategoriInvestasi"`
-	MataUangNative    string  `json:"mataUangNative"`
-	PosisiNormal      string  `json:"posisiNormal"`
-	AktifFlag         bool    `json:"aktifFlag"`
-	ParentAkunID      *string `json:"parentAkunId"`
-	SumberCoa         string  `json:"sumberCoa"`
-	TanggalMulaiAktif string  `json:"tanggalMulaiAktif"`
-	WorkflowStatus    string  `json:"workflowStatus"`
+	ID                 string  `json:"id"`
+	KodeAkun           string  `json:"kodeAkun"`
+	NamaAkun           string  `json:"namaAkun"`
+	TipeAkun           string  `json:"tipeAkun"`
+	SubTipeAkun        string  `json:"subTipeAkun"`
+	KategoriInvestasi  *string `json:"kategoriInvestasi"`
+	MataUangNative     string  `json:"mataUangNative"`
+	PosisiNormal       string  `json:"posisiNormal"`
+	AktifFlag          bool    `json:"aktifFlag"`
+	ParentAkunID       *string `json:"parentAkunId"`
+	SumberCoa          string  `json:"sumberCoa"`
+	TanggalMulaiAktif  string  `json:"tanggalMulaiAktif"`
+	WorkflowStatus     string  `json:"workflowStatus"`
 	WorkflowInstanceID *string `json:"workflowInstanceId"`
-	RowVersion        int     `json:"rowVersion"`
-	CreatedAt         string  `json:"createdAt"`
-	CreatedBy         string  `json:"createdBy"`
-	UpdatedAt         *string `json:"updatedAt"`
-	UpdatedBy         *string `json:"updatedBy"`
-	DeletedAt         *string `json:"deletedAt"`
-	DeletedBy         *string `json:"deletedBy"`
+	RowVersion         int     `json:"rowVersion"`
+	CreatedAt          string  `json:"createdAt"`
+	CreatedBy          string  `json:"createdBy"`
+	UpdatedAt          *string `json:"updatedAt"`
+	UpdatedBy          *string `json:"updatedBy"`
+	DeletedAt          *string `json:"deletedAt"`
+	DeletedBy          *string `json:"deletedBy"`
 }
 
 // ToResponse converts a domain entity to the JSON response shape.
@@ -344,13 +344,13 @@ type ImportJobStatusResponse struct {
 
 // XLSXRow is one parsed row from the import XLSX template.
 type XLSXRow struct {
-	RowNum           int
-	KodeAkun         string
-	NamaAkun         string
-	TipeAkun         string
-	SubTipeAkun      string
+	RowNum            int
+	KodeAkun          string
+	NamaAkun          string
+	TipeAkun          string
+	SubTipeAkun       string
 	KategoriInvestasi string
-	MataUangNative   string
-	PosisiNormal     string
-	ParentAkunKode   string // resolved to UUID by service
+	MataUangNative    string
+	PosisiNormal      string
+	ParentAkunKode    string // resolved to UUID by service
 }
