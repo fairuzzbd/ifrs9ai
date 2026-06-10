@@ -9,6 +9,7 @@ package counterparty
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -222,7 +223,12 @@ func (h *Handler) Update(c *gin.Context) {
 		return
 	}
 
-	masked, _ := h.svc.GetMaskedPII(c.Request.Context(), updated.ID)
+	masked, err := h.svc.GetMaskedPII(c.Request.Context(), updated.ID)
+	if err != nil {
+		// Non-fatal: log and continue with unmasked PII in response (nil masked = no PII shown).
+		slog.Default().WarnContext(c.Request.Context(), "counterparty handler: GetMaskedPII after update failed",
+			"error", err, "id", updated.ID)
+	}
 	response.OK(c, ToResponse(updated, masked))
 }
 

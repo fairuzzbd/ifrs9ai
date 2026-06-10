@@ -33,8 +33,20 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/common/middleware"
 	"blips-ifrs9.tugu-re.com/internal/config"
 	"blips-ifrs9.tugu-re.com/internal/document"
+	"blips-ifrs9.tugu-re.com/internal/master/bobotskenario"
+	"blips-ifrs9.tugu-re.com/internal/master/coa"
 	"blips-ifrs9.tugu-re.com/internal/master/counterparty"
+	"blips-ifrs9.tugu-re.com/internal/master/impactmevpd"
+	"blips-ifrs9.tugu-re.com/internal/master/impactpd"
+	"blips-ifrs9.tugu-re.com/internal/master/instrumen"
+	"blips-ifrs9.tugu-re.com/internal/master/kurs"
+	"blips-ifrs9.tugu-re.com/internal/master/lgdbasel"
+	"blips-ifrs9.tugu-re.com/internal/master/lpscoverage"
+	"blips-ifrs9.tugu-re.com/internal/master/mappingjurnal"
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
+	"blips-ifrs9.tugu-re.com/internal/master/pdpefindo"
+	"blips-ifrs9.tugu-re.com/internal/master/periodebuku"
+	"blips-ifrs9.tugu-re.com/internal/master/portofolio"
 	"blips-ifrs9.tugu-re.com/internal/master/ratinghistory"
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
@@ -274,6 +286,37 @@ func main() {
 	mataUangHandler := matauang.NewHandler(mataUangSvc, wfHandler)
 	matauang.RegisterRoutes(v1, mataUangHandler)
 
+	// Master Data — Bobot Skenario (APP-C ECL Parameter, DEC-010 sum=1.0)
+	// -----------------------------------------------------------------------
+	bobotSkenarioRepo := bobotskenario.NewDBRepository(db)
+	bobotSkenarioSvc := bobotskenario.NewService(bobotSkenarioRepo, auditWriter, logger)
+	bobotSkenarioHandler := bobotskenario.NewHandler(bobotSkenarioSvc, wfHandler)
+	bobotskenario.RegisterRoutes(v1, bobotSkenarioHandler)
+
+	bobotSkenarioHook := bobotskenario.NewWorkflowHook(bobotSkenarioSvc, bobotSkenarioRepo)
+	wfService.RegisterEntityHook("BOBOT_SKENARIO", bobotSkenarioHook)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Chart of Accounts (APP-A-MSTR-COA)
+	// Routes: GET/POST /api/v1/master/coa
+	//         GET /api/v1/master/coa/export
+	//         POST /api/v1/master/coa/import-xlsx
+	//         GET  /api/v1/master/coa/import-jobs/:jobId
+	//         GET/PATCH/DELETE /api/v1/master/coa/:id
+	//         GET /api/v1/master/coa/:id/{history,workflow}
+	//         POST /api/v1/master/coa/:id/{submit,review,approve,reject}
+	// -----------------------------------------------------------------------
+	coaRepo := coa.NewDBRepository(db)
+	coaJobRepo := coa.NewDBJobRepository(db)
+	coaSvc := coa.NewService(coaRepo, auditWriter, logger)
+	coaImporter := coa.NewImporter(coaRepo, coaJobRepo, auditWriter, nil /* Asynq: nil = sync goroutine */, logger)
+	coaHandler := coa.NewHandler(coaSvc, coaImporter, wfHandler)
+	coa.RegisterRoutes(v1, coaHandler)
+
+	// Register EntityHook so workflow transitions sync coa.workflow_status.
+	coaHook := coa.NewWorkflowHook(coaSvc)
+	wfService.RegisterEntityHook("CHART_OF_ACCOUNTS", coaHook)
+
 	// -----------------------------------------------------------------------
 	// Master Data — Counterparty + Rating History (APP-A, modul 7, 4-eyes).
 	// BLOCKING security-engineer untuk PII (DEC-028): npwp/nomor_rekening/ktp
@@ -282,18 +325,153 @@ func main() {
 	// -----------------------------------------------------------------------
 	counterpartyRepo := counterparty.NewDBRepository(db)
 	counterpartySvc := counterparty.NewService(counterpartyRepo, auditWriter, logger)
-	counterpartyHook := counterparty.NewWorkflowHook(counterpartySvc)
+	counterpartyHook := counterparty.NewWorkflowHook(counterpartySvc, counterpartyRepo)
 	wfService.RegisterEntityHook("COUNTERPARTY", counterpartyHook)
 	counterpartyHandler := counterparty.NewHandler(counterpartySvc, wfHandler)
 	counterparty.RegisterRoutes(v1, counterpartyHandler)
 
 	ratingHistoryRepo := ratinghistory.NewDBRepository(db)
 	ratingHistorySvc := ratinghistory.NewService(ratingHistoryRepo, counterpartyRepo, auditWriter, logger)
-	ratingHistoryHook := ratinghistory.NewWorkflowHook(ratingHistorySvc)
+	ratingHistoryHook := ratinghistory.NewWorkflowHook(ratingHistorySvc, ratingHistoryRepo)
 	wfService.RegisterEntityHook("RATING_HISTORY", ratingHistoryHook)
 	ratingHistoryHandler := ratinghistory.NewHandler(ratingHistorySvc, wfHandler)
 	ratinghistory.RegisterRoutes(v1, ratingHistoryHandler)
 	ratinghistory.RegisterCounterpartyNestedRoutes(v1, ratingHistoryHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Impact MEV PD (APP-A ECL Param, DEC-010 dual FL multiplier)
+	// mst.impact_mev_pd: MEV-to-PD impact per skenario GOOD/BAD per periode.
+	// NORMAL implicitly 1.0 (no row stored — OQ-1 resolved 2026-06-09).
+	// Independent from impact_pd (OQ-2 resolved 2026-06-09).
+	// 6-eyes: Maker(RISK) -> Reviewer(AKUN-CTL) -> Approver1(RISK) -> Approver2(ALCO).
+	// Both approve steps require step-up MFA (DEC-027).
+	// -----------------------------------------------------------------------
+	impactMevPdRepo := impactmevpd.NewDBRepository(db)
+	impactMevPdSvc := impactmevpd.NewService(impactMevPdRepo, auditWriter, logger)
+	impactMevPdHook := impactmevpd.NewWorkflowHook(impactMevPdSvc, impactMevPdRepo)
+	wfService.RegisterEntityHook("IMPACT_MEV_PD", impactMevPdHook)
+	impactMevPdHandler := impactmevpd.NewHandler(impactMevPdSvc, wfHandler)
+	impactmevpd.RegisterRoutes(v1, impactMevPdHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Impact PD (APP-A ECL Param, DEC-010 final FL PD multiplier)
+	// mst.impact_pd: Final FL PD multiplier per periode, applied as:
+	//   ECL_FL_skenario = ECL_skenario x impact_pd.impact_multiplier
+	// Independent from impact_mev_pd (OQ-2). Range [0.5, 2.0] (OQ-3).
+	// 6-eyes: same config as IMPACT_MEV_PD. Both approve steps step-up MFA.
+	// ECL engine Phase 4 consumes GET /master/impact-pd/active (OQ-5).
+	// -----------------------------------------------------------------------
+	impactPdRepo := impactpd.NewDBRepository(db)
+	impactPdSvc := impactpd.NewService(impactPdRepo, auditWriter, logger)
+	impactPdHook := impactpd.NewWorkflowHook(impactPdSvc, impactPdRepo)
+	wfService.RegisterEntityHook("IMPACT_PD", impactPdHook)
+	impactPdHandler := impactpd.NewHandler(impactPdSvc, wfHandler)
+	impactpd.RegisterRoutes(v1, impactPdHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Instrumen (APP-A-MSTR-011)
+	// Routes: GET/POST /api/v1/master/instrumen
+	//         GET /api/v1/master/instrumen/export
+	//         GET/PUT/DELETE /api/v1/master/instrumen/:id
+	//         POST /api/v1/master/instrumen/:id/{submit,review,approve,reject}
+	//         GET  /api/v1/master/instrumen/:id/{history,workflow}
+	// -----------------------------------------------------------------------
+	instrumenRepo := instrumen.NewDBRepository(db)
+	instrumenSvc := instrumen.NewService(instrumenRepo, auditWriter, logger)
+	instrumenHook := instrumen.NewWorkflowHook(instrumenSvc, instrumenRepo)
+	wfService.RegisterEntityHook("INSTRUMEN", instrumenHook)
+	instrumenHandler := instrumen.NewHandler(instrumenSvc, wfHandler)
+	instrumen.RegisterRoutes(v1, instrumenHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Kurs / FX Rates (APP-A-MSTR-009)
+	// Routes: GET/POST /api/v1/master/kurs
+	//         POST    /api/v1/master/kurs/jisdor-sync
+	//         GET     /api/v1/master/kurs/export
+	//         GET/PUT/DELETE /api/v1/master/kurs/:id
+	//         POST    /api/v1/master/kurs/:id/{submit,review,approve,reject}
+	//         GET     /api/v1/master/kurs/:id/{history,workflow}
+	// -----------------------------------------------------------------------
+	kursRepo := kurs.NewDBRepository(db)
+	kursSvc := kurs.NewService(kursRepo, auditWriter, logger)
+	kursHook := kurs.NewWorkflowHook(kursSvc, kursRepo)
+	wfService.RegisterEntityHook("KURS", kursHook)
+	kursHandler := kurs.NewHandler(kursSvc, wfHandler)
+	kurs.RegisterRoutes(v1, kursHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — LGD Basel (APP-C-MSTR-ECL-001, 6-eyes + step-up MFA)
+	// -----------------------------------------------------------------------
+	lgdBaselRepo := lgdbasel.NewDBRepository(db)
+	lgdBaselSvc := lgdbasel.NewService(lgdBaselRepo, auditWriter, logger)
+	lgdBaselHandler := lgdbasel.NewHandler(lgdBaselSvc, wfHandler)
+	lgdbasel.RegisterRoutes(v1, lgdBaselHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — LPS Coverage (APP-C ECL Parameter, DEC-014 IDR 2M cap)
+	// -----------------------------------------------------------------------
+	lpsCoverageRepo := lpscoverage.NewDBRepository(db)
+	lpsCoverageSvc := lpscoverage.NewService(lpsCoverageRepo, auditWriter, logger)
+	lpsCoverageHook := lpscoverage.NewWorkflowHook(lpsCoverageSvc, lpsCoverageRepo)
+	wfService.RegisterEntityHook("LPS_COVERAGE", lpsCoverageHook)
+	lpsCoverageHandler := lpscoverage.NewHandler(lpsCoverageSvc, wfHandler)
+	lpscoverage.RegisterRoutes(v1, lpsCoverageHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Mapping Jurnal (APP-D)
+	// Routes: GET/POST /api/v1/master/mapping-jurnal
+	//         GET/PATCH/DELETE /api/v1/master/mapping-jurnal/:id
+	//         GET /api/v1/master/mapping-jurnal/export
+	//         POST /api/v1/master/mapping-jurnal/:id/{submit,review,approve,reject}
+	//         GET  /api/v1/master/mapping-jurnal/:id/{history,workflow}
+	//
+	// Workflow hook: keeps mst.mapping_jurnal_header.workflow_status in sync with
+	// sys.workflow_instance after each transition. On APPROVE also enforces:
+	//   - sum(DEBIT multiplier) == sum(KREDIT multiplier) ±0.0001
+	//   - All referenced CoA rows must have workflow_status='APPROVED'
+	// -----------------------------------------------------------------------
+	mappingJurnalRepo := mappingjurnal.NewDBRepository(db)
+	mappingJurnalSvc := mappingjurnal.NewService(mappingJurnalRepo, auditWriter, logger)
+	mappingJurnalHook := mappingjurnal.NewWorkflowHook(mappingJurnalSvc, mappingJurnalRepo)
+	wfService.RegisterEntityHook("MAPPING_JURNAL", mappingJurnalHook)
+	mappingJurnalHandler := mappingjurnal.NewHandler(mappingJurnalSvc, wfHandler)
+	mappingjurnal.RegisterRoutes(v1, mappingJurnalHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — PD Pefindo (APP-A ECL Param, MSTR-PDPefindo)
+	// 6-eyes workflow: ROLE-RISK -> ROLE-AKUN-CTL -> ROLE-ALCO x 2
+	// Both approve + approve2 require step-up MFA (DEC-027).
+	// -----------------------------------------------------------------------
+	pdPefindoRepo := pdpefindo.NewDBRepository(db)
+	pdPefindoSvc := pdpefindo.NewService(pdPefindoRepo, auditWriter, logger)
+	pdPefindoUploadSvc := pdpefindo.NewUploadService(pdPefindoRepo, auditWriter, logger)
+	pdPefindoHandler := pdpefindo.NewHandler(pdPefindoSvc, pdPefindoUploadSvc, wfHandler, nil /* asynq: nil = sync fallback in dev */)
+	pdpefindo.RegisterRoutes(v1, pdPefindoHandler)
+	pdPefindoHook := pdpefindo.NewWorkflowHook(pdPefindoSvc, pdPefindoRepo)
+	wfService.RegisterEntityHook("PD_PEFINDO", pdPefindoHook)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Periode Buku (APP-D-MSTR-001)
+	// -----------------------------------------------------------------------
+	periodeBukuRepo := periodebuku.NewDBRepository(db)
+	periodeBukuSvc := periodebuku.NewService(periodeBukuRepo, auditWriter, logger)
+	periodeBukuHandler := periodebuku.NewHandler(periodeBukuSvc, wfHandler)
+	periodebuku.RegisterRoutes(v1, periodeBukuHandler)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Portofolio (APP-A-MSTR-010)
+	// Routes: GET/POST /api/v1/master/portofolio
+	//         GET/PUT/DELETE /api/v1/master/portofolio/:kode
+	//         GET /api/v1/master/portofolio/export
+	//         POST /api/v1/master/portofolio/:kode/{submit,review,approve,reject}
+	//         GET  /api/v1/master/portofolio/:kode/{history,workflow}
+	// -----------------------------------------------------------------------
+	portofolioRepo := portofolio.NewDBRepository(db)
+	portofolioSvc := portofolio.NewService(portofolioRepo, auditWriter, logger)
+	portofolioHook := portofolio.NewWorkflowHook(portofolioSvc, portofolioRepo)
+	wfService.RegisterEntityHook("PORTOFOLIO", portofolioHook)
+	portofolioHandler := portofolio.NewHandler(portofolioSvc, wfHandler)
+	portofolio.RegisterRoutes(v1, portofolioHandler)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,

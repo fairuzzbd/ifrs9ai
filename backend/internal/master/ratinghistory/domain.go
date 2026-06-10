@@ -11,8 +11,9 @@
 //   - Update counterparty.rating_pefindo_current (cache) in same tx
 //
 // IG Classification (Pefindo scale):
-//   Investment Grade: idAAA, idAA+, idAA, idAA-, idA+, idA, idA-, idBBB+, idBBB, idBBB-
-//   Non-IG (Speculative): idBB+ and below, idD
+//
+//	Investment Grade: idAAA, idAA+, idAA, idAA-, idA+, idA, idA-, idBBB+, idBBB, idBBB-
+//	Non-IG (Speculative): idBB+ and below, idD
 //
 // DPD ≥ 30 SICR trigger: Phase 5 ECL engine scope — NOT implemented here.
 package ratinghistory
@@ -138,20 +139,20 @@ func ComputeSICR(notchChange int, previousRating, newRating string) (sicrTrigger
 
 // RatingHistory is the domain entity for mst.rating_history_counterparty.
 type RatingHistory struct {
-	ID                    uuid.UUID  `db:"id"`
-	RatingHistoryIDKode   string     `db:"rating_history_id_kode"`
-	CounterpartyID        uuid.UUID  `db:"counterparty_id"`
-	TanggalBerlaku        string     `db:"tanggal_berlaku"`  // DATE "YYYY-MM-DD"
-	TanggalBerakhir       *string    `db:"tanggal_berakhir"` // DATE, nil = active
-	RatingPefindo         string     `db:"rating_pefindo"`
-	RatingOutlook         *string    `db:"rating_outlook"`
-	SumberRating          string     `db:"sumber_rating"`
-	TanggalPublikasiRating string    `db:"tanggal_publikasi_rating"` // DATE
-	ActionType            ActionType `db:"action_type"`
-	NotchChange           int        `db:"notch_change"`
-	SicrTriggered         bool       `db:"sicr_triggered"`
-	DefaultTriggered      bool       `db:"default_triggered"`
-	DokumenBuktiID        *uuid.UUID `db:"dokumen_bukti_id"`
+	ID                     uuid.UUID  `db:"id"`
+	RatingHistoryIDKode    string     `db:"rating_history_id_kode"`
+	CounterpartyID         uuid.UUID  `db:"counterparty_id"`
+	TanggalBerlaku         string     `db:"tanggal_berlaku"`  // DATE "YYYY-MM-DD"
+	TanggalBerakhir        *string    `db:"tanggal_berakhir"` // DATE, nil = active
+	RatingPefindo          string     `db:"rating_pefindo"`
+	RatingOutlook          *string    `db:"rating_outlook"`
+	SumberRating           string     `db:"sumber_rating"`
+	TanggalPublikasiRating string     `db:"tanggal_publikasi_rating"` // DATE
+	ActionType             ActionType `db:"action_type"`
+	NotchChange            int        `db:"notch_change"`
+	SicrTriggered          bool       `db:"sicr_triggered"`
+	DefaultTriggered       bool       `db:"default_triggered"`
+	DokumenBuktiID         *uuid.UUID `db:"dokumen_bukti_id"`
 
 	// Legacy workflow cols (0001)
 	MakerID    uuid.UUID  `db:"maker_id"`
@@ -159,14 +160,14 @@ type RatingHistory struct {
 	ApprovedAt *time.Time `db:"approved_at"`
 
 	// Standard audit cols (0015)
-	CreatedAt      time.Time  `db:"created_at"`
-	CreatedBy      *uuid.UUID `db:"created_by"`
-	UpdatedAt      *time.Time `db:"updated_at"`
-	UpdatedBy      *uuid.UUID `db:"updated_by"`
-	DeletedAt      *time.Time `db:"deleted_at"`
-	DeletedBy      *uuid.UUID `db:"deleted_by"`
-	RowVersion     int64      `db:"row_version"`
-	TenantID       string     `db:"tenant_id"`
+	CreatedAt      time.Time      `db:"created_at"`
+	CreatedBy      *uuid.UUID     `db:"created_by"`
+	UpdatedAt      *time.Time     `db:"updated_at"`
+	UpdatedBy      *uuid.UUID     `db:"updated_by"`
+	DeletedAt      *time.Time     `db:"deleted_at"`
+	DeletedBy      *uuid.UUID     `db:"deleted_by"`
+	RowVersion     int64          `db:"row_version"`
+	TenantID       string         `db:"tenant_id"`
 	WorkflowStatus WorkflowStatus `db:"workflow_status"`
 }
 

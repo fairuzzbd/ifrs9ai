@@ -1,31 +1,47 @@
 // Package counterparty — EntityHook for generic workflow engine.
 //
-// The workflow engine calls EntityHook.OnTransition after every state change.
-// The hook syncs workflow_status back to mst.counterparty in a separate tx.
+// BeforeCommit is called inside the workflow transaction (AFTER state+signature+audit
+// are written but BEFORE commit). The hook syncs workflow_status back to
+// mst.counterparty in the same transaction, making the status update atomic
+// with the workflow transition.
 //
-// Pattern: same as matauang.SyncWorkflowStatus. Registered in cmd/api/main.go
-// via workflow.Service.RegisterHook("COUNTERPARTY", hook).
+// Pattern: same as bobotskenario.WorkflowHook. Registered in cmd/api/main.go
+// via workflow.Service.RegisterEntityHook("COUNTERPARTY", hook).
 package counterparty
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 
 	"blips-ifrs9.tugu-re.com/internal/workflow"
 )
 
 // WorkflowHook implements workflow.EntityHook for COUNTERPARTY entities.
-// Called post-commit by workflow.Service to sync mst.counterparty.workflow_status.
+// Called pre-commit by workflow.Service to sync mst.counterparty.workflow_status
+// inside the workflow transaction.
 type WorkflowHook struct {
-	svc *Service
+	svc  *Service
+	repo Repository
 }
 
 // NewWorkflowHook creates a WorkflowHook.
-func NewWorkflowHook(svc *Service) *WorkflowHook {
-	return &WorkflowHook{svc: svc}
+func NewWorkflowHook(svc *Service, repo Repository) *WorkflowHook {
+	return &WorkflowHook{svc: svc, repo: repo}
 }
 
-// OnTransition syncs workflow_status on mst.counterparty after a workflow
-// transition has committed.
-func (h *WorkflowHook) OnTransition(ctx context.Context, evt workflow.HookEvent) error {
-	return h.svc.SyncWorkflowStatus(ctx, evt.EntityID, evt.NewState, evt.Action)
+// Ensure WorkflowHook satisfies workflow.EntityHook at compile time.
+var _ workflow.EntityHook = (*WorkflowHook)(nil)
+
+// BeforeCommit syncs workflow_status on mst.counterparty inside the workflow tx.
+// tx may be nil when using InMemoryRepository in unit tests — skip DB ops in that case.
+func (h *WorkflowHook) BeforeCommit(ctx context.Context, tx *sql.Tx, evt workflow.HookEvent) error {
+	newStatus := mapWorkflowState(string(evt.NewState))
+
+	if tx != nil {
+		if err := h.repo.UpdateWorkflowStatus(ctx, tx, evt.EntityID, newStatus, evt.ActorID); err != nil {
+			return fmt.Errorf("counterparty.WorkflowHook.BeforeCommit: update workflow_status: %w", err)
+		}
+	}
+	return nil
 }

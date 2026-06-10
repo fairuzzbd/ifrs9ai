@@ -18,7 +18,6 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/common/pagination"
 )
 
-
 // ─── Repository interface ─────────────────────────────────────────────────────
 
 // Repository defines the data-access contract for counterparty.
@@ -73,16 +72,16 @@ type Repository interface {
 
 // UpdateFields captures mutable columns for an update.
 type UpdateFields struct {
-	Nama              *string
-	Tipe              *CounterpartyTipe
-	TipeEksposurBasel *TipeEksposurBasel
-	EligibleLpsFlag   *bool
-	NomorIzinOjk      *string
-	TanggalIzinOjk    *string
-	AumTerakhir       *decimal.Decimal
+	Nama               *string
+	Tipe               *CounterpartyTipe
+	TipeEksposurBasel  *TipeEksposurBasel
+	EligibleLpsFlag    *bool
+	NomorIzinOjk       *string
+	TanggalIzinOjk     *string
+	AumTerakhir        *decimal.Decimal
 	TanggalAumTerakhir *string
-	KategoriMi        *string
-	Status            *CounterpartyStatus
+	KategoriMi         *string
+	Status             *CounterpartyStatus
 	// PII fields: nil = no change, non-nil = encrypt and update
 	NPWPPlain          *string
 	NomorRekeningPlain *string
@@ -456,7 +455,7 @@ func (r *DBRepository) Update(ctx context.Context, tx *sql.Tx, id uuid.UUID, f U
 		fmt.Sprintf("updated_at = $%d", idx),
 		fmt.Sprintf("updated_by = $%d", idx+1),
 		"row_version = row_version + 1",
-		fmt.Sprintf("version = version + 1"),
+		"version = version + 1",
 	)
 	args = append(args, time.Now(), f.UpdatedBy)
 	idx += 2
@@ -699,14 +698,14 @@ func (r *DBRepository) ExportAll(ctx context.Context, q listquery.Query) (io.Rea
 	count := 0
 	for rows.Next() {
 		var (
-			kode          string
-			nama          string
-			tipe          string
-			eksposur      string
-			eligibleLPS   bool
-			status        string
-			ratingRaw     *string
-			wfStatus      string
+			kode        string
+			nama        string
+			tipe        string
+			eksposur    string
+			eligibleLPS bool
+			status      string
+			ratingRaw   *string
+			wfStatus    string
 		)
 		if err := rows.Scan(&kode, &nama, &tipe, &eksposur, &eligibleLPS, &status, &ratingRaw, &wfStatus); err != nil {
 			return nil, 0, fmt.Errorf("repo.ExportAll scan: %w", err)
@@ -740,18 +739,18 @@ func (r *DBRepository) ExportAll(ctx context.Context, q listquery.Query) (io.Rea
 func scanCounterparty(row *sql.Row) (*Counterparty, error) {
 	cp := &Counterparty{}
 	var (
-		tipe           string
-		eksposur       string
-		status         string
-		wfStatus       string
-		tanggalIzin    *string
-		tanggalAum     *string
-		aumVal         *string
-		createdBy      uuid.UUID
-		updatedAt      *time.Time
-		updatedBy      *uuid.UUID
-		deletedAt      *time.Time
-		deletedBy      *uuid.UUID
+		tipe        string
+		eksposur    string
+		status      string
+		wfStatus    string
+		tanggalIzin *string
+		tanggalAum  *string
+		aumVal      *string
+		createdBy   uuid.UUID
+		updatedAt   *time.Time
+		updatedBy   *uuid.UUID
+		deletedAt   *time.Time
+		deletedBy   *uuid.UUID
 	)
 	err := row.Scan(
 		&cp.ID, &cp.KodeCounterparty, &cp.Nama, &tipe,
@@ -789,18 +788,18 @@ func scanCounterparty(row *sql.Row) (*Counterparty, error) {
 func scanCounterpartyRow(rows *sql.Rows) (*Counterparty, error) {
 	cp := &Counterparty{}
 	var (
-		tipe          string
-		eksposur      string
-		status        string
-		wfStatus      string
-		tanggalIzin   *string
-		tanggalAum    *string
-		aumVal        *string
-		createdBy     uuid.UUID
-		updatedAt     *time.Time
-		updatedBy     *uuid.UUID
-		deletedAt     *time.Time
-		deletedBy     *uuid.UUID
+		tipe        string
+		eksposur    string
+		status      string
+		wfStatus    string
+		tanggalIzin *string
+		tanggalAum  *string
+		aumVal      *string
+		createdBy   uuid.UUID
+		updatedAt   *time.Time
+		updatedBy   *uuid.UUID
+		deletedAt   *time.Time
+		deletedBy   *uuid.UUID
 	)
 	err := rows.Scan(
 		&cp.ID, &cp.KodeCounterparty, &cp.Nama, &tipe,

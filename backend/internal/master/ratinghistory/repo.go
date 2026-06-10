@@ -82,10 +82,10 @@ type UpdateFields struct {
 // ─── Sentinel errors ──────────────────────────────────────────────────────────
 
 var (
-	ErrNotFound           = fmt.Errorf("rating_history not found")
-	ErrConflict           = fmt.Errorf("optimistic lock conflict")
-	ErrKodeDuplicate      = fmt.Errorf("rating_history kode duplicate")
-	ErrMultipleActive     = fmt.Errorf("counterparty already has an active rating")
+	ErrNotFound       = fmt.Errorf("rating_history not found")
+	ErrConflict       = fmt.Errorf("optimistic lock conflict")
+	ErrKodeDuplicate  = fmt.Errorf("rating_history kode duplicate")
+	ErrMultipleActive = fmt.Errorf("counterparty already has an active rating")
 )
 
 // ─── DB implementation ────────────────────────────────────────────────────────
@@ -594,16 +594,16 @@ func (r *DBRepository) ExportAll(ctx context.Context, q listquery.Query) (io.Rea
 	count := 0
 	for rows.Next() {
 		var (
-			kode            string
-			cpID            uuid.UUID
-			tanggalBerlaku  string
-			tanggalBerakhir *string
-			ratingPefindo   string
-			actionType      string
-			notchChange     int
-			sicrTriggered   bool
+			kode             string
+			cpID             uuid.UUID
+			tanggalBerlaku   string
+			tanggalBerakhir  *string
+			ratingPefindo    string
+			actionType       string
+			notchChange      int
+			sicrTriggered    bool
 			defaultTriggered bool
-			wfStatus        string
+			wfStatus         string
 		)
 		if err := rows.Scan(&kode, &cpID, &tanggalBerlaku, &tanggalBerakhir,
 			&ratingPefindo, &actionType, &notchChange, &sicrTriggered, &defaultTriggered, &wfStatus); err != nil {
@@ -638,18 +638,18 @@ func (r *DBRepository) ExportAll(ctx context.Context, q listquery.Query) (io.Rea
 func scanRatingHistory(row *sql.Row) (*RatingHistory, error) {
 	rh := &RatingHistory{}
 	var (
-		actionTypeStr  string
-		wfStatusStr    string
+		actionTypeStr   string
+		wfStatusStr     string
 		tanggalBerakhir *string
-		ratingOutlook  *string
-		dokumenBuktiID *uuid.UUID
-		approverID     *uuid.UUID
-		approvedAt     *time.Time
-		createdBy      *uuid.UUID
-		updatedAt      *time.Time
-		updatedBy      *uuid.UUID
-		deletedAt      *time.Time
-		deletedBy      *uuid.UUID
+		ratingOutlook   *string
+		dokumenBuktiID  *uuid.UUID
+		approverID      *uuid.UUID
+		approvedAt      *time.Time
+		createdBy       *uuid.UUID
+		updatedAt       *time.Time
+		updatedBy       *uuid.UUID
+		deletedAt       *time.Time
+		deletedBy       *uuid.UUID
 	)
 	err := row.Scan(
 		&rh.ID, &rh.RatingHistoryIDKode, &rh.CounterpartyID,

@@ -16,13 +16,13 @@ import (
 // ─── Repository stub ─────────────────────────────────────────────────────────
 
 type repoAdapter struct {
-	createErr         error
-	getByID           *stubGetByID
-	getActive         *stubGetByID // used for GetActiveByCounterparty
-	list              *stubList
-	update            *stubUpdate
-	softDelete        *stubSoftDelete
-	export            *stubExport
+	createErr  error
+	getByID    *stubGetByID
+	getActive  *stubGetByID // used for GetActiveByCounterparty
+	list       *stubList
+	update     *stubUpdate
+	softDelete *stubSoftDelete
+	export     *stubExport
 }
 
 var _ ratinghistory.Repository = (*repoAdapter)(nil)

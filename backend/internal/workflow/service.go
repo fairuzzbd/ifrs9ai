@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -14,20 +15,24 @@ import (
 	domainerrors "blips-ifrs9.tugu-re.com/internal/common/errors"
 )
 
-// EntityHook is called post-commit whenever a workflow transition completes
-// for the registered entity type. Implementations sync the entity's
-// workflow_status column (and any computed side-effects) in their own tx.
-// Hook errors are logged as WARN but do not roll back the workflow commit.
+// EntityHook is called by the workflow service inside the transition transaction,
+// AFTER state+signature+audit are written but BEFORE commit.
+// Implementations may execute additional same-tx writes (e.g. update an entity's own
+// workflow_status column on mst.*) or perform invariant checks.
+// Returning a non-nil error rolls back the entire transition.
 type EntityHook interface {
-	OnTransition(ctx context.Context, event HookEvent) error
+	// BeforeCommit runs inside the workflow tx. tx may be nil for InMemory tests.
+	BeforeCommit(ctx context.Context, tx *sql.Tx, evt HookEvent) error
 }
 
-// HookEvent carries the post-commit transition details.
+// HookEvent carries the context of a completed (but not yet committed) transition.
 type HookEvent struct {
-	EntityID   uuid.UUID
 	EntityType string
-	NewState   string
-	Action     string
+	EntityID   uuid.UUID
+	Action     Action
+	NewState   State
+	OldState   State
+	ActorID    uuid.UUID
 }
 
 // Service is the workflow service layer. It owns the transaction boundary:
@@ -42,7 +47,7 @@ type Service struct {
 	repo        Repository
 	auditWriter *audit.Writer
 	logger      *slog.Logger
-	entityHooks map[string]EntityHook
+	entityHooks map[string][]EntityHook
 }
 
 // NewService constructs a Service.
@@ -55,21 +60,14 @@ func NewService(engine *Engine, repo Repository, auditWriter *audit.Writer, logg
 		repo:        repo,
 		auditWriter: auditWriter,
 		logger:      logger,
-		entityHooks: make(map[string]EntityHook),
+		entityHooks: make(map[string][]EntityHook),
 	}
 }
 
-// RegisterEntityHook registers a hook for the given entity type (upper-snake-case,
-// e.g. "COUNTERPARTY"). Only one hook per entity type; subsequent calls overwrite.
-// Not goroutine-safe — call at startup only.
+// RegisterEntityHook attaches a hook to be called for a specific entity type.
+// Multiple hooks per entityType are supported (called in registration order).
 func (s *Service) RegisterEntityHook(entityType string, hook EntityHook) {
-	if hook == nil {
-		return
-	}
-	if s.entityHooks == nil {
-		s.entityHooks = make(map[string]EntityHook)
-	}
-	s.entityHooks[strings.ToUpper(entityType)] = hook
+	s.entityHooks[entityType] = append(s.entityHooks[entityType], hook)
 }
 
 // SubmitInput is the request payload for Submit.
@@ -335,31 +333,31 @@ func (s *Service) performTransition(ctx context.Context, p transitionParams) (*A
 		}
 	}
 
+	// Run entity-specific hooks inside the same transaction, after audit write but before commit.
+	if hooks, ok := s.entityHooks[p.entityType]; ok {
+		hookEvt := HookEvent{
+			EntityType: p.entityType,
+			EntityID:   inst.EntityID,
+			Action:     p.action,
+			NewState:   result.NewState,
+			OldState:   result.PreviousState,
+			ActorID:    userUUID,
+		}
+		for _, h := range hooks {
+			if hookErr := h.BeforeCommit(ctx, tx, hookEvt); hookErr != nil {
+				err = hookErr
+				return nil, hookErr
+			}
+		}
+	}
+
 	if tx != nil {
 		if err = tx.Commit(); err != nil {
 			return nil, fmt.Errorf("workflow service: commit: %w", err)
 		}
 	}
 
-	// Dispatch post-commit EntityHook (non-fatal: errors logged as WARN).
-	if hook, ok := s.entityHooks[strings.ToUpper(p.entityType)]; ok && hook != nil {
-		hookErr := hook.OnTransition(ctx, HookEvent{
-			EntityID:   inst.EntityID,
-			EntityType: p.entityType,
-			NewState:   string(result.NewState),
-			Action:     string(p.action),
-		})
-		if hookErr != nil {
-			s.logger.WarnContext(ctx, "workflow entity hook failed",
-				"error", hookErr,
-				"entityType", p.entityType,
-				"entityID", inst.EntityID,
-				"action", p.action,
-			)
-		}
-	}
-
-	return &ActionResult{
+	actionResult := &ActionResult{
 		EntityID:        inst.EntityID,
 		EntityType:      inst.EntityType,
 		PreviousState:   result.PreviousState,
@@ -371,7 +369,9 @@ func (s *Service) performTransition(ctx context.Context, p transitionParams) (*A
 		SignatureMethod: result.SignatureMethod,
 		NextActions:     result.NextActions,
 		WorkflowEyes:    inst.Eyes,
-	}, nil
+	}
+
+	return actionResult, nil
 }
 
 // applyActorToUpdate sets the actor + timestamp fields on StateUpdate based on action.

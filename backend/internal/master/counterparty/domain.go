@@ -58,7 +58,7 @@ func (s WorkflowStatus) IsEditable() bool {
 }
 
 // CounterpartyTipe is the tipe whitelist per migration 0015.
-type CounterpartyTipe string
+type CounterpartyTipe string //nolint:revive // stutter intentional: disambiguates from other Tipe types in callers
 
 const (
 	TipeBank          CounterpartyTipe = "BANK"
@@ -87,7 +87,7 @@ func IsValidTipe(t string) bool {
 }
 
 // CounterpartyStatus is the status column whitelist.
-type CounterpartyStatus string
+type CounterpartyStatus string //nolint:revive // stutter intentional: disambiguates from WorkflowStatus in same package
 
 const (
 	StatusAktif     CounterpartyStatus = "ACTIVE"
@@ -218,17 +218,17 @@ var AllAllowedCols = append(append([]string{}, AllowedSortCols...), AllowedFilte
 // CreateRequest is the POST /master/counterparty body.
 // PII fields (npwp, nomorRekening, ktp) accepted in plaintext — service encrypts.
 type CreateRequest struct {
-	KodeCounterparty  string  `json:"kodeCounterparty"  binding:"required,min=2,max=20"`
-	Nama              string  `json:"nama"              binding:"required,min=3,max=200"`
-	Tipe              string  `json:"tipe"              binding:"required"`
-	TipeEksposurBasel string  `json:"tipeEksposurBasel" binding:"required"`
-	EligibleLpsFlag   bool    `json:"eligibleLpsFlag"`
-	NomorIzinOjk      *string `json:"nomorIzinOjk"`
-	TanggalIzinOjk    *string `json:"tanggalIzinOjk"`
-	AumTerakhir       *string `json:"aumTerakhir"` // decimal string
+	KodeCounterparty   string  `json:"kodeCounterparty"  binding:"required,min=2,max=20"`
+	Nama               string  `json:"nama"              binding:"required,min=3,max=200"`
+	Tipe               string  `json:"tipe"              binding:"required"`
+	TipeEksposurBasel  string  `json:"tipeEksposurBasel" binding:"required"`
+	EligibleLpsFlag    bool    `json:"eligibleLpsFlag"`
+	NomorIzinOjk       *string `json:"nomorIzinOjk"`
+	TanggalIzinOjk     *string `json:"tanggalIzinOjk"`
+	AumTerakhir        *string `json:"aumTerakhir"` // decimal string
 	TanggalAumTerakhir *string `json:"tanggalAumTerakhir"`
-	KategoriMi        *string `json:"kategoriMi"`
-	Status            string  `json:"status"` // default ACTIVE
+	KategoriMi         *string `json:"kategoriMi"`
+	Status             string  `json:"status"` // default ACTIVE
 	// PII — plaintext at request boundary; encrypted before storage
 	NPWP          *string `json:"npwp"`
 	NomorRekening *string `json:"nomorRekening"`
@@ -237,16 +237,16 @@ type CreateRequest struct {
 
 // UpdateRequest is the PATCH /master/counterparty/:id body.
 type UpdateRequest struct {
-	Nama              *string `json:"nama"              binding:"omitempty,min=3,max=200"`
-	Tipe              *string `json:"tipe"`
-	TipeEksposurBasel *string `json:"tipeEksposurBasel"`
-	EligibleLpsFlag   *bool   `json:"eligibleLpsFlag"`
-	NomorIzinOjk      *string `json:"nomorIzinOjk"`
-	TanggalIzinOjk    *string `json:"tanggalIzinOjk"`
-	AumTerakhir       *string `json:"aumTerakhir"`
+	Nama               *string `json:"nama"              binding:"omitempty,min=3,max=200"`
+	Tipe               *string `json:"tipe"`
+	TipeEksposurBasel  *string `json:"tipeEksposurBasel"`
+	EligibleLpsFlag    *bool   `json:"eligibleLpsFlag"`
+	NomorIzinOjk       *string `json:"nomorIzinOjk"`
+	TanggalIzinOjk     *string `json:"tanggalIzinOjk"`
+	AumTerakhir        *string `json:"aumTerakhir"`
 	TanggalAumTerakhir *string `json:"tanggalAumTerakhir"`
-	KategoriMi        *string `json:"kategoriMi"`
-	Status            *string `json:"status"`
+	KategoriMi         *string `json:"kategoriMi"`
+	Status             *string `json:"status"`
 	// PII update — nil = do not change
 	NPWP          *string `json:"npwp"`
 	NomorRekening *string `json:"nomorRekening"`
@@ -257,13 +257,13 @@ type UpdateRequest struct {
 // Response is the default JSON representation (no PII decrypted).
 // PII is masked to last 4 chars.
 type Response struct {
-	ID               string  `json:"id"`
-	KodeCounterparty string  `json:"kodeCounterparty"`
-	Nama             string  `json:"nama"`
-	Tipe             string  `json:"tipe"`
+	ID                   string  `json:"id"`
+	KodeCounterparty     string  `json:"kodeCounterparty"`
+	Nama                 string  `json:"nama"`
+	Tipe                 string  `json:"tipe"`
 	RatingPefindoCurrent *string `json:"ratingPefindoCurrent"`
-	TipeEksposurBasel string  `json:"tipeEksposurBasel"`
-	EligibleLpsFlag  bool    `json:"eligibleLpsFlag"`
+	TipeEksposurBasel    string  `json:"tipeEksposurBasel"`
+	EligibleLpsFlag      bool    `json:"eligibleLpsFlag"`
 	// PII masked
 	NPWP          *string `json:"npwp"`
 	NomorRekening *string `json:"nomorRekening"`
@@ -287,8 +287,8 @@ type Response struct {
 
 // PIIResponse is returned by GET /:id/pii (full decrypt, permission-gated).
 type PIIResponse struct {
-	ID               string  `json:"id"`
-	KodeCounterparty string  `json:"kodeCounterparty"`
+	ID               string `json:"id"`
+	KodeCounterparty string `json:"kodeCounterparty"`
 	// Decrypted PII
 	NPWP          *string `json:"npwp"`
 	NomorRekening *string `json:"nomorRekening"`
@@ -318,35 +318,35 @@ type AuditHistoryItem struct {
 // WorkflowActionRequest is the body for submit/review/approve/reject.
 type WorkflowActionRequest struct {
 	Comment         *string `json:"comment"`
-	SignatureMethod  string  `json:"signatureMethod"`
+	SignatureMethod string  `json:"signatureMethod"`
 	RowVersion      *int64  `json:"rowVersion"`
 }
 
 // WorkflowRejectRequest adds mandatory comment.
 type WorkflowRejectRequest struct {
 	Comment         string `json:"comment"        binding:"required,min=10"`
-	SignatureMethod  string `json:"signatureMethod"`
+	SignatureMethod string `json:"signatureMethod"`
 	RowVersion      *int64 `json:"rowVersion"`
 }
 
 // ToResponse converts domain entity to JSON response (PII masked).
 func ToResponse(cp *Counterparty, maskedPII *MaskedPII) Response {
 	r := Response{
-		ID:               cp.ID.String(),
-		KodeCounterparty: cp.KodeCounterparty,
-		Nama:             cp.Nama,
-		Tipe:             string(cp.Tipe),
+		ID:                   cp.ID.String(),
+		KodeCounterparty:     cp.KodeCounterparty,
+		Nama:                 cp.Nama,
+		Tipe:                 string(cp.Tipe),
 		RatingPefindoCurrent: cp.RatingPefindoCurrent,
-		TipeEksposurBasel: string(cp.TipeEksposurBasel),
-		EligibleLpsFlag:  cp.EligibleLpsFlag,
-		NomorIzinOjk:     cp.NomorIzinOjk,
-		TanggalIzinOjk:   cp.TanggalIzinOjk,
-		KategoriMi:       cp.KategoriMi,
-		Status:           string(cp.Status),
-		WorkflowStatus:   displayWorkflowStatus(cp.WorkflowStatus),
-		RowVersion:       cp.RowVersion,
-		CreatedAt:        cp.CreatedAt.Format(time.RFC3339),
-		CreatedBy:        cp.CreatedBy.String(),
+		TipeEksposurBasel:    string(cp.TipeEksposurBasel),
+		EligibleLpsFlag:      cp.EligibleLpsFlag,
+		NomorIzinOjk:         cp.NomorIzinOjk,
+		TanggalIzinOjk:       cp.TanggalIzinOjk,
+		KategoriMi:           cp.KategoriMi,
+		Status:               string(cp.Status),
+		WorkflowStatus:       displayWorkflowStatus(cp.WorkflowStatus),
+		RowVersion:           cp.RowVersion,
+		CreatedAt:            cp.CreatedAt.Format(time.RFC3339),
+		CreatedBy:            cp.CreatedBy.String(),
 	}
 	if cp.AumTerakhir != nil {
 		s := cp.AumTerakhir.String()
@@ -433,9 +433,9 @@ func auditSafeCounterparty(cp *Counterparty) map[string]interface{} {
 		"workflow_status":     string(cp.WorkflowStatus),
 		"row_version":         cp.RowVersion,
 		// PII always REDACTED in audit log
-		"npwp_encrypted":          redactedPII,
+		"npwp_encrypted":           redactedPII,
 		"nomor_rekening_encrypted": redactedPII,
-		"ktp_encrypted":           redactedPII,
+		"ktp_encrypted":            redactedPII,
 	}
 	if cp.RatingPefindoCurrent != nil {
 		m["rating_pefindo_current"] = *cp.RatingPefindoCurrent

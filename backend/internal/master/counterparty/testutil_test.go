@@ -172,24 +172,6 @@ func testCounterparty() *counterparty.Counterparty {
 	}
 }
 
-func testClaims() map[string]interface{} {
-	return map[string]interface{}{
-		"sub":   "00000000-0000-0000-0000-000000000001",
-		"roles": []string{"ROLE-MAKER-TR"},
-		"permissions": []string{
-			"counterparty.read", "counterparty.create", "counterparty.update",
-			"counterparty.delete", "counterparty.submit", "counterparty.review",
-			"counterparty.approve", "counterparty.reject", "counterparty.export",
-			"counterparty.view_pii",
-		},
-		"tenant_id":    "TUGURE",
-		"mfa_verified": false,
-	}
-}
-
-func ptrStr(s string) *string { return &s }
-func ptrBool(b bool) *bool    { return &b }
-
 func newCSVReader(data string) io.Reader {
 	return strings.NewReader(data)
 }

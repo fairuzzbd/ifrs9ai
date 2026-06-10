@@ -41,10 +41,10 @@ type CounterpartyRepo interface {
 // Service owns business logic for mst.rating_history_counterparty.
 // SICR computation fires on workflow Approve.
 type Service struct {
-	repo           Repository
-	cpRepo         CounterpartyRepo // for UpdateRatingCache on approve
-	auditWriter    *audit.Writer
-	logger         *slog.Logger
+	repo        Repository
+	cpRepo      CounterpartyRepo // for UpdateRatingCache on approve
+	auditWriter *audit.Writer
+	logger      *slog.Logger
 }
 
 // NewService constructs a Service.
@@ -349,10 +349,10 @@ func (s *Service) SoftDelete(ctx context.Context, id uuid.UUID) error {
 
 // SyncWorkflowStatus is called by the workflow engine EntityHook.
 // On APPROVED transition:
-//   1. Compute SICR using notch_change and previous active rating.
-//   2. Close previous active rating (set tanggal_berakhir = this rating's tanggal_berlaku - 1 day).
-//   3. Set sicr_triggered + default_triggered on this record.
-//   4. Update counterparty.rating_pefindo_current (cached field) in same tx.
+//  1. Compute SICR using notch_change and previous active rating.
+//  2. Close previous active rating (set tanggal_berakhir = this rating's tanggal_berlaku - 1 day).
+//  3. Set sicr_triggered + default_triggered on this record.
+//  4. Update counterparty.rating_pefindo_current (cached field) in same tx.
 func (s *Service) SyncWorkflowStatus(ctx context.Context, entityID uuid.UUID, newState string, action string) error {
 	claims := auth.ClaimsFromContext(ctx)
 	actorID, err := requireActor(claims)
@@ -655,17 +655,17 @@ func containsStr(s, sub string) bool {
 // ratingHistoryAuditMap builds an audit-safe map (no PII).
 func ratingHistoryAuditMap(rh *RatingHistory) map[string]interface{} {
 	m := map[string]interface{}{
-		"id":                       rh.ID.String(),
-		"rating_history_id_kode":   rh.RatingHistoryIDKode,
-		"counterparty_id":          rh.CounterpartyID.String(),
-		"tanggal_berlaku":          rh.TanggalBerlaku,
-		"rating_pefindo":           rh.RatingPefindo,
-		"action_type":              string(rh.ActionType),
-		"notch_change":             rh.NotchChange,
-		"sicr_triggered":           rh.SicrTriggered,
-		"default_triggered":        rh.DefaultTriggered,
-		"workflow_status":          string(rh.WorkflowStatus),
-		"row_version":              rh.RowVersion,
+		"id":                     rh.ID.String(),
+		"rating_history_id_kode": rh.RatingHistoryIDKode,
+		"counterparty_id":        rh.CounterpartyID.String(),
+		"tanggal_berlaku":        rh.TanggalBerlaku,
+		"rating_pefindo":         rh.RatingPefindo,
+		"action_type":            string(rh.ActionType),
+		"notch_change":           rh.NotchChange,
+		"sicr_triggered":         rh.SicrTriggered,
+		"default_triggered":      rh.DefaultTriggered,
+		"workflow_status":        string(rh.WorkflowStatus),
+		"row_version":            rh.RowVersion,
 	}
 	if rh.TanggalBerakhir != nil {
 		m["tanggal_berakhir"] = *rh.TanggalBerakhir
