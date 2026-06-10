@@ -35,6 +35,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/document"
 	"blips-ifrs9.tugu-re.com/internal/master/bobotskenario"
 	"blips-ifrs9.tugu-re.com/internal/master/coa"
+	"blips-ifrs9.tugu-re.com/internal/master/counterparty"
 	"blips-ifrs9.tugu-re.com/internal/master/impactmevpd"
 	"blips-ifrs9.tugu-re.com/internal/master/impactpd"
 	"blips-ifrs9.tugu-re.com/internal/master/instrumen"
@@ -46,6 +47,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/master/pdpefindo"
 	"blips-ifrs9.tugu-re.com/internal/master/periodebuku"
 	"blips-ifrs9.tugu-re.com/internal/master/portofolio"
+	"blips-ifrs9.tugu-re.com/internal/master/ratinghistory"
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
 )
@@ -95,7 +97,9 @@ func main() {
 		}
 	}
 
-	// JWT Verifier (optional; dipakai di auth middleware).
+	// JWT Verifier (mandatory in staging/production; dev-only opt-out).
+	// Per security-engineer audit SECURITY-counterparty-2026-06-04 F-01: refuse
+	// to boot without JWT in non-dev environments — never silently disable auth.
 	var jwtVerifier *auth.Verifier
 	if cfg.JWTPublicKeyPEM != "" {
 		pk, err := parseRSAPublicKey(cfg.JWTPublicKeyPEM)
@@ -106,6 +110,11 @@ func main() {
 		jwtVerifier = auth.NewVerifier(pk, cfg.JWTIssuer)
 		logger.Info("JWT verification enabled (RSA-2048)")
 	} else {
+		if cfg.AppEnv == "production" || cfg.AppEnv == "staging" {
+			logger.Error("JWT_PUBLIC_KEY_PEM is required in staging/production. Refusing to start.",
+				"app_env", cfg.AppEnv)
+			os.Exit(1)
+		}
 		logger.Warn("JWT_PUBLIC_KEY_PEM not set — JWT verification DISABLED (dev only)")
 	}
 
@@ -277,7 +286,6 @@ func main() {
 	mataUangHandler := matauang.NewHandler(mataUangSvc, wfHandler)
 	matauang.RegisterRoutes(v1, mataUangHandler)
 
-	// -----------------------------------------------------------------------
 	// Master Data — Bobot Skenario (APP-C ECL Parameter, DEC-010 sum=1.0)
 	// -----------------------------------------------------------------------
 	bobotSkenarioRepo := bobotskenario.NewDBRepository(db)
@@ -308,6 +316,27 @@ func main() {
 	// Register EntityHook so workflow transitions sync coa.workflow_status.
 	coaHook := coa.NewWorkflowHook(coaSvc)
 	wfService.RegisterEntityHook("CHART_OF_ACCOUNTS", coaHook)
+
+	// -----------------------------------------------------------------------
+	// Master Data — Counterparty + Rating History (APP-A, modul 7, 4-eyes).
+	// BLOCKING security-engineer untuk PII (DEC-028): npwp/nomor_rekening/ktp
+	// encrypted via sec.encrypt/decrypt. PII default response masked, full
+	// decrypt via GET /:id/pii (requires counterparty.view_pii + audit).
+	// -----------------------------------------------------------------------
+	counterpartyRepo := counterparty.NewDBRepository(db)
+	counterpartySvc := counterparty.NewService(counterpartyRepo, auditWriter, logger)
+	counterpartyHook := counterparty.NewWorkflowHook(counterpartySvc, counterpartyRepo)
+	wfService.RegisterEntityHook("COUNTERPARTY", counterpartyHook)
+	counterpartyHandler := counterparty.NewHandler(counterpartySvc, wfHandler)
+	counterparty.RegisterRoutes(v1, counterpartyHandler)
+
+	ratingHistoryRepo := ratinghistory.NewDBRepository(db)
+	ratingHistorySvc := ratinghistory.NewService(ratingHistoryRepo, counterpartyRepo, auditWriter, logger)
+	ratingHistoryHook := ratinghistory.NewWorkflowHook(ratingHistorySvc, ratingHistoryRepo)
+	wfService.RegisterEntityHook("RATING_HISTORY", ratingHistoryHook)
+	ratingHistoryHandler := ratinghistory.NewHandler(ratingHistorySvc, wfHandler)
+	ratinghistory.RegisterRoutes(v1, ratingHistoryHandler)
+	ratinghistory.RegisterCounterpartyNestedRoutes(v1, ratingHistoryHandler)
 
 	// -----------------------------------------------------------------------
 	// Master Data — Impact MEV PD (APP-A ECL Param, DEC-010 dual FL multiplier)
