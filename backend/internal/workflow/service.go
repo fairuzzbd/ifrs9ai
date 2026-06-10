@@ -39,6 +39,7 @@ type HookEvent struct {
 //   - loads the instance
 //   - calls engine.Transition (pure business logic, no DB)
 //   - updates instance state + inserts signature + writes audit — all in one tx
+//   - dispatches registered EntityHooks post-commit
 //
 // All methods take context.Context and propagate trace/tenant/user per convention.
 type Service struct {

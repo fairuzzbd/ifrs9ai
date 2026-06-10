@@ -303,6 +303,25 @@ func DefaultConfigs() map[string]*Config {
 				Approver2NotAnyPrevious:    false,
 			},
 		},
+		// KURS — 4-eyes manual override.
+		// BI JISDOR feed auto-approves via integration worker (bypasses workflow).
+		"KURS": {
+			EntityType:  "KURS",
+			Eyes:        4,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":  "kurs.submit",
+				"review":  "kurs.review",
+				"approve": "kurs.approve",
+				"reject":  "kurs.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": false},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    false,
+			},
+		},
 		// LGD_BASEL — 6-eyes ECL parameter. Both approvals require step-up MFA (DEC-027).
 		"LGD_BASEL": {
 			EntityType:  "LGD_BASEL",
