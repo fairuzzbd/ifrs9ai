@@ -143,11 +143,11 @@ func dispatchCommand(m *migrate.Migrate) func() {
 			os.Exit(exitArgErr)
 		}
 		v, err := strconv.Atoi(os.Args[2])
-		if err != nil {
+		if err != nil || v < 0 {
 			slog.Error("goto: invalid version", "arg", os.Args[2])
 			os.Exit(exitArgErr)
 		}
-		return func() { runGoto(m, uint(v)) }
+		return func() { runGoto(m, uint(v)) } // #nosec G115 — v >= 0 guarded above
 
 	case "drop":
 		return func() { runDrop(m) }
@@ -264,9 +264,10 @@ func runDrop(m *migrate.Migrate) {
 func checkDirty(m *migrate.Migrate) {
 	v, dirty, err := m.Version()
 	if err == nil && dirty {
+		prev := int64(v) - 1 // #nosec G115 — golang-migrate version fits well within int64 range
 		slog.Error("database is now in DIRTY state",
 			"version", v,
-			"action", "fix the migration SQL, then run: migrator force "+strconv.Itoa(int(v-1)))
+			"action", "fix the migration SQL, then run: migrator force "+strconv.FormatInt(prev, 10))
 	}
 }
 

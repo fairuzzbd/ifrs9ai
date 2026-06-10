@@ -285,6 +285,24 @@ func DefaultConfigs() map[string]*Config {
 				Approver2NotAnyPrevious:    true,
 			},
 		},
+		// CHART_OF_ACCOUNTS: 4-eyes, no step-up MFA (migration 0008 seed).
+		"CHART_OF_ACCOUNTS": {
+			EntityType:  "CHART_OF_ACCOUNTS",
+			Eyes:        4,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":  "chart_of_accounts.submit",
+				"review":  "chart_of_accounts.review",
+				"approve": "chart_of_accounts.approve",
+				"reject":  "chart_of_accounts.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": false},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    false,
+			},
+		},
 		// KURS — 4-eyes manual override.
 		// BI JISDOR feed auto-approves via integration worker (bypasses workflow).
 		"KURS": {
@@ -302,6 +320,120 @@ func DefaultConfigs() map[string]*Config {
 				ReviewerNotMaker:           true,
 				ApproverNotMakerOrReviewer: true,
 				Approver2NotAnyPrevious:    false,
+			},
+		},
+		// LGD_BASEL — 6-eyes ECL parameter. Both approvals require step-up MFA (DEC-027).
+		"LGD_BASEL": {
+			EntityType:  "LGD_BASEL",
+			Eyes:        6,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":   "ecl_parameter.submit",
+				"review":   "ecl_parameter.review",
+				"approve":  "ecl_parameter.approve",
+				"approve2": "ecl_parameter.approve",
+				"reject":   "ecl_parameter.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": true, "approve2": true},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    true,
+			},
+		},
+		// BOBOT_SKENARIO — 6-eyes ECL parameter (DEC-010 sum=1.0).
+		"BOBOT_SKENARIO": {
+			EntityType:  "BOBOT_SKENARIO",
+			Eyes:        6,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":   "ecl_parameter.submit",
+				"review":   "ecl_parameter.review",
+				"approve":  "ecl_parameter.approve",
+				"approve2": "ecl_parameter.approve",
+				"reject":   "ecl_parameter.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": true, "approve2": true},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    true,
+			},
+		},
+		// LPS_COVERAGE — 6-eyes ECL parameter (DEC-014 IDR 2M cap).
+		"LPS_COVERAGE": {
+			EntityType:  "LPS_COVERAGE",
+			Eyes:        6,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":   "ecl_parameter.submit",
+				"review":   "ecl_parameter.review",
+				"approve":  "ecl_parameter.approve",
+				"approve2": "ecl_parameter.approve",
+				"reject":   "ecl_parameter.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": true, "approve2": true},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    true,
+			},
+		},
+		// PD_PEFINDO — 6-eyes ECL parameter (DEC-027 step-up MFA on approve + approve2).
+		"PD_PEFINDO": {
+			EntityType:  "PD_PEFINDO",
+			Eyes:        6,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":   "ecl_parameter.submit",
+				"review":   "ecl_parameter.review",
+				"approve":  "ecl_parameter.approve",
+				"approve2": "ecl_parameter.approve",
+				"reject":   "ecl_parameter.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": true, "approve2": true},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    true,
+			},
+		},
+		// IMPACT_MEV_PD — 6-eyes ECL parameter (dual FL multiplier MEV component, DEC-027).
+		"IMPACT_MEV_PD": {
+			EntityType:  "IMPACT_MEV_PD",
+			Eyes:        6,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":   "ecl_parameter.submit",
+				"review":   "ecl_parameter.review",
+				"approve":  "ecl_parameter.approve",
+				"approve2": "ecl_parameter.approve",
+				"reject":   "ecl_parameter.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": true, "approve2": true},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    true,
+			},
+		},
+		// IMPACT_PD — 6-eyes ECL parameter (FL multiplier per periode, DEC-027).
+		"IMPACT_PD": {
+			EntityType:  "IMPACT_PD",
+			Eyes:        6,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":   "ecl_parameter.submit",
+				"review":   "ecl_parameter.review",
+				"approve":  "ecl_parameter.approve",
+				"approve2": "ecl_parameter.approve",
+				"reject":   "ecl_parameter.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": true, "approve2": true},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    true,
 			},
 		},
 	}
