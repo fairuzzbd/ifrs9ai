@@ -204,7 +204,7 @@ var AllowedSortCols = []string{
 // AllowedFilterCols for list endpoint.
 var AllowedFilterCols = []string{
 	"tipe", "tipe_eksposur_basel", "status", "eligible_lps_flag",
-	"workflow_status", "kode_counterparty",
+	"workflow_status", "kode_counterparty", "nomor_izin_ojk",
 }
 
 // SearchCols scanned by ?q= text search.

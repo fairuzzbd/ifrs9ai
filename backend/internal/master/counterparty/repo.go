@@ -18,6 +18,22 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/common/pagination"
 )
 
+// init asserts at startup that every column in SearchCols is present in AllAllowedCols.
+// SearchCols values are interpolated as "c.%s" into SQL search predicates; any column
+// not in the allowlist would be a SQLi vector if the slice were extended carelessly.
+// Panicking here fails fast during binary startup rather than at request time.
+func init() {
+	allowed := make(map[string]struct{}, len(AllAllowedCols))
+	for _, c := range AllAllowedCols {
+		allowed[c] = struct{}{}
+	}
+	for _, c := range SearchCols {
+		if _, ok := allowed[c]; !ok {
+			panic(fmt.Sprintf("counterparty.SearchCols contains %q which is not in AllAllowedCols — potential SQLi vector", c))
+		}
+	}
+}
+
 // ─── Repository interface ─────────────────────────────────────────────────────
 
 // Repository defines the data-access contract for counterparty.
