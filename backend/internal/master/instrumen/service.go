@@ -94,7 +94,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Instrumen, er
 		if err != nil {
 			return nil, validationErr("manajerInvestasiId", "uuid", "manajerInvestasiId bukan UUID valid")
 		}
-		if err := s.checkCounterpartyExists(ctx, id, "manajerInvestasiId"); err != nil {
+		if err := s.checkCounterpartyExists(ctx, id); err != nil {
 			return nil, err
 		}
 		manajerID = &id
@@ -105,7 +105,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Instrumen, er
 		if err != nil {
 			return nil, validationErr("bankKustodianId", "uuid", "bankKustodianId bukan UUID valid")
 		}
-		if err := s.checkCounterpartyExists(ctx, id, "bankKustodianId"); err != nil {
+		if err := s.checkCounterpartyExists(ctx, id); err != nil {
 			return nil, err
 		}
 		kustodianID = &id
@@ -346,7 +346,7 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		if err != nil {
 			return nil, validationErr("manajerInvestasiId", "uuid", "bukan UUID valid")
 		}
-		if err := s.checkCounterpartyExists(ctx, id2, "manajerInvestasiId"); err != nil {
+		if err := s.checkCounterpartyExists(ctx, id2); err != nil {
 			return nil, err
 		}
 		manajerID = &id2
@@ -357,7 +357,7 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		if err != nil {
 			return nil, validationErr("bankKustodianId", "uuid", "bukan UUID valid")
 		}
-		if err := s.checkCounterpartyExists(ctx, id2, "bankKustodianId"); err != nil {
+		if err := s.checkCounterpartyExists(ctx, id2); err != nil {
 			return nil, err
 		}
 		kustodianID = &id2
@@ -683,13 +683,10 @@ func (s *Service) checkCounterparty(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-// checkCounterpartyExists verifies a counterparty UUID exists (any workflow_status).
-// Used for optional FK fields (manajer_investasi, bank_kustodian) — their
-// APPROVED guard is relaxed to existence-only.
-func (s *Service) checkCounterpartyExists(ctx context.Context, id uuid.UUID, field string) error {
-	// Reuse CheckCounterpartyApproved — it returns false both for not-found and non-approved.
-	// For optional FKs we still require approved, as a lax guard would allow
-	// referencing draft counterparties. Per domain: referenced entities must be APPROVED.
+// checkCounterpartyExists verifies a counterparty UUID exists and is APPROVED.
+// Used for optional FK fields (manajer_investasi, bank_kustodian).
+// Per domain: referenced entities must be APPROVED even when the FK is optional.
+func (s *Service) checkCounterpartyExists(ctx context.Context, id uuid.UUID) error {
 	return s.checkCounterparty(ctx, id)
 }
 

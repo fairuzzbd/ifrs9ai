@@ -29,29 +29,29 @@ func testInstrumen() *instrumen.Instrumen {
 	nominal, _ := decimal.NewFromString("1000000000.00")
 	now := time.Now()
 	return &instrumen.Instrumen{
-		ID:                testInstrumenID,
-		KodeInstrumen:     "INST-001",
-		TipeInstrumen:     "DEPOSITO",
-		SubTipe:           "Deposito Berjangka",
-		Nama:              "Deposito BCA 3 Bulan",
-		CounterpartyID:    testCounterpartyID,
-		MataUang:          "IDR",
-		PortofolioID:      testPortofolioID,
-		Nominal:           nominal,
-		TanggalPenempatan: "2026-01-01",
-		AutoRenewalFlag:   false,
-		FvociElection:     false,
-		PremiumDiskonto:   decimal.Zero,
-		BiayaTransaksi:    decimal.Zero,
-		EirMethodFlag:     true,
+		ID:                 testInstrumenID,
+		KodeInstrumen:      "INST-001",
+		TipeInstrumen:      "DEPOSITO",
+		SubTipe:            "Deposito Berjangka",
+		Nama:               "Deposito BCA 3 Bulan",
+		CounterpartyID:     testCounterpartyID,
+		MataUang:           "IDR",
+		PortofolioID:       testPortofolioID,
+		Nominal:            nominal,
+		TanggalPenempatan:  "2026-01-01",
+		AutoRenewalFlag:    false,
+		FvociElection:      false,
+		PremiumDiskonto:    decimal.Zero,
+		BiayaTransaksi:     decimal.Zero,
+		EirMethodFlag:      true,
 		DayCountConvention: "ACT/365",
-		Status:            "AKTIF",
-		WorkflowStatus:    instrumen.WorkflowStatusDraft,
-		CreatedAt:         now,
-		CreatedBy:         testActorID,
-		RowVersion:        1,
-		TenantID:          "TUGURE",
-		Version:           1,
+		Status:             "AKTIF",
+		WorkflowStatus:     instrumen.WorkflowStatusDraft,
+		CreatedAt:          now,
+		CreatedBy:          testActorID,
+		RowVersion:         1,
+		TenantID:           "TUGURE",
+		Version:            1,
 	}
 }
 
@@ -68,28 +68,6 @@ func testLockedInstrumen() *instrumen.Instrumen {
 	m.KlasifikasiLockedBy = &testActorID
 	klasifikasi := "AC"
 	m.KlasifikasiPsak71 = &klasifikasi
-	return m
-}
-
-func testSahamInstrumen() *instrumen.Instrumen {
-	m := testInstrumen()
-	m.TipeInstrumen = "SAHAM"
-	m.SubTipe = "Saham Biasa"
-	m.Nama = "Saham BRI"
-	kustodian := testCounterpartyID
-	m.BankKustodianID = &kustodian
-	return m
-}
-
-func testReksadanaInstrumen() *instrumen.Instrumen {
-	m := testInstrumen()
-	m.TipeInstrumen = "REKSADANA"
-	m.SubTipe = "Reksadana Pendapatan Tetap"
-	m.Nama = "Reksadana Schroders"
-	kustodian := testCounterpartyID
-	m.BankKustodianID = &kustodian
-	manajer := testCounterpartyID
-	m.ManajerInvestasiID = &manajer
 	return m
 }
 

@@ -146,7 +146,7 @@ func (h *Handler) Export(c *gin.Context) {
 
 // GetByID handles GET /api/v1/master/instrumen/:id.
 func (h *Handler) GetByID(c *gin.Context) {
-	id, err := parseUUIDParam(c, "id")
+	id, err := parseUUIDParam(c)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -164,7 +164,7 @@ func (h *Handler) GetByID(c *gin.Context) {
 
 // Update handles PUT /api/v1/master/instrumen/:id.
 func (h *Handler) Update(c *gin.Context) {
-	id, err := parseUUIDParam(c, "id")
+	id, err := parseUUIDParam(c)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -189,7 +189,7 @@ func (h *Handler) Update(c *gin.Context) {
 
 // Delete handles DELETE /api/v1/master/instrumen/:id.
 func (h *Handler) Delete(c *gin.Context) {
-	id, err := parseUUIDParam(c, "id")
+	id, err := parseUUIDParam(c)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -210,7 +210,7 @@ func (h *Handler) Delete(c *gin.Context) {
 
 // History handles GET /api/v1/master/instrumen/:id/history.
 func (h *Handler) History(c *gin.Context) {
-	id, err := parseUUIDParam(c, "id")
+	id, err := parseUUIDParam(c)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -243,7 +243,7 @@ func (h *Handler) History(c *gin.Context) {
 
 // Submit handles POST /api/v1/master/instrumen/:id/submit.
 func (h *Handler) Submit(c *gin.Context) {
-	id, err := parseUUIDParam(c, "id")
+	id, err := parseUUIDParam(c)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -257,7 +257,7 @@ func (h *Handler) Submit(c *gin.Context) {
 
 // Review handles POST /api/v1/master/instrumen/:id/review.
 func (h *Handler) Review(c *gin.Context) {
-	id, err := parseUUIDParam(c, "id")
+	id, err := parseUUIDParam(c)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -271,7 +271,7 @@ func (h *Handler) Review(c *gin.Context) {
 
 // Approve handles POST /api/v1/master/instrumen/:id/approve.
 func (h *Handler) Approve(c *gin.Context) {
-	id, err := parseUUIDParam(c, "id")
+	id, err := parseUUIDParam(c)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -285,7 +285,7 @@ func (h *Handler) Approve(c *gin.Context) {
 
 // Reject handles POST /api/v1/master/instrumen/:id/reject.
 func (h *Handler) Reject(c *gin.Context) {
-	id, err := parseUUIDParam(c, "id")
+	id, err := parseUUIDParam(c)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -299,7 +299,7 @@ func (h *Handler) Reject(c *gin.Context) {
 
 // WorkflowStatus handles GET /api/v1/master/instrumen/:id/workflow.
 func (h *Handler) WorkflowStatus(c *gin.Context) {
-	id, err := parseUUIDParam(c, "id")
+	id, err := parseUUIDParam(c)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -313,8 +313,9 @@ func (h *Handler) WorkflowStatus(c *gin.Context) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-// parseUUIDParam extracts and validates a UUID path parameter.
-func parseUUIDParam(c *gin.Context, param string) (uuid.UUID, error) {
+// parseUUIDParam extracts and validates the "id" UUID path parameter.
+func parseUUIDParam(c *gin.Context) (uuid.UUID, error) {
+	const param = "id"
 	raw := c.Param(param)
 	id, err := uuid.Parse(raw)
 	if err != nil {

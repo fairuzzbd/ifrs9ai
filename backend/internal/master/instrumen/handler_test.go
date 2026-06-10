@@ -626,7 +626,7 @@ func TestService_Create_ReksadanaWithBothFKs(t *testing.T) {
 
 func TestService_Update_KlasifikasiLockedRejectsFvoci(t *testing.T) {
 	repo := &stubRepo{
-		getByIDResult:           testLockedInstrumen(),
+		getByIDResult:               testLockedInstrumen(),
 		checkMataUangApprovedResult: true,
 	}
 	svc := newTestService(repo)
@@ -668,8 +668,8 @@ func TestService_Update_KlasifikasiLockedAllowsOtherFields(t *testing.T) {
 	updated := *locked
 	updated.Nama = "New Name"
 	repo := &stubRepo{
-		getByIDResult:           locked,
-		updateResult:            &updated,
+		getByIDResult:               locked,
+		updateResult:                &updated,
 		checkMataUangApprovedResult: true,
 	}
 	svc := newTestService(repo)

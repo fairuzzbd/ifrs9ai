@@ -59,13 +59,13 @@ const (
 // AllowedTipeInstrumen is the server-side whitelist enforced by service validation.
 // Must match ck_instrumen_tipe in migration 0019.
 var AllowedTipeInstrumen = map[string]bool{
-	"DEPOSITO": true,
-	"OBLIGASI": true,
-	"SAHAM":    true,
+	"DEPOSITO":  true,
+	"OBLIGASI":  true,
+	"SAHAM":     true,
 	"REKSADANA": true,
-	"SBN":      true,
-	"SPN":      true,
-	"SUKUK":    true,
+	"SBN":       true,
+	"SPN":       true,
+	"SUKUK":     true,
 }
 
 // TipeInstrumenRequiresKustodian lists tipe values that require bank_kustodian_id.
@@ -122,48 +122,48 @@ type Instrumen struct {
 	ID uuid.UUID `db:"id"`
 
 	// Core identifiers
-	KodeInstrumen string `db:"kode_instrumen"`
-	TipeInstrumen string `db:"tipe_instrumen"`
-	SubTipe       string `db:"sub_tipe"`
-	Nama          string `db:"nama"`
+	KodeInstrumen string  `db:"kode_instrumen"`
+	TipeInstrumen string  `db:"tipe_instrumen"`
+	SubTipe       string  `db:"sub_tipe"`
+	Nama          string  `db:"nama"`
 	ISIN          *string `db:"isin"`
 
 	// Foreign keys
-	CounterpartyID        uuid.UUID  `db:"counterparty_id"`
-	ManajerInvestasiID    *uuid.UUID `db:"manajer_investasi_id"`
-	BankKustodianID       *uuid.UUID `db:"bank_kustodian_id"`
-	MataUang              string     `db:"mata_uang"` // CHAR(3) FK → mst.mata_uang
-	PortofolioID          uuid.UUID  `db:"portofolio_id"`
+	CounterpartyID     uuid.UUID  `db:"counterparty_id"`
+	ManajerInvestasiID *uuid.UUID `db:"manajer_investasi_id"`
+	BankKustodianID    *uuid.UUID `db:"bank_kustodian_id"`
+	MataUang           string     `db:"mata_uang"` // CHAR(3) FK → mst.mata_uang
+	PortofolioID       uuid.UUID  `db:"portofolio_id"`
 
 	// Financial fields — decimal to avoid float64 (DEC-016)
-	Nominal                  decimal.Decimal  `db:"nominal"`
-	JumlahLot                *decimal.Decimal `db:"jumlah_lot"`
-	TanggalPenempatan        string           `db:"tanggal_penempatan"` // DATE → YYYY-MM-DD
-	TanggalJatuhTempo        *string          `db:"tanggal_jatuh_tempo"`
-	Kupon                    *decimal.Decimal `db:"kupon"`
-	FrekuensiBunga           *string          `db:"frekuensi_bunga"`
-	AutoRenewalFlag          bool             `db:"auto_renewal_flag"`
+	Nominal           decimal.Decimal  `db:"nominal"`
+	JumlahLot         *decimal.Decimal `db:"jumlah_lot"`
+	TanggalPenempatan string           `db:"tanggal_penempatan"` // DATE → YYYY-MM-DD
+	TanggalJatuhTempo *string          `db:"tanggal_jatuh_tempo"`
+	Kupon             *decimal.Decimal `db:"kupon"`
+	FrekuensiBunga    *string          `db:"frekuensi_bunga"`
+	AutoRenewalFlag   bool             `db:"auto_renewal_flag"`
 
 	// PSAK 71 classification fields
-	FvociElection          bool    `db:"fvoci_election"`
-	SppiResult             *string `db:"sppi_result"`
-	BmCategory             *string `db:"bm_category"`
-	KlasifikasiPsak71      *string `db:"klasifikasi_psak71"`
-	KlasifikasiLockedAt    *time.Time `db:"klasifikasi_locked_at"`
-	KlasifikasiLockedBy    *uuid.UUID `db:"klasifikasi_locked_by"`
-	SppiBmLastReviewDate   *string    `db:"sppi_bm_last_review_date"`
+	FvociElection        bool       `db:"fvoci_election"`
+	SppiResult           *string    `db:"sppi_result"`
+	BmCategory           *string    `db:"bm_category"`
+	KlasifikasiPsak71    *string    `db:"klasifikasi_psak71"`
+	KlasifikasiLockedAt  *time.Time `db:"klasifikasi_locked_at"`
+	KlasifikasiLockedBy  *uuid.UUID `db:"klasifikasi_locked_by"`
+	SppiBmLastReviewDate *string    `db:"sppi_bm_last_review_date"`
 
 	// EIR / amortization fields
-	EirAwal                  *decimal.Decimal `db:"eir_awal"`
-	TanggalEirComputed       *string          `db:"tanggal_eir_computed"`
-	PremiumDiskonto          decimal.Decimal  `db:"premium_diskonto_awal"`
-	BiayaTransaksi           decimal.Decimal  `db:"biaya_transaksi_capitalized"`
-	EirMethodFlag            bool             `db:"eir_method_flag"`
-	DayCountConvention       string           `db:"day_count_convention"`
-	AmortizationFrequency    *string          `db:"amortization_frequency"`
+	EirAwal               *decimal.Decimal `db:"eir_awal"`
+	TanggalEirComputed    *string          `db:"tanggal_eir_computed"`
+	PremiumDiskonto       decimal.Decimal  `db:"premium_diskonto_awal"`
+	BiayaTransaksi        decimal.Decimal  `db:"biaya_transaksi_capitalized"`
+	EirMethodFlag         bool             `db:"eir_method_flag"`
+	DayCountConvention    string           `db:"day_count_convention"`
+	AmortizationFrequency *string          `db:"amortization_frequency"`
 
 	// Status
-	Status         string `db:"status"`
+	Status string `db:"status"`
 
 	// Workflow
 	WorkflowStatus     WorkflowStatus `db:"workflow_status"`
@@ -188,54 +188,54 @@ type Instrumen struct {
 
 // CreateRequest is the POST /master/instrumen request body.
 type CreateRequest struct {
-	KodeInstrumen          string   `json:"kodeInstrumen"          binding:"required,min=2,max=20"`
-	TipeInstrumen          string   `json:"tipeInstrumen"          binding:"required"`
-	SubTipe                string   `json:"subTipe"                binding:"required,max=50"`
-	Nama                   string   `json:"nama"                   binding:"required,min=2,max=200"`
-	ISIN                   *string  `json:"isin"                   binding:"omitempty,max=20"`
-	CounterpartyID         string   `json:"counterpartyId"         binding:"required,uuid"`
-	ManajerInvestasiID     *string  `json:"manajerInvestasiId"     binding:"omitempty,uuid"`
-	BankKustodianID        *string  `json:"bankKustodianId"        binding:"omitempty,uuid"`
-	MataUang               string   `json:"mataUang"               binding:"required,len=3"`
-	PortofolioID           string   `json:"portofolioId"           binding:"required,uuid"`
-	Nominal                string   `json:"nominal"                binding:"required"`
-	JumlahLot              *string  `json:"jumlahLot"              binding:"omitempty"`
-	TanggalPenempatan      string   `json:"tanggalPenempatan"      binding:"required"`
-	TanggalJatuhTempo      *string  `json:"tanggalJatuhTempo"      binding:"omitempty"`
-	Kupon                  *string  `json:"kupon"                  binding:"omitempty"`
-	FrekuensiBunga         *string  `json:"frekuensiBunga"         binding:"omitempty,max=20"`
-	AutoRenewalFlag        *bool    `json:"autoRenewalFlag"`
-	FvociElection          *bool    `json:"fvociElection"`
-	BmCategory             *string  `json:"bmCategory"             binding:"omitempty,oneof=HTC HTC_S OTHER"`
-	EirAwal                *string  `json:"eirAwal"                binding:"omitempty"`
-	PremiumDiskonto        *string  `json:"premiumDiskonto"        binding:"omitempty"`
-	BiayaTransaksi         *string  `json:"biayaTransaksi"         binding:"omitempty"`
-	EirMethodFlag          *bool    `json:"eirMethodFlag"`
-	DayCountConvention     *string  `json:"dayCountConvention"     binding:"omitempty,max=10"`
-	AmortizationFrequency  *string  `json:"amortizationFrequency"  binding:"omitempty,max=20"`
-	Status                 *string  `json:"status"                 binding:"omitempty,oneof=AKTIF TIDAK_AKTIF MATURED SOLD"`
+	KodeInstrumen         string  `json:"kodeInstrumen"          binding:"required,min=2,max=20"`
+	TipeInstrumen         string  `json:"tipeInstrumen"          binding:"required"`
+	SubTipe               string  `json:"subTipe"                binding:"required,max=50"`
+	Nama                  string  `json:"nama"                   binding:"required,min=2,max=200"`
+	ISIN                  *string `json:"isin"                   binding:"omitempty,max=20"`
+	CounterpartyID        string  `json:"counterpartyId"         binding:"required,uuid"`
+	ManajerInvestasiID    *string `json:"manajerInvestasiId"     binding:"omitempty,uuid"`
+	BankKustodianID       *string `json:"bankKustodianId"        binding:"omitempty,uuid"`
+	MataUang              string  `json:"mataUang"               binding:"required,len=3"`
+	PortofolioID          string  `json:"portofolioId"           binding:"required,uuid"`
+	Nominal               string  `json:"nominal"                binding:"required"`
+	JumlahLot             *string `json:"jumlahLot"              binding:"omitempty"`
+	TanggalPenempatan     string  `json:"tanggalPenempatan"      binding:"required"`
+	TanggalJatuhTempo     *string `json:"tanggalJatuhTempo"      binding:"omitempty"`
+	Kupon                 *string `json:"kupon"                  binding:"omitempty"`
+	FrekuensiBunga        *string `json:"frekuensiBunga"         binding:"omitempty,max=20"`
+	AutoRenewalFlag       *bool   `json:"autoRenewalFlag"`
+	FvociElection         *bool   `json:"fvociElection"`
+	BmCategory            *string `json:"bmCategory"             binding:"omitempty,oneof=HTC HTC_S OTHER"`
+	EirAwal               *string `json:"eirAwal"                binding:"omitempty"`
+	PremiumDiskonto       *string `json:"premiumDiskonto"        binding:"omitempty"`
+	BiayaTransaksi        *string `json:"biayaTransaksi"         binding:"omitempty"`
+	EirMethodFlag         *bool   `json:"eirMethodFlag"`
+	DayCountConvention    *string `json:"dayCountConvention"     binding:"omitempty,max=10"`
+	AmortizationFrequency *string `json:"amortizationFrequency"  binding:"omitempty,max=20"`
+	Status                *string `json:"status"                 binding:"omitempty,oneof=AKTIF TIDAK_AKTIF MATURED SOLD"`
 }
 
 // UpdateRequest is the PUT /master/instrumen/:id request body.
 // klasifikasi_psak71, bm_category, fvoci_election are present but service rejects
 // if klasifikasi_locked_at IS NOT NULL.
 type UpdateRequest struct {
-	SubTipe                *string `json:"subTipe"                binding:"omitempty,max=50"`
-	Nama                   *string `json:"nama"                   binding:"omitempty,min=2,max=200"`
-	ISIN                   *string `json:"isin"                   binding:"omitempty,max=20"`
-	ManajerInvestasiID     *string `json:"manajerInvestasiId"     binding:"omitempty,uuid"`
-	BankKustodianID        *string `json:"bankKustodianId"        binding:"omitempty,uuid"`
-	MataUang               *string `json:"mataUang"               binding:"omitempty,len=3"`
-	Kupon                  *string `json:"kupon"                  binding:"omitempty"`
-	FrekuensiBunga         *string `json:"frekuensiBunga"         binding:"omitempty,max=20"`
-	AutoRenewalFlag        *bool   `json:"autoRenewalFlag"`
-	FvociElection          *bool   `json:"fvociElection"`
-	BmCategory             *string `json:"bmCategory"             binding:"omitempty,oneof=HTC HTC_S OTHER"`
-	EirAwal                *string `json:"eirAwal"                binding:"omitempty"`
-	DayCountConvention     *string `json:"dayCountConvention"     binding:"omitempty,max=10"`
-	AmortizationFrequency  *string `json:"amortizationFrequency"  binding:"omitempty,max=20"`
-	Status                 *string `json:"status"                 binding:"omitempty,oneof=AKTIF TIDAK_AKTIF MATURED SOLD"`
-	RowVersion             int64   `json:"rowVersion"             binding:"required"`
+	SubTipe               *string `json:"subTipe"                binding:"omitempty,max=50"`
+	Nama                  *string `json:"nama"                   binding:"omitempty,min=2,max=200"`
+	ISIN                  *string `json:"isin"                   binding:"omitempty,max=20"`
+	ManajerInvestasiID    *string `json:"manajerInvestasiId"     binding:"omitempty,uuid"`
+	BankKustodianID       *string `json:"bankKustodianId"        binding:"omitempty,uuid"`
+	MataUang              *string `json:"mataUang"               binding:"omitempty,len=3"`
+	Kupon                 *string `json:"kupon"                  binding:"omitempty"`
+	FrekuensiBunga        *string `json:"frekuensiBunga"         binding:"omitempty,max=20"`
+	AutoRenewalFlag       *bool   `json:"autoRenewalFlag"`
+	FvociElection         *bool   `json:"fvociElection"`
+	BmCategory            *string `json:"bmCategory"             binding:"omitempty,oneof=HTC HTC_S OTHER"`
+	EirAwal               *string `json:"eirAwal"                binding:"omitempty"`
+	DayCountConvention    *string `json:"dayCountConvention"     binding:"omitempty,max=10"`
+	AmortizationFrequency *string `json:"amortizationFrequency"  binding:"omitempty,max=20"`
+	Status                *string `json:"status"                 binding:"omitempty,oneof=AKTIF TIDAK_AKTIF MATURED SOLD"`
+	RowVersion            int64   `json:"rowVersion"             binding:"required"`
 }
 
 // WorkflowActionRequest is the request body for workflow state transitions.
@@ -247,54 +247,54 @@ type WorkflowActionRequest struct {
 
 // WorkflowRejectRequest adds mandatory comment.
 type WorkflowRejectRequest struct {
-	Comment         string  `json:"comment"        binding:"required,min=10"`
-	SignatureMethod string  `json:"signatureMethod"`
-	RowVersion      *int64  `json:"rowVersion"`
+	Comment         string `json:"comment"        binding:"required,min=10"`
+	SignatureMethod string `json:"signatureMethod"`
+	RowVersion      *int64 `json:"rowVersion"`
 }
 
 // ─── Response type ────────────────────────────────────────────────────────────
 
 // Response is the JSON shape returned by all CRUD and workflow endpoints.
 type Response struct {
-	ID                     string  `json:"id"`
-	KodeInstrumen          string  `json:"kodeInstrumen"`
-	TipeInstrumen          string  `json:"tipeInstrumen"`
-	SubTipe                string  `json:"subTipe"`
-	Nama                   string  `json:"nama"`
-	ISIN                   *string `json:"isin"`
-	CounterpartyID         string  `json:"counterpartyId"`
-	ManajerInvestasiID     *string `json:"manajerInvestasiId"`
-	BankKustodianID        *string `json:"bankKustodianId"`
-	MataUang               string  `json:"mataUang"`
-	PortofolioID           string  `json:"portofolioId"`
-	Nominal                string  `json:"nominal"`
-	JumlahLot              *string `json:"jumlahLot"`
-	TanggalPenempatan      string  `json:"tanggalPenempatan"`
-	TanggalJatuhTempo      *string `json:"tanggalJatuhTempo"`
-	Kupon                  *string `json:"kupon"`
-	FrekuensiBunga         *string `json:"frekuensiBunga"`
-	AutoRenewalFlag        bool    `json:"autoRenewalFlag"`
-	FvociElection          bool    `json:"fvociElection"`
-	SppiResult             *string `json:"sppiResult"`
-	BmCategory             *string `json:"bmCategory"`
-	KlasifikasiPsak71      *string `json:"klasifikasiPsak71"`
-	KlasifikasiLockedAt    *string `json:"klasifikasiLockedAt"`
-	EirAwal                *string `json:"eirAwal"`
-	TanggalEirComputed     *string `json:"tanggalEirComputed"`
-	PremiumDiskonto        string  `json:"premiumDiskonto"`
-	BiayaTransaksi         string  `json:"biayaTransaksi"`
-	EirMethodFlag          bool    `json:"eirMethodFlag"`
-	DayCountConvention     string  `json:"dayCountConvention"`
-	AmortizationFrequency  *string `json:"amortizationFrequency"`
-	Status                 string  `json:"status"`
-	WorkflowStatus         string  `json:"workflowStatus"`
-	WorkflowInstanceID     *string `json:"workflowInstanceId"`
-	RowVersion             int64   `json:"rowVersion"`
-	CreatedAt              string  `json:"createdAt"`
-	CreatedBy              string  `json:"createdBy"`
-	UpdatedAt              *string `json:"updatedAt"`
-	UpdatedBy              *string `json:"updatedBy"`
-	DeletedAt              *string `json:"deletedAt"`
+	ID                    string  `json:"id"`
+	KodeInstrumen         string  `json:"kodeInstrumen"`
+	TipeInstrumen         string  `json:"tipeInstrumen"`
+	SubTipe               string  `json:"subTipe"`
+	Nama                  string  `json:"nama"`
+	ISIN                  *string `json:"isin"`
+	CounterpartyID        string  `json:"counterpartyId"`
+	ManajerInvestasiID    *string `json:"manajerInvestasiId"`
+	BankKustodianID       *string `json:"bankKustodianId"`
+	MataUang              string  `json:"mataUang"`
+	PortofolioID          string  `json:"portofolioId"`
+	Nominal               string  `json:"nominal"`
+	JumlahLot             *string `json:"jumlahLot"`
+	TanggalPenempatan     string  `json:"tanggalPenempatan"`
+	TanggalJatuhTempo     *string `json:"tanggalJatuhTempo"`
+	Kupon                 *string `json:"kupon"`
+	FrekuensiBunga        *string `json:"frekuensiBunga"`
+	AutoRenewalFlag       bool    `json:"autoRenewalFlag"`
+	FvociElection         bool    `json:"fvociElection"`
+	SppiResult            *string `json:"sppiResult"`
+	BmCategory            *string `json:"bmCategory"`
+	KlasifikasiPsak71     *string `json:"klasifikasiPsak71"`
+	KlasifikasiLockedAt   *string `json:"klasifikasiLockedAt"`
+	EirAwal               *string `json:"eirAwal"`
+	TanggalEirComputed    *string `json:"tanggalEirComputed"`
+	PremiumDiskonto       string  `json:"premiumDiskonto"`
+	BiayaTransaksi        string  `json:"biayaTransaksi"`
+	EirMethodFlag         bool    `json:"eirMethodFlag"`
+	DayCountConvention    string  `json:"dayCountConvention"`
+	AmortizationFrequency *string `json:"amortizationFrequency"`
+	Status                string  `json:"status"`
+	WorkflowStatus        string  `json:"workflowStatus"`
+	WorkflowInstanceID    *string `json:"workflowInstanceId"`
+	RowVersion            int64   `json:"rowVersion"`
+	CreatedAt             string  `json:"createdAt"`
+	CreatedBy             string  `json:"createdBy"`
+	UpdatedAt             *string `json:"updatedAt"`
+	UpdatedBy             *string `json:"updatedBy"`
+	DeletedAt             *string `json:"deletedAt"`
 }
 
 // ToResponse converts a domain entity to the JSON response shape.

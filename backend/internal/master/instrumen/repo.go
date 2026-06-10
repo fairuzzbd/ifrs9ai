@@ -88,8 +88,8 @@ type UpdateFields struct {
 // ─── Sentinel errors ──────────────────────────────────────────────────────────
 
 var (
-	ErrNotFound     = fmt.Errorf("instrumen not found")
-	ErrConflict     = fmt.Errorf("instrumen optimistic lock conflict")
+	ErrNotFound      = fmt.Errorf("instrumen not found")
+	ErrConflict      = fmt.Errorf("instrumen optimistic lock conflict")
 	ErrKodeDuplicate = fmt.Errorf("instrumen kode duplicate")
 )
 
@@ -153,18 +153,18 @@ INSERT INTO mst.instrumen (
     1, $32, 1, FALSE
 )`
 	_, err := tx.ExecContext(ctx, query,
-		m.ID, m.KodeInstrumen, m.TipeInstrumen, m.SubTipe, m.Nama, m.ISIN,     // $1-$6
-		m.CounterpartyID, m.ManajerInvestasiID, m.BankKustodianID,              // $7-$9
-		m.MataUang, m.PortofolioID,                                              // $10-$11
-		m.Nominal.String(), nullDecimal(m.JumlahLot),                           // $12-$13
-		m.TanggalPenempatan, m.TanggalJatuhTempo,                               // $14-$15
+		m.ID, m.KodeInstrumen, m.TipeInstrumen, m.SubTipe, m.Nama, m.ISIN, // $1-$6
+		m.CounterpartyID, m.ManajerInvestasiID, m.BankKustodianID, // $7-$9
+		m.MataUang, m.PortofolioID, // $10-$11
+		m.Nominal.String(), nullDecimal(m.JumlahLot), // $12-$13
+		m.TanggalPenempatan, m.TanggalJatuhTempo, // $14-$15
 		nullDecimal(m.Kupon), m.FrekuensiBunga, m.AutoRenewalFlag, m.FvociElection, // $16-$19
-		m.BmCategory, nullDecimal(m.EirAwal), m.TanggalEirComputed,             // $20-$22
-		m.PremiumDiskonto.String(), m.BiayaTransaksi.String(),                  // $23-$24
-		m.EirMethodFlag, m.DayCountConvention, m.AmortizationFrequency,         // $25-$27
-		m.Status, string(m.WorkflowStatus),                                     // $28-$29
-		m.CreatedAt, m.CreatedBy,                                               // $30-$31
-		m.TenantID,                                                              // $32
+		m.BmCategory, nullDecimal(m.EirAwal), m.TanggalEirComputed, // $20-$22
+		m.PremiumDiskonto.String(), m.BiayaTransaksi.String(), // $23-$24
+		m.EirMethodFlag, m.DayCountConvention, m.AmortizationFrequency, // $25-$27
+		m.Status, string(m.WorkflowStatus), // $28-$29
+		m.CreatedAt, m.CreatedBy, // $30-$31
+		m.TenantID, // $32
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -692,18 +692,18 @@ func scanRows(rows *sql.Rows) (*Instrumen, error) {
 func scan(scanFn func(dest ...interface{}) error) (*Instrumen, error) {
 	m := &Instrumen{}
 	var (
-		nominalStr    string
-		jumlahLotStr  *string
-		kuponStr      *string
-		eirAwalStr    *string
-		premiumStr    string
-		biayaStr      string
-		wfStatus      string
-		createdBy     uuid.UUID
-		updatedAt     *time.Time
-		updatedBy     *uuid.UUID
-		deletedAt     *time.Time
-		deletedBy     *uuid.UUID
+		nominalStr   string
+		jumlahLotStr *string
+		kuponStr     *string
+		eirAwalStr   *string
+		premiumStr   string
+		biayaStr     string
+		wfStatus     string
+		createdBy    uuid.UUID
+		updatedAt    *time.Time
+		updatedBy    *uuid.UUID
+		deletedAt    *time.Time
+		deletedBy    *uuid.UUID
 	)
 
 	err := scanFn(
