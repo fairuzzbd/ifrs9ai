@@ -19,7 +19,7 @@ run:
   # golangci-lint v1.59 (removed from run:).
 
   # Go version from go.mod.
-  go: "1.22"
+  go: "1.24"
 
 # ---------------------------------------------------------------------------
 # Linters

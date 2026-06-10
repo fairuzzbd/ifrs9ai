@@ -43,14 +43,41 @@ const (
 	CodeEntityInUse             Code = "ENTITY_IN_USE"
 	CodeMasterApprovedNoEdit    Code = "MASTER_APPROVED_NO_EDIT"
 
-	// instrumen-specific codes
-	CodeInstrumenDuplicateKode            Code = "INSTRUMEN_DUPLICATE_KODE"
-	CodeInstrumenCounterpartyNotApproved  Code = "INSTRUMEN_COUNTERPARTY_NOT_APPROVED"
-	CodeInstrumenPortofolioNotApproved    Code = "INSTRUMEN_PORTOFOLIO_NOT_APPROVED"
-	CodeInstrumenMataUangNotApproved      Code = "INSTRUMEN_MATA_UANG_NOT_APPROVED"
-	CodeInstrumenInvalidTipe              Code = "INSTRUMEN_INVALID_TIPE"
-	CodeInstrumenKlasifikasiLocked        Code = "INSTRUMEN_KLASIFIKASI_LOCKED"
-	CodeInstrumenMissingKustodian         Code = "INSTRUMEN_MISSING_KUSTODIAN"
+	// Chart of Accounts specific codes
+	CodeCoADuplicateKode     Code = "COA_DUPLICATE_KODE"
+	CodeCoAInvalidKodeFormat Code = "COA_INVALID_KODE_FORMAT"
+	CodeCoAParentNotFound    Code = "COA_PARENT_NOT_FOUND"
+
+	// Instrumen-specific codes
+	CodeInstrumenDuplicateKode           Code = "INSTRUMEN_DUPLICATE_KODE"
+	CodeInstrumenCounterpartyNotApproved Code = "INSTRUMEN_COUNTERPARTY_NOT_APPROVED"
+	CodeInstrumenPortofolioNotApproved   Code = "INSTRUMEN_PORTOFOLIO_NOT_APPROVED"
+	CodeInstrumenMataUangNotApproved     Code = "INSTRUMEN_MATA_UANG_NOT_APPROVED"
+	CodeInstrumenInvalidTipe             Code = "INSTRUMEN_INVALID_TIPE"
+	CodeInstrumenKlasifikasiLocked       Code = "INSTRUMEN_KLASIFIKASI_LOCKED"
+	CodeInstrumenMissingKustodian        Code = "INSTRUMEN_MISSING_KUSTODIAN"
+
+	// Portofolio-specific codes
+	CodePortofolioDuplicateKode     Code = "PORTOFOLIO_DUPLICATE_KODE"
+	CodePortofolioInvalidBMCategory Code = "PORTOFOLIO_INVALID_BM_CATEGORY"
+	CodePortofolioInvalidKodeFormat Code = "PORTOFOLIO_INVALID_KODE_FORMAT"
+
+	// ECL parameter module codes (mst.pd_pefindo, mst.lgd_basel, etc.) — HTTP 422.
+	CodePDMonotonicityViolated       Code = "PD_MONOTONICITY_VIOLATED"
+	CodePDPeriodOverlap              Code = "PD_PERIOD_OVERLAP"
+	CodeLGDPeriodOverlap             Code = "LGD_PERIOD_OVERLAP"
+	CodeBobotSumInvariantViolated    Code = "BOBOT_SUM_INVARIANT_VIOLATED"
+	CodeBobotPeriodOverlap           Code = "BOBOT_PERIOD_OVERLAP"
+	CodeBobotDuplicateSkenarioPeriod Code = "BOBOT_DUPLICATE_SKENARIO_PERIOD"
+	CodeLPSPeriodOverlap             Code = "LPS_PERIOD_OVERLAP"
+
+	// FL Multiplier module codes (mst.impact_mev_pd, mst.impact_pd) — HTTP 422.
+	CodeFLPeriodDuplicate Code = "FL_PERIODE_DUPLICATE"       // (periode_id[,skenario]) already active
+	CodeFLMultiplierRange Code = "FL_MULTIPLIER_OUT_OF_RANGE" // impact_pd outside [0.5,2.0]
+
+	// Mapping jurnal module codes (APP-D) — HTTP 422.
+	CodeMappingJurnalDebitCreditMismatch Code = "MAPPING_JURNAL_DEBIT_CREDIT_MISMATCH" //nolint:gosec
+	CodeMappingJurnalKodeAkunNotApproved Code = "MAPPING_JURNAL_KODE_AKUN_NOT_APPROVED"
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
@@ -66,16 +93,7 @@ func (c Code) HTTPStatus() int {
 		return http.StatusForbidden
 	case CodeSystemCurrencyProtected, CodeMasterApprovedNoEdit:
 		return http.StatusForbidden
-	case CodeEntityInUse:
-		return http.StatusConflict
-	case CodeNotFound, CodeJobNotFound:
-		return http.StatusNotFound
-	case CodeConflict:
-		return http.StatusConflict
-	case CodeIdempotencyReplay:
-		return http.StatusOK // replay: return original status
-	case CodeIdempotencyMismatch, CodeWorkflowInvalidTransition,
-		CodeSPPITestIncomplete, CodeBMAssessmentRequired, CodeJobNotCancellable:
+	case CodeCoADuplicateKode, CodeCoAInvalidKodeFormat, CodeCoAParentNotFound:
 		return http.StatusUnprocessableEntity
 	case CodeInstrumenDuplicateKode:
 		return http.StatusConflict
@@ -85,6 +103,24 @@ func (c Code) HTTPStatus() int {
 		return http.StatusUnprocessableEntity
 	case CodeInstrumenKlasifikasiLocked:
 		return 423 // Locked
+	case CodeEntityInUse, CodePortofolioDuplicateKode:
+		return http.StatusConflict
+	case CodePortofolioInvalidKodeFormat, CodePortofolioInvalidBMCategory:
+		return http.StatusBadRequest
+	case CodeNotFound, CodeJobNotFound:
+		return http.StatusNotFound
+	case CodeConflict:
+		return http.StatusConflict
+	case CodeIdempotencyReplay:
+		return http.StatusOK // replay: return original status
+	case CodeIdempotencyMismatch, CodeWorkflowInvalidTransition,
+		CodeSPPITestIncomplete, CodeBMAssessmentRequired, CodeJobNotCancellable,
+		CodePDMonotonicityViolated, CodePDPeriodOverlap,
+		CodeBobotSumInvariantViolated, CodeBobotPeriodOverlap, CodeBobotDuplicateSkenarioPeriod,
+		CodeLGDPeriodOverlap, CodeLPSPeriodOverlap,
+		CodeFLPeriodDuplicate, CodeFLMultiplierRange,
+		CodeMappingJurnalDebitCreditMismatch, CodeMappingJurnalKodeAkunNotApproved:
+		return http.StatusUnprocessableEntity
 	case CodePeriodeClosed, CodeECLParamFrozen:
 		return 423 // Locked
 	case CodeRateLimited:
