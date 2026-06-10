@@ -60,6 +60,10 @@ const (
 	// FL Multiplier module codes (mst.impact_mev_pd, mst.impact_pd) — HTTP 422.
 	CodeFLPeriodDuplicate Code = "FL_PERIODE_DUPLICATE"       // (periode_id[,skenario]) already active
 	CodeFLMultiplierRange Code = "FL_MULTIPLIER_OUT_OF_RANGE" // impact_pd outside [0.5,2.0]
+
+	// Mapping jurnal module codes (APP-D) — HTTP 422.
+	CodeMappingJurnalDebitCreditMismatch Code = "MAPPING_JURNAL_DEBIT_CREDIT_MISMATCH" //nolint:gosec
+	CodeMappingJurnalKodeAkunNotApproved Code = "MAPPING_JURNAL_KODE_AKUN_NOT_APPROVED"
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
@@ -90,7 +94,8 @@ func (c Code) HTTPStatus() int {
 		CodePDMonotonicityViolated, CodePDPeriodOverlap,
 		CodeBobotSumInvariantViolated, CodeBobotPeriodOverlap, CodeBobotDuplicateSkenarioPeriod,
 		CodeLGDPeriodOverlap, CodeLPSPeriodOverlap,
-		CodeFLPeriodDuplicate, CodeFLMultiplierRange:
+		CodeFLPeriodDuplicate, CodeFLMultiplierRange,
+		CodeMappingJurnalDebitCreditMismatch, CodeMappingJurnalKodeAkunNotApproved:
 		return http.StatusUnprocessableEntity
 	case CodePeriodeClosed, CodeECLParamFrozen:
 		return 423 // Locked

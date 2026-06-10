@@ -303,6 +303,25 @@ func DefaultConfigs() map[string]*Config {
 				Approver2NotAnyPrevious:    false,
 			},
 		},
+		// MAPPING_JURNAL — APP-D: 4-eyes, AKUN → AKUN-CTL review → AKUN-CTL approve.
+		// On APPROVE: debit=credit invariant + all CoA rows must be APPROVED.
+		"MAPPING_JURNAL": {
+			EntityType:  "MAPPING_JURNAL",
+			Eyes:        4,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":  "mapping_jurnal.submit",
+				"review":  "mapping_jurnal.review",
+				"approve": "mapping_jurnal.approve",
+				"reject":  "mapping_jurnal.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": false},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    false,
+			},
+		},
 		// KURS — 4-eyes manual override.
 		// BI JISDOR feed auto-approves via integration worker (bypasses workflow).
 		"KURS": {
