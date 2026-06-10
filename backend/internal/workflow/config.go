@@ -267,6 +267,24 @@ func DefaultConfigs() map[string]*Config {
 				Approver2NotAnyPrevious:    true,
 			},
 		},
+		// INSTRUMEN — 4-eyes master data (APP-A-MSTR-011).
+		"INSTRUMEN": {
+			EntityType:  "INSTRUMEN",
+			Eyes:        4,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":  "instrumen.submit",
+				"review":  "instrumen.review",
+				"approve": "instrumen.approve",
+				"reject":  "instrumen.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": false},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    false,
+			},
+		},
 		"PORTOFOLIO": {
 			EntityType:  "PORTOFOLIO",
 			Eyes:        4,
