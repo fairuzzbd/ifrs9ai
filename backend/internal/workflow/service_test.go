@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 
 	"github.com/google/uuid"
@@ -410,4 +411,150 @@ func TestService_NoClaims_Unauthorized(t *testing.T) {
 		Request:    defaultActionRequest(),
 	})
 	assertDomainCode(t, err, domainerrors.CodeUnauthorized)
+}
+
+// -----------------------------------------------------------------------
+// EntityHook — BeforeCommit called in-transaction and error propagated
+// -----------------------------------------------------------------------
+
+// stubHook is a test EntityHook that records calls and returns a configurable error.
+type stubHook struct {
+	called    int
+	returnErr error
+}
+
+func (h *stubHook) BeforeCommit(_ context.Context, _ *sql.Tx, _ HookEvent) error {
+	h.called++
+	return h.returnErr
+}
+
+// TestService_EntityHook_CalledOnTransition verifies that a registered hook is invoked
+// during performTransition.
+func TestService_EntityHook_CalledOnTransition(t *testing.T) {
+	cfg := cfg4Eyes(false)
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
+
+	hook := &stubHook{}
+	svc.RegisterEntityHook(cfg.EntityType, hook)
+
+	mUUID := uuid.New()
+	inst := seedWorkflow(repo, cfg, mUUID)
+
+	ctx := ctxWithClaims(mUUID, "maker", "penempatan.submit")
+	_, err := svc.Submit(ctx, SubmitInput{
+		EntityType: cfg.EntityType,
+		EntityID:   inst.EntityID,
+		Request:    defaultActionRequest(),
+	})
+	mustNoError(t, "submit", err)
+
+	if hook.called != 1 {
+		t.Errorf("expected hook to be called once, got %d", hook.called)
+	}
+}
+
+// TestService_EntityHook_ErrorRollsBack verifies that a hook error aborts the transition
+// and the error is propagated to the caller.
+func TestService_EntityHook_ErrorRollsBack(t *testing.T) {
+	cfg := cfg4Eyes(false)
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
+
+	hookErr := domainerrors.New(domainerrors.CodeBobotSumInvariantViolated, "sum invariant check failed")
+	hook := &stubHook{returnErr: hookErr}
+	svc.RegisterEntityHook(cfg.EntityType, hook)
+
+	mUUID := uuid.New()
+	inst := seedWorkflow(repo, cfg, mUUID)
+
+	ctx := ctxWithClaims(mUUID, "maker", "penempatan.submit")
+	_, err := svc.Submit(ctx, SubmitInput{
+		EntityType: cfg.EntityType,
+		EntityID:   inst.EntityID,
+		Request:    defaultActionRequest(),
+	})
+
+	if err == nil {
+		t.Fatal("expected error from hook, got nil")
+	}
+	de, ok := domainerrors.IsDomainError(err)
+	if !ok {
+		t.Fatalf("expected DomainError, got %T: %v", err, err)
+	}
+	if de.Code() != domainerrors.CodeBobotSumInvariantViolated {
+		t.Errorf("expected BOBOT_SUM_INVARIANT_VIOLATED, got %s", de.Code())
+	}
+	if hook.called != 1 {
+		t.Errorf("expected hook called once, got %d", hook.called)
+	}
+}
+
+// TestService_EntityHook_MultipleHooks verifies multiple hooks are called in registration order.
+func TestService_EntityHook_MultipleHooks(t *testing.T) {
+	cfg := cfg4Eyes(false)
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
+
+	var callOrder []int
+	makeOrderHook := func(id int) EntityHook {
+		return &orderTrackingHook{id: id, order: &callOrder}
+	}
+
+	svc.RegisterEntityHook(cfg.EntityType, makeOrderHook(1))
+	svc.RegisterEntityHook(cfg.EntityType, makeOrderHook(2))
+	svc.RegisterEntityHook(cfg.EntityType, makeOrderHook(3))
+
+	mUUID := uuid.New()
+	inst := seedWorkflow(repo, cfg, mUUID)
+
+	ctx := ctxWithClaims(mUUID, "maker", "penempatan.submit")
+	_, err := svc.Submit(ctx, SubmitInput{
+		EntityType: cfg.EntityType,
+		EntityID:   inst.EntityID,
+		Request:    defaultActionRequest(),
+	})
+	mustNoError(t, "submit", err)
+
+	if len(callOrder) != 3 {
+		t.Fatalf("expected 3 hooks called, got %d", len(callOrder))
+	}
+	for i, v := range callOrder {
+		if v != i+1 {
+			t.Errorf("hook call order[%d] = %d, want %d", i, v, i+1)
+		}
+	}
+}
+
+// TestService_EntityHook_UnregisteredEntityType verifies hooks for other entity types
+// are not called for a different entity.
+func TestService_EntityHook_UnregisteredEntityType(t *testing.T) {
+	cfg := cfg4Eyes(false)
+	svc, repo := buildTestService(map[string]*Config{cfg.EntityType: cfg})
+
+	hook := &stubHook{}
+	svc.RegisterEntityHook("SOME_OTHER_ENTITY", hook)
+
+	mUUID := uuid.New()
+	inst := seedWorkflow(repo, cfg, mUUID)
+
+	ctx := ctxWithClaims(mUUID, "maker", "penempatan.submit")
+	_, err := svc.Submit(ctx, SubmitInput{
+		EntityType: cfg.EntityType,
+		EntityID:   inst.EntityID,
+		Request:    defaultActionRequest(),
+	})
+	mustNoError(t, "submit", err)
+
+	if hook.called != 0 {
+		t.Errorf("hook for different entity type should not be called, got %d calls", hook.called)
+	}
+}
+
+// orderTrackingHook records call order.
+type orderTrackingHook struct {
+	id    int
+	order *[]int
+}
+
+func (h *orderTrackingHook) BeforeCommit(_ context.Context, _ *sql.Tx, _ HookEvent) error {
+	*h.order = append(*h.order, h.id)
+	return nil
 }

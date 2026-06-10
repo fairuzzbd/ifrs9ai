@@ -12,7 +12,6 @@
 package workflow
 
 import (
-	"context"
 	"time"
 
 	"github.com/google/uuid"
@@ -174,20 +173,4 @@ type StatusResponse struct {
 	Approver1ID  *uuid.UUID
 	Approver2ID  *uuid.UUID
 	History      []SignatureRecord
-}
-
-// EntityHook is called by the workflow service after each successful state transition.
-// Modules register an implementation per entityType so the generic workflow service can
-// call back into the domain layer to sync workflow_status columns without knowing the
-// module internals.
-//
-// Implementations must be idempotent — the same (entityID, newState, action) may be
-// replayed in error-recovery scenarios.
-type EntityHook interface {
-	// OnTransition is called after the workflow instance state has been committed.
-	// entityType: upper snake_case entity type (e.g. "MAPPING_JURNAL")
-	// entityID: UUID of the domain entity (e.g. mst.mapping_jurnal_header.id)
-	// newState: new workflow state string (e.g. "APPROVED")
-	// action: action that caused the transition (e.g. "APPROVE")
-	OnTransition(ctx context.Context, entityType string, entityID uuid.UUID, newState string, action string) error
 }

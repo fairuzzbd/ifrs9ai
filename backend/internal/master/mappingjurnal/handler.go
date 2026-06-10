@@ -149,7 +149,7 @@ func (h *Handler) Export(c *gin.Context) {
 
 // GetByID handles GET /api/v1/master/mapping-jurnal/:id.
 func (h *Handler) GetByID(c *gin.Context) {
-	id, ok := parseUUIDParam(c, "id")
+	id, ok := parseUUIDParam(c)
 	if !ok {
 		return
 	}
@@ -167,7 +167,7 @@ func (h *Handler) GetByID(c *gin.Context) {
 
 // Update handles PATCH /api/v1/master/mapping-jurnal/:id.
 func (h *Handler) Update(c *gin.Context) {
-	id, ok := parseUUIDParam(c, "id")
+	id, ok := parseUUIDParam(c)
 	if !ok {
 		return
 	}
@@ -192,7 +192,7 @@ func (h *Handler) Update(c *gin.Context) {
 
 // Delete handles DELETE /api/v1/master/mapping-jurnal/:id.
 func (h *Handler) Delete(c *gin.Context) {
-	id, ok := parseUUIDParam(c, "id")
+	id, ok := parseUUIDParam(c)
 	if !ok {
 		return
 	}
@@ -213,7 +213,7 @@ func (h *Handler) Delete(c *gin.Context) {
 
 // History handles GET /api/v1/master/mapping-jurnal/:id/history.
 func (h *Handler) History(c *gin.Context) {
-	id, ok := parseUUIDParam(c, "id")
+	id, ok := parseUUIDParam(c)
 	if !ok {
 		return
 	}
@@ -255,7 +255,7 @@ func (h *Handler) History(c *gin.Context) {
 
 // Submit handles POST /api/v1/master/mapping-jurnal/:id/submit.
 func (h *Handler) Submit(c *gin.Context) {
-	id, ok := parseUUIDParam(c, "id")
+	id, ok := parseUUIDParam(c)
 	if !ok {
 		return
 	}
@@ -273,7 +273,7 @@ func (h *Handler) Submit(c *gin.Context) {
 
 // Review handles POST /api/v1/master/mapping-jurnal/:id/review.
 func (h *Handler) Review(c *gin.Context) {
-	id, ok := parseUUIDParam(c, "id")
+	id, ok := parseUUIDParam(c)
 	if !ok {
 		return
 	}
@@ -290,7 +290,7 @@ func (h *Handler) Review(c *gin.Context) {
 
 // Approve handles POST /api/v1/master/mapping-jurnal/:id/approve.
 func (h *Handler) Approve(c *gin.Context) {
-	id, ok := parseUUIDParam(c, "id")
+	id, ok := parseUUIDParam(c)
 	if !ok {
 		return
 	}
@@ -307,7 +307,7 @@ func (h *Handler) Approve(c *gin.Context) {
 
 // Reject handles POST /api/v1/master/mapping-jurnal/:id/reject.
 func (h *Handler) Reject(c *gin.Context) {
-	id, ok := parseUUIDParam(c, "id")
+	id, ok := parseUUIDParam(c)
 	if !ok {
 		return
 	}
@@ -324,7 +324,7 @@ func (h *Handler) Reject(c *gin.Context) {
 
 // WorkflowStatus handles GET /api/v1/master/mapping-jurnal/:id/workflow.
 func (h *Handler) WorkflowStatus(c *gin.Context) {
-	id, ok := parseUUIDParam(c, "id")
+	id, ok := parseUUIDParam(c)
 	if !ok {
 		return
 	}
@@ -341,16 +341,16 @@ func (h *Handler) WorkflowStatus(c *gin.Context) {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-// parseUUIDParam extracts and parses a UUID path parameter.
+// parseUUIDParam extracts and parses the ":id" path parameter.
 // Returns false and writes a 400 response on failure.
-func parseUUIDParam(c *gin.Context, paramName string) (uuid.UUID, bool) {
-	raw := c.Param(paramName)
+func parseUUIDParam(c *gin.Context) (uuid.UUID, bool) {
+	raw := c.Param("id")
 	id, err := uuid.Parse(raw)
 	if err != nil {
 		response.Error(c, domainerrors.New(
 			domainerrors.CodeValidationFailed,
-			fmt.Sprintf("Parameter '%s' harus berformat UUID v4.", paramName),
-			domainerrors.Detail{Field: "path." + paramName, Rule: "uuid", Message: "Format UUID tidak valid"},
+			"Parameter 'id' harus berformat UUID v4.",
+			domainerrors.Detail{Field: "path.id", Rule: "uuid", Message: "Format UUID tidak valid"},
 		))
 		return uuid.Nil, false
 	}

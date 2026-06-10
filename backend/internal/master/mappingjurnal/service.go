@@ -529,7 +529,8 @@ func (s *Service) buildDetails(reqs []DetailRequest, headerID uuid.UUID, created
 	details := make([]*Detail, 0, len(reqs))
 	var validationDetails []domainerrors.Detail
 
-	for i, dr := range reqs {
+	for i := range reqs {
+		dr := reqs[i]
 		coaID, parseErr := uuid.Parse(dr.KodeAkunID)
 		if parseErr != nil {
 			validationDetails = append(validationDetails, domainerrors.Detail{

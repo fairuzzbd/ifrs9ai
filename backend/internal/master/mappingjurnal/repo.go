@@ -279,7 +279,10 @@ func (r *DBRepository) UpdateHeader(ctx context.Context, tx *sql.Tx, id uuid.UUI
 		}
 		return nil, fmt.Errorf("repo.UpdateHeader: %w", err)
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("repo.UpdateHeader rowsAffected: %w", err)
+	}
 	if n == 0 {
 		existing, ferr := r.GetHeaderByID(ctx, id, false)
 		if ferr != nil {
@@ -488,18 +491,19 @@ func (r *DBRepository) GetDetailsByHeaderID(ctx context.Context, headerID uuid.U
 	if includeDeleted {
 		del = ""
 	}
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT
+	query := fmt.Sprintf( //nolint:gosec
+		`SELECT
 			id, event_header_id, urutan, kode_akun_id, dk_indicator, sumber_amount,
 			klasifikasi_filter, tipe_instrumen_filter, underlying_type_filter,
 			multiplier, mata_uang_posting, aktif_flag, catatan,
 			created_at, created_by, updated_at, updated_by,
 			deleted_at, deleted_by, row_version, tenant_id
 		FROM mst.mapping_jurnal_detail
-		WHERE event_header_id = $1`+del+`
+		WHERE event_header_id = $1%s
 		ORDER BY urutan ASC`,
-		headerID,
+		del,
 	)
+	rows, err := r.db.QueryContext(ctx, query, headerID)
 	if err != nil {
 		return nil, fmt.Errorf("repo.GetDetailsByHeaderID: %w", err)
 	}
@@ -680,13 +684,13 @@ func (r *DBRepository) ExportAll(ctx context.Context, q listquery.Query) (io.Rea
 	count := 0
 	for rows.Next() {
 		var (
-			eventCode    string
-			eventIDKode  string
-			namaEvent    string
-			kategori     string
-			triggerSrc   string
-			aktif        bool
-			wfStatus     string
+			eventCode   string
+			eventIDKode string
+			namaEvent   string
+			kategori    string
+			triggerSrc  string
+			aktif       bool
+			wfStatus    string
 		)
 		if err := rows.Scan(&eventCode, &eventIDKode, &namaEvent, &kategori, &triggerSrc, &aktif, &wfStatus); err != nil {
 			return nil, 0, fmt.Errorf("repo.ExportAll scan: %w", err)
@@ -803,7 +807,10 @@ func scanDetailRow(rows *sql.Rows) (*Detail, error) {
 	if err != nil {
 		return nil, err
 	}
-	d.Multiplier, _ = decimal.NewFromString(multiplierStr)
+	d.Multiplier, err = decimal.NewFromString(multiplierStr)
+	if err != nil {
+		return nil, fmt.Errorf("repo.scanDetailRow: parse multiplier: %w", err)
+	}
 	d.CreatedBy = createdBy
 	d.UpdatedAt = updatedAt
 	d.UpdatedBy = updatedBy

@@ -56,35 +56,35 @@ func testDetailPair() []*mappingjurnal.Detail {
 	actorID := testActorID
 	return []*mappingjurnal.Detail{
 		{
-			ID:              uuid.New(),
-			EventHeaderID:   testHeaderID,
-			Urutan:          1,
-			KodeAkunID:      testCoAID,
-			DKIndicator:     "DEBIT",
-			SumberAmount:    "NOMINAL_PENEMPATAN",
-			Multiplier:      decimal.NewFromFloat(1.0),
-			MataUangPosting: "IDR",
-			AktifFlag:       true,
-			CreatedAt:       now,
-			CreatedBy:       &actorID,
-			RowVersion:      1,
-			TenantID:        "TUGURE",
+			ID:                  uuid.New(),
+			EventHeaderID:       testHeaderID,
+			Urutan:              1,
+			KodeAkunID:          testCoAID,
+			DKIndicator:         "DEBIT",
+			SumberAmount:        "NOMINAL_PENEMPATAN",
+			Multiplier:          decimal.NewFromFloat(1.0),
+			MataUangPosting:     "IDR",
+			AktifFlag:           true,
+			CreatedAt:           now,
+			CreatedBy:           &actorID,
+			RowVersion:          1,
+			TenantID:            "TUGURE",
 			TipeInstrumenFilter: []string{},
 		},
 		{
-			ID:              uuid.New(),
-			EventHeaderID:   testHeaderID,
-			Urutan:          2,
-			KodeAkunID:      testCoAID,
-			DKIndicator:     "KREDIT",
-			SumberAmount:    "KAS_OPERASIONAL",
-			Multiplier:      decimal.NewFromFloat(1.0),
-			MataUangPosting: "IDR",
-			AktifFlag:       true,
-			CreatedAt:       now,
-			CreatedBy:       &actorID,
-			RowVersion:      1,
-			TenantID:        "TUGURE",
+			ID:                  uuid.New(),
+			EventHeaderID:       testHeaderID,
+			Urutan:              2,
+			KodeAkunID:          testCoAID,
+			DKIndicator:         "KREDIT",
+			SumberAmount:        "KAS_OPERASIONAL", //nolint:misspell
+			Multiplier:          decimal.NewFromFloat(1.0),
+			MataUangPosting:     "IDR",
+			AktifFlag:           true,
+			CreatedAt:           now,
+			CreatedBy:           &actorID,
+			RowVersion:          1,
+			TenantID:            "TUGURE",
 			TipeInstrumenFilter: []string{},
 		},
 	}
@@ -136,6 +136,18 @@ func newRouter(svc *mappingjurnal.Service) *gin.Engine {
 
 func buildSvc(adapter *repoAdapter) *mappingjurnal.Service {
 	return mappingjurnal.NewService(adapter, audit.NewWriter(nil), slog.Default())
+}
+
+// buildHookEvent constructs a workflow.HookEvent for invariant tests.
+func buildHookEvent(entityID uuid.UUID, newState, action string) workflow.HookEvent {
+	return workflow.HookEvent{
+		EntityType: "MAPPING_JURNAL",
+		EntityID:   entityID,
+		Action:     workflow.Action(action),
+		NewState:   workflow.State(newState),
+		OldState:   workflow.StatePendingApproval,
+		ActorID:    testActorID,
+	}
 }
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
@@ -532,6 +544,12 @@ func TestDelete_WithActiveReferences_Returns409(t *testing.T) {
 
 // ─── Service unit tests — debit/credit invariant ───────────────────────────────
 
+// buildHook creates a WorkflowHook wired to a service with the given repo stub.
+func buildHook(repo *repoAdapter) *mappingjurnal.WorkflowHook {
+	svc := buildSvc(repo)
+	return mappingjurnal.NewWorkflowHook(svc, repo)
+}
+
 // TestDebitCreditMismatch_BlocksApprove verifies the invariant is checked on approve.
 func TestDebitCreditMismatch_BlocksApprove(t *testing.T) {
 	// Details with DEBIT=1.0 and KREDIT=1.5 → mismatch
@@ -539,35 +557,35 @@ func TestDebitCreditMismatch_BlocksApprove(t *testing.T) {
 	actorID := testActorID
 	mismatchedDetails := []*mappingjurnal.Detail{
 		{
-			ID:              uuid.New(),
-			EventHeaderID:   testHeaderID,
-			Urutan:          1,
-			KodeAkunID:      testCoAID,
-			DKIndicator:     "DEBIT",
-			SumberAmount:    "NOMINAL",
-			Multiplier:      decimal.NewFromFloat(1.0),
-			MataUangPosting: "IDR",
-			AktifFlag:       true,
-			CreatedAt:       now,
-			CreatedBy:       &actorID,
-			RowVersion:      1,
-			TenantID:        "TUGURE",
+			ID:                  uuid.New(),
+			EventHeaderID:       testHeaderID,
+			Urutan:              1,
+			KodeAkunID:          testCoAID,
+			DKIndicator:         "DEBIT",
+			SumberAmount:        "NOMINAL",
+			Multiplier:          decimal.NewFromFloat(1.0),
+			MataUangPosting:     "IDR",
+			AktifFlag:           true,
+			CreatedAt:           now,
+			CreatedBy:           &actorID,
+			RowVersion:          1,
+			TenantID:            "TUGURE",
 			TipeInstrumenFilter: []string{},
 		},
 		{
-			ID:              uuid.New(),
-			EventHeaderID:   testHeaderID,
-			Urutan:          2,
-			KodeAkunID:      testCoAID,
-			DKIndicator:     "KREDIT",
-			SumberAmount:    "KAS",
-			Multiplier:      decimal.NewFromFloat(1.5), // mismatch
-			MataUangPosting: "IDR",
-			AktifFlag:       true,
-			CreatedAt:       now,
-			CreatedBy:       &actorID,
-			RowVersion:      1,
-			TenantID:        "TUGURE",
+			ID:                  uuid.New(),
+			EventHeaderID:       testHeaderID,
+			Urutan:              2,
+			KodeAkunID:          testCoAID,
+			DKIndicator:         "KREDIT",
+			SumberAmount:        "KAS",
+			Multiplier:          decimal.NewFromFloat(1.5), // mismatch
+			MataUangPosting:     "IDR",
+			AktifFlag:           true,
+			CreatedAt:           now,
+			CreatedBy:           &actorID,
+			RowVersion:          1,
+			TenantID:            "TUGURE",
 			TipeInstrumenFilter: []string{},
 		},
 	}
@@ -575,16 +593,17 @@ func TestDebitCreditMismatch_BlocksApprove(t *testing.T) {
 	h := testHeader()
 	h.WorkflowStatus = mappingjurnal.WorkflowStatusPendingApproval
 
-	svc := buildSvc(&repoAdapter{
+	repo := &repoAdapter{
 		getHeader:  &stubGetHeader{header: h},
 		getDetails: &stubGetDetails{details: mismatchedDetails},
 		checkCoA:   &stubCheckCoA{approved: true},
-	})
+	}
+	hook := buildHook(repo)
 
-	// Inject actor claims into context
 	ctx := auth.ContextWithClaims(context.Background(), testClaims())
+	evt := buildHookEvent(testHeaderID, "APPROVED", "APPROVE")
 
-	err := svc.SyncWorkflowStatus(ctx, testHeaderID, "APPROVED", "APPROVE")
+	err := hook.BeforeCommit(ctx, nil, evt)
 	if err == nil {
 		t.Fatal("expected error for debit/credit mismatch, got nil")
 	}
@@ -603,25 +622,19 @@ func TestDebitCreditBalance_PassesApprove(t *testing.T) {
 	h.WorkflowStatus = mappingjurnal.WorkflowStatusPendingApproval
 	details := testDetailPair() // 1.0 DEBIT + 1.0 KREDIT = balanced
 
-	// For SyncWorkflowStatus to succeed, BeginTx needs to work.
-	// Since repoAdapter always returns errTestNoDB from BeginTx,
-	// the check will fail at the tx begin step — but the invariant check
-	// happens BEFORE BeginTx, so we can verify it passed.
-	svc := buildSvc(&repoAdapter{
+	repo := &repoAdapter{
 		getHeader:  &stubGetHeader{header: h},
 		getDetails: &stubGetDetails{details: details},
 		checkCoA:   &stubCheckCoA{approved: true},
-	})
+	}
+	hook := buildHook(repo)
 
 	ctx := auth.ContextWithClaims(context.Background(), testClaims())
-	err := svc.SyncWorkflowStatus(ctx, testHeaderID, "APPROVED", "APPROVE")
-	// Should fail at BeginTx (errTestNoDB), NOT at debit/credit check.
-	if err != nil {
-		// Check it's the BeginTx error, not a domain validation error
-		if _, ok := domainerrors.IsDomainError(err); ok {
-			t.Errorf("balanced details should not produce DomainError, got: %v", err)
-		}
-		// Non-domain error (errTestNoDB propagated) is expected
+	evt := buildHookEvent(testHeaderID, "APPROVED", "APPROVE")
+
+	// BeforeCommit with stub repo: UpdateWorkflowStatus returns nil → no error expected.
+	if err := hook.BeforeCommit(ctx, nil, evt); err != nil {
+		t.Errorf("balanced details should not produce error, got: %v", err)
 	}
 }
 
@@ -631,14 +644,17 @@ func TestCoANotApproved_BlocksApprove(t *testing.T) {
 	h.WorkflowStatus = mappingjurnal.WorkflowStatusPendingApproval
 	details := testDetailPair()
 
-	svc := buildSvc(&repoAdapter{
+	repo := &repoAdapter{
 		getHeader:  &stubGetHeader{header: h},
 		getDetails: &stubGetDetails{details: details},
 		checkCoA:   &stubCheckCoA{approved: false}, // CoA not approved
-	})
+	}
+	hook := buildHook(repo)
 
 	ctx := auth.ContextWithClaims(context.Background(), testClaims())
-	err := svc.SyncWorkflowStatus(ctx, testHeaderID, "APPROVED", "APPROVE")
+	evt := buildHookEvent(testHeaderID, "APPROVED", "APPROVE")
+
+	err := hook.BeforeCommit(ctx, nil, evt)
 	if err == nil {
 		t.Fatal("expected error for unapproved CoA, got nil")
 	}
@@ -661,54 +677,58 @@ func TestNonApproveTransition_SkipsInvariant(t *testing.T) {
 	actorID := testActorID
 	badDetails := []*mappingjurnal.Detail{
 		{
-			ID:              uuid.New(),
-			EventHeaderID:   testHeaderID,
-			Urutan:          1,
-			KodeAkunID:      testCoAID,
-			DKIndicator:     "DEBIT",
-			SumberAmount:    "NOMINAL",
-			Multiplier:      decimal.NewFromFloat(2.0),
-			MataUangPosting: "IDR",
-			AktifFlag:       true,
-			CreatedAt:       now,
-			CreatedBy:       &actorID,
-			RowVersion:      1,
-			TenantID:        "TUGURE",
+			ID:                  uuid.New(),
+			EventHeaderID:       testHeaderID,
+			Urutan:              1,
+			KodeAkunID:          testCoAID,
+			DKIndicator:         "DEBIT",
+			SumberAmount:        "NOMINAL",
+			Multiplier:          decimal.NewFromFloat(2.0),
+			MataUangPosting:     "IDR",
+			AktifFlag:           true,
+			CreatedAt:           now,
+			CreatedBy:           &actorID,
+			RowVersion:          1,
+			TenantID:            "TUGURE",
 			TipeInstrumenFilter: []string{},
 		},
 		{
-			ID:              uuid.New(),
-			EventHeaderID:   testHeaderID,
-			Urutan:          2,
-			KodeAkunID:      testCoAID,
-			DKIndicator:     "KREDIT",
-			SumberAmount:    "KAS",
-			Multiplier:      decimal.NewFromFloat(3.0), // deliberately mismatched
-			MataUangPosting: "IDR",
-			AktifFlag:       true,
-			CreatedAt:       now,
-			CreatedBy:       &actorID,
-			RowVersion:      1,
-			TenantID:        "TUGURE",
+			ID:                  uuid.New(),
+			EventHeaderID:       testHeaderID,
+			Urutan:              2,
+			KodeAkunID:          testCoAID,
+			DKIndicator:         "KREDIT",
+			SumberAmount:        "KAS",
+			Multiplier:          decimal.NewFromFloat(3.0), // deliberately mismatched
+			MataUangPosting:     "IDR",
+			AktifFlag:           true,
+			CreatedAt:           now,
+			CreatedBy:           &actorID,
+			RowVersion:          1,
+			TenantID:            "TUGURE",
 			TipeInstrumenFilter: []string{},
 		},
 	}
 
-	svc := buildSvc(&repoAdapter{
+	repo := &repoAdapter{
 		getHeader:  &stubGetHeader{header: h},
 		getDetails: &stubGetDetails{details: badDetails},
-	})
+	}
+	hook := buildHook(repo)
 
 	ctx := auth.ContextWithClaims(context.Background(), testClaims())
-	err := svc.SyncWorkflowStatus(ctx, testHeaderID, "PENDING_REVIEW", "SUBMIT")
-	// Should NOT return a debit/credit domain error.
+	evt := buildHookEvent(testHeaderID, "PENDING_REVIEW", "SUBMIT")
+
+	// SUBMIT should not trigger debit/credit invariant check.
+	err := hook.BeforeCommit(ctx, nil, evt)
 	if err != nil {
 		if de, ok := domainerrors.IsDomainError(err); ok {
 			if de.Code() == domainerrors.CodeMappingJurnalDebitCreditMismatch {
 				t.Error("SUBMIT should not trigger debit/credit invariant check")
 			}
 		}
-		// BeginTx error (errTestNoDB) is acceptable
+		// Any other error is unexpected here too
+		t.Errorf("unexpected error on SUBMIT: %v", err)
 	}
 }
 
