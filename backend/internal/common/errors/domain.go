@@ -51,6 +51,10 @@ const (
 	CodeBobotPeriodOverlap           Code = "BOBOT_PERIOD_OVERLAP"
 	CodeBobotDuplicateSkenarioPeriod Code = "BOBOT_DUPLICATE_SKENARIO_PERIOD"
 	CodeLPSPeriodOverlap             Code = "LPS_PERIOD_OVERLAP"
+
+	// FL Multiplier module codes (mst.impact_mev_pd, mst.impact_pd) — HTTP 422.
+	CodeFLPeriodDuplicate Code = "FL_PERIODE_DUPLICATE"       // (periode_id[,skenario]) already active
+	CodeFLMultiplierRange Code = "FL_MULTIPLIER_OUT_OF_RANGE" // impact_pd outside [0.5,2.0]
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
@@ -78,7 +82,8 @@ func (c Code) HTTPStatus() int {
 		CodeSPPITestIncomplete, CodeBMAssessmentRequired, CodeJobNotCancellable,
 		CodePDMonotonicityViolated, CodePDPeriodOverlap,
 		CodeBobotSumInvariantViolated, CodeBobotPeriodOverlap, CodeBobotDuplicateSkenarioPeriod,
-		CodeLGDPeriodOverlap, CodeLPSPeriodOverlap:
+		CodeLGDPeriodOverlap, CodeLPSPeriodOverlap,
+		CodeFLPeriodDuplicate, CodeFLMultiplierRange:
 		return http.StatusUnprocessableEntity
 	case CodePeriodeClosed, CodeECLParamFrozen:
 		return 423 // Locked
