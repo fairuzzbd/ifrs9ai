@@ -711,28 +711,27 @@ func TestDomainError_CoAParentNotFound_Is422(t *testing.T) {
 
 // ─── WorkflowHook ─────────────────────────────────────────────────────────────
 
-func TestWorkflowHook_OnTransition_CallsSyncWorkflowStatus(t *testing.T) {
-	// WorkflowHook.OnTransition should call svc.SyncWorkflowStatus.
-	// Service will fail at BeginTx (no DB) but that means the hook was reached.
+func TestWorkflowHook_BeforeCommit_CallsUpdateWorkflowStatus(t *testing.T) {
+	// WorkflowHook.BeforeCommit should call repo.UpdateWorkflowStatus inside the tx.
+	// With a nil tx (InMemory test path), UpdateWorkflowStatus is expected to be called
+	// and the stub returns nil, so BeforeCommit should return nil.
 	svc := coa.NewService(&repoAdapter{
-		// Provide a stubGetByID so the entity-load passes before BeginTx.
 		stubGetByID: &stubGetByID{result: testCoA()},
 	}, audit.NewWriter(nil), slog.Default())
 
 	hook := coa.NewWorkflowHook(svc)
 	ctx := auth.ContextWithClaims(context.Background(), testClaims())
 
-	err := hook.OnTransition(ctx, workflow.HookEvent{
+	err := hook.BeforeCommit(ctx, nil /* nil tx = InMemory path */, workflow.HookEvent{
 		EntityID:   uuid.MustParse("00000000-0000-0000-0000-000000000002"),
 		EntityType: "CHART_OF_ACCOUNTS",
-		NewState:   "APPROVED",
-		Action:     "APPROVE",
+		NewState:   workflow.StateApproved,
+		Action:     workflow.ActionApprove,
+		ActorID:    uuid.MustParse("00000000-0000-0000-0000-000000000001"),
 	})
-	// Error is expected (BeginTx fails with no DB), but NOT a nil from short-circuit.
-	// The important thing is it doesn't panic and it returns an error (not nil) because
-	// the stub hits the BeginTx path.
-	if err == nil {
-		t.Error("expected non-nil error from hook (no DB in stub), got nil")
+	// Stub UpdateWorkflowStatus returns nil, so BeforeCommit should succeed.
+	if err != nil {
+		t.Errorf("expected nil error from hook with stub repo, got: %v", err)
 	}
 }
 
