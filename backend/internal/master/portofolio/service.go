@@ -71,20 +71,20 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Portofolio, e
 	}
 
 	p := &Portofolio{
-		ID:                      uuid.New(),
-		KodePortofolio:          req.KodePortofolio,
-		Nama:                    req.Nama,
-		TujuanPengelolaan:       req.TujuanPengelolaan,
-		BMCategoryDefault:       BMCategory(req.BMCategoryDefault),
-		Benchmark:               req.Benchmark,
-		KompensasiManagerBasis:  req.KompensasiManagerBasis,
-		PeriodeReviewTerakhir:   req.PeriodeReviewTerakhir,
-		AktifFlag:               aktifFlag,
-		WorkflowStatus:          WorkflowStatusDraft,
-		CreatedAt:               now,
-		CreatedBy:               &actorID,
-		RowVersion:              1,
-		TenantID:                tenantID(claims),
+		ID:                     uuid.New(),
+		KodePortofolio:         req.KodePortofolio,
+		Nama:                   req.Nama,
+		TujuanPengelolaan:      req.TujuanPengelolaan,
+		BMCategoryDefault:      BMCategory(req.BMCategoryDefault),
+		Benchmark:              req.Benchmark,
+		KompensasiManagerBasis: req.KompensasiManagerBasis,
+		PeriodeReviewTerakhir:  req.PeriodeReviewTerakhir,
+		AktifFlag:              aktifFlag,
+		WorkflowStatus:         WorkflowStatusDraft,
+		CreatedAt:              now,
+		CreatedBy:              &actorID,
+		RowVersion:             1,
+		TenantID:               tenantID(claims),
 	}
 
 	tx, err := s.repo.BeginTx(ctx)

@@ -96,13 +96,13 @@ type Portofolio struct {
 	KodePortofolio string `db:"kode_portofolio"`
 
 	// Core fields.
-	Nama                    string     `db:"nama"`
-	TujuanPengelolaan       *string    `db:"tujuan_pengelolaan"`
-	BMCategoryDefault       BMCategory `db:"bm_category_default"`
-	Benchmark               *string    `db:"benchmark"`
-	KompensasiManagerBasis  *string    `db:"kompensasi_manager_basis"`
-	PeriodeReviewTerakhir   *string    `db:"periode_review_terakhir"` // DATE → "YYYY-MM-DD"
-	AktifFlag               bool       `db:"aktif_flag"`
+	Nama                   string     `db:"nama"`
+	TujuanPengelolaan      *string    `db:"tujuan_pengelolaan"`
+	BMCategoryDefault      BMCategory `db:"bm_category_default"`
+	Benchmark              *string    `db:"benchmark"`
+	KompensasiManagerBasis *string    `db:"kompensasi_manager_basis"`
+	PeriodeReviewTerakhir  *string    `db:"periode_review_terakhir"` // DATE → "YYYY-MM-DD"
+	AktifFlag              bool       `db:"aktif_flag"`
 
 	// Workflow.
 	WorkflowStatus     WorkflowStatus `db:"workflow_status"`
@@ -123,14 +123,14 @@ type Portofolio struct {
 
 // CreateRequest is the POST /master/portofolio request body.
 type CreateRequest struct {
-	KodePortofolio          string  `json:"kodePortofolio"          binding:"required"`
-	Nama                    string  `json:"nama"                    binding:"required,min=3,max=200"`
-	TujuanPengelolaan       *string `json:"tujuanPengelolaan"`
-	BMCategoryDefault       string  `json:"bmCategoryDefault"       binding:"required,oneof=HTC HTCS OTHER"`
-	Benchmark               *string `json:"benchmark"               binding:"omitempty,max=100"`
-	KompensasiManagerBasis  *string `json:"kompensasiManagerBasis"  binding:"omitempty,max=50"`
-	PeriodeReviewTerakhir   *string `json:"periodeReviewTerakhir"`
-	AktifFlag               *bool   `json:"aktifFlag"`
+	KodePortofolio         string  `json:"kodePortofolio"          binding:"required"`
+	Nama                   string  `json:"nama"                    binding:"required,min=3,max=200"`
+	TujuanPengelolaan      *string `json:"tujuanPengelolaan"`
+	BMCategoryDefault      string  `json:"bmCategoryDefault"       binding:"required,oneof=HTC HTCS OTHER"`
+	Benchmark              *string `json:"benchmark"               binding:"omitempty,max=100"`
+	KompensasiManagerBasis *string `json:"kompensasiManagerBasis"  binding:"omitempty,max=50"`
+	PeriodeReviewTerakhir  *string `json:"periodeReviewTerakhir"`
+	AktifFlag              *bool   `json:"aktifFlag"`
 }
 
 // UpdateRequest is the PUT /master/portofolio/:kode request body.

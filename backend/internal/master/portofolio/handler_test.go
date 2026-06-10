@@ -330,14 +330,14 @@ func TestValidate_KodePortofolio(t *testing.T) {
 		kode           string
 		wantValidation bool
 	}{
-		{"HTC_A1", false},      // valid — passes validation; will fail at BeginTx
-		{"EKUITAS", false},     // valid
-		{"A", false},           // valid — 1 char
+		{"HTC_A1", false},            // valid — passes validation; will fail at BeginTx
+		{"EKUITAS", false},           // valid
+		{"A", false},                 // valid — 1 char
 		{"A_1_B_2_C_3_D_4_5", false}, // valid — 19 chars
-		{"lowercase", true},    // lowercase → VALIDATION_FAILED
-		{"has space", true},    // space not allowed
-		{"has-dash", true},     // dash not allowed
-		{"", true},             // empty → VALIDATION_FAILED
+		{"lowercase", true},          // lowercase → VALIDATION_FAILED
+		{"has space", true},          // space not allowed
+		{"has-dash", true},           // dash not allowed
+		{"", true},                   // empty → VALIDATION_FAILED
 	}
 	for _, tc := range cases {
 		t.Run(tc.kode, func(t *testing.T) {
@@ -408,8 +408,8 @@ func TestValidate_NamaLength(t *testing.T) {
 		nama           string
 		wantValidation bool
 	}{
-		{"Ab", true},         // too short (< 3)
-		{"Abc", false},       // exactly 3 — valid
+		{"Ab", true},                      // too short (< 3)
+		{"Abc", false},                    // exactly 3 — valid
 		{strings.Repeat("A", 200), false}, // exactly 200 — valid
 		{strings.Repeat("A", 201), true},  // too long (> 200)
 	}
@@ -444,9 +444,9 @@ func TestValidate_PeriodeReviewTerakhirFormat(t *testing.T) {
 		tanggal        *string
 		wantValidation bool
 	}{
-		{nil, false},        // optional field
-		{&valid, false},     // valid YYYY-MM-DD
-		{&invalid, true},    // wrong format
+		{nil, false},     // optional field
+		{&valid, false},  // valid YYYY-MM-DD
+		{&invalid, true}, // wrong format
 	}
 	for _, tc := range cases {
 		label := "nil"
@@ -455,10 +455,10 @@ func TestValidate_PeriodeReviewTerakhirFormat(t *testing.T) {
 		}
 		t.Run(label, func(t *testing.T) {
 			req := portofolio.CreateRequest{
-				KodePortofolio:          "TEST",
-				Nama:                    "Test Portofolio",
-				BMCategoryDefault:       "HTC",
-				PeriodeReviewTerakhir:   tc.tanggal,
+				KodePortofolio:        "TEST",
+				Nama:                  "Test Portofolio",
+				BMCategoryDefault:     "HTC",
+				PeriodeReviewTerakhir: tc.tanggal,
 			}
 			svc := portofolio.NewService(&repoAdapter{}, audit.NewWriter(nil), slog.Default())
 			ctx := auth.ContextWithClaims(context.Background(), testClaims())

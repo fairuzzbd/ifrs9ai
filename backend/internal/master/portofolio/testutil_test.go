@@ -13,7 +13,7 @@ import (
 )
 
 // repoAdapter is a flexible Repository stub for unit tests.
-// Unset sub-stubs use zero-value behaviour.
+// Unset sub-stubs use zero-value behavior.
 type repoAdapter struct {
 	stub       *stubCreate
 	getByKode  *stubGetByKode

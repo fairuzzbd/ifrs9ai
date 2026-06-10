@@ -151,6 +151,7 @@ func Idempotency(db *sql.DB) gin.HandlerFunc {
 				}
 			}
 			endpoint := method + " " + c.Request.URL.Path
+			// #nosec G115 — HTTP status is always in [100,599], fits in int16.
 			if err := saveIdempotencyKey(c.Request.Context(), db, idempKey, requestHash, responseBody, int16(status), userID, endpoint); err != nil {
 				slog.Default().WarnContext(c.Request.Context(), "idempotency: failed to save key",
 					"key", idempKey, "endpoint", endpoint, "error", err)
