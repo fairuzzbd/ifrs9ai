@@ -1,4 +1,4 @@
--- migration: 0015 counterparty_rating_schema_fix (DOWN)
+-- migration: 0021 counterparty_rating_schema_fix (DOWN)
 -- author: data-modeler
 -- description: Revert schema additions to mst.counterparty and
 --              mst.rating_history_counterparty made by 0015.

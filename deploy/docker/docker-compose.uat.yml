@@ -1,0 +1,240 @@
+# ---------------------------------------------------------------------------
+# BLIPS IFRS9 — UAT environment
+#
+# Stack LOCKED (DEC-001..006): PostgreSQL 18, Redis 7, MinIO, Go backend,
+# Next.js frontend, Keycloak 26 (DEC-006 SSO Hub SAML 2.0/OIDC + LDAP federation).
+# On-premise / single-tenant (DEC-002/DEC-008/DEC-023).
+#
+# SEKURITI:
+#   - Kredensial TIDAK di-hardcode di file ini — wajib di-set via .env.uat
+#     pada UAT host (lihat deploy/docker/.env.uat.example).
+#   - JANGAN commit file .env.uat yang berisi password sesungguhnya.
+#   - Secrets management lanjut: HashiCorp Vault Phase 2 (DEC-008).
+#
+# Jalankan dari root repo:
+#   docker compose -f deploy/docker/docker-compose.uat.yml --env-file deploy/docker/.env.uat up -d
+#
+# Port assignment UAT (offset +100 dari dev — boleh coexist di host yang sama):
+#   PostgreSQL     : 5532
+#   Redis          : 6479
+#   MinIO S3 API   : 9100
+#   MinIO Console  : 9101
+#   Keycloak HTTP  : 8181
+#   Backend API    : 8081   (port forwarded dari host 8181 → container 8081)
+#   Frontend       : 3101
+#
+# Schema migration: dikelola sepenuhnya oleh binary cmd/migrator (golang-migrate).
+# Tidak ada mount initdb.d. Jalankan migrator sebelum up backend:
+#   docker compose -f deploy/docker/docker-compose.uat.yml run --rm migrator up
+#
+# Path build context & mount bersifat relatif terhadap folder file ini (deploy/docker/),
+# sehingga root repo direferensikan sebagai ../../
+# ---------------------------------------------------------------------------
+
+name: blips-ifrs9-uat
+
+services:
+  postgres:
+    image: postgres:18
+    container_name: blips-uat-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: blips_db
+      POSTGRES_USER: blips_admin
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+    ports:
+      - "5532:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blips_admin -d blips_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    mem_limit: 2g
+    cpus: "2"
+    networks:
+      - blips
+
+  redis:
+    image: redis:7-alpine
+    container_name: blips-uat-redis
+    restart: always
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6479:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 512m
+    cpus: "0.5"
+    networks:
+      - blips
+
+  minio:
+    image: minio/minio:latest
+    container_name: blips-uat-minio
+    restart: always
+    command: server /data --console-address ":9101"
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD}"
+    ports:
+      - "9100:9000"   # S3 API
+      - "9101:9101"   # Console
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    mem_limit: 512m
+    cpus: "0.5"
+    networks:
+      - blips
+
+  # ---------------------------------------------------------------------------
+  # Keycloak — DEC-006 SSO Hub (OIDC/SAML 2.0 + LDAP federation)
+  #
+  # UAT: masih start-dev (embedded H2) tapi dengan KC_PROXY=edge karena
+  # di UAT Keycloak berada di belakang Traefik (reverse proxy).
+  # KC_HOSTNAME_STRICT=false agar realm works dengan forward host header.
+  # KC_LOG_LEVEL=warn untuk mengurangi noise di log aggregator (Loki).
+  #
+  # PENTING: KC_BOOTSTRAP_ADMIN_PASSWORD wajib via .env.uat — tidak ada default.
+  # ---------------------------------------------------------------------------
+  keycloak:
+    image: quay.io/keycloak/keycloak:26
+    container_name: blips-uat-keycloak
+    restart: always
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: "admin"
+      KC_BOOTSTRAP_ADMIN_PASSWORD: "${KC_BOOTSTRAP_ADMIN_PASSWORD}"
+      KC_HTTP_PORT: "8080"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      KC_LOG_LEVEL: "warn"
+      KC_PROXY: "edge"
+    ports:
+      - "8181:8080"
+    volumes:
+      - ../../deploy/keycloak/realm-blips-dev.json:/opt/keycloak/data/import/realm-blips-dev.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/health/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    mem_limit: 1g
+    cpus: "1"
+    networks:
+      - blips
+
+  # ---------------------------------------------------------------------------
+  # Migrator — satu-kali jalankan golang-migrate up sebelum backend start.
+  # Gunakan: docker compose -f ... run --rm migrator up
+  # Atau panggil dari entrypoint CI sebelum up layanan utama.
+  # ---------------------------------------------------------------------------
+  migrator:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile.migrator
+    container_name: blips-uat-migrator
+    restart: "no"
+    environment:
+      DATABASE_URL: "postgres://blips_admin:${POSTGRES_PASSWORD}@postgres:5432/blips_db?sslmode=disable"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - blips
+
+  backend:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    container_name: blips-uat-backend
+    restart: always
+    environment:
+      DATABASE_URL: "${DATABASE_URL:-postgres://blips_admin:${POSTGRES_PASSWORD}@postgres:5432/blips_db?sslmode=disable}"
+      REDIS_URL: "${REDIS_URL:-redis://redis:6379/0}"
+      MINIO_ENDPOINT: "${MINIO_ENDPOINT:-minio:9000}"
+      MINIO_ACCESS_KEY: "${MINIO_ROOT_USER}"
+      MINIO_SECRET_KEY: "${MINIO_ROOT_PASSWORD}"
+      MINIO_USE_SSL: "${MINIO_USE_SSL:-false}"
+      SERVER_PORT: "8081"
+      CORS_ALLOWED_ORIGINS: "${BLIPS_WEB_ORIGIN:-http://localhost:3101}"
+      JWT_ISSUER: "${JWT_ISSUER:-http://keycloak:8080/realms/blips}"
+      JWT_PUBLIC_KEY_PEM: "${BLIPS_JWT_PUBLIC_KEY_PEM}"
+      LOG_LEVEL: "${BLIPS_LOG_LEVEL:-info}"
+      TENANT_ID: "${BLIPS_TENANT_ID:-TUGURE}"
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8081/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    mem_limit: 1g
+    cpus: "1"
+    networks:
+      - blips
+
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: "${NEXT_PUBLIC_API_URL:-http://localhost:8081}"
+    container_name: blips-uat-frontend
+    restart: always
+    environment:
+      NEXT_PUBLIC_API_URL: "${NEXT_PUBLIC_API_URL:-http://localhost:8081}"
+    ports:
+      - "3101:3001"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:3001 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    mem_limit: 512m
+    cpus: "0.5"
+    networks:
+      - blips
+
+volumes:
+  pgdata:
+    name: blips-uat-pgdata
+  redisdata:
+    name: blips-uat-redisdata
+  miniodata:
+    name: blips-uat-miniodata
+
+networks:
+  blips:
+    name: blips-uat
+    driver: bridge
