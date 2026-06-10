@@ -267,6 +267,23 @@ func DefaultConfigs() map[string]*Config {
 				Approver2NotAnyPrevious:    true,
 			},
 		},
+		"PORTOFOLIO": {
+			EntityType:  "PORTOFOLIO",
+			Eyes:        4,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":  "portofolio.submit",
+				"review":  "portofolio.review",
+				"approve": "portofolio.approve",
+				"reject":  "portofolio.reject",
+			},
+			StepUpRequired: map[string]bool{"approve": false},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    false,
+			},
+		},
 		"ECL_PARAMETER": {
 			EntityType:  "ECL_PARAMETER",
 			Eyes:        6,

@@ -48,6 +48,11 @@ const (
 	CodeCoAInvalidKodeFormat Code = "COA_INVALID_KODE_FORMAT"
 	CodeCoAParentNotFound    Code = "COA_PARENT_NOT_FOUND"
 
+	// Portofolio-specific codes
+	CodePortofolioDuplicateKode     Code = "PORTOFOLIO_DUPLICATE_KODE"
+	CodePortofolioInvalidBMCategory Code = "PORTOFOLIO_INVALID_BM_CATEGORY"
+	CodePortofolioInvalidKodeFormat Code = "PORTOFOLIO_INVALID_KODE_FORMAT"
+
 	// ECL parameter module codes (mst.pd_pefindo, mst.lgd_basel, etc.) — HTTP 422.
 	CodePDMonotonicityViolated       Code = "PD_MONOTONICITY_VIOLATED"
 	CodePDPeriodOverlap              Code = "PD_PERIOD_OVERLAP"
@@ -81,8 +86,10 @@ func (c Code) HTTPStatus() int {
 		return http.StatusForbidden
 	case CodeCoADuplicateKode, CodeCoAInvalidKodeFormat, CodeCoAParentNotFound:
 		return http.StatusUnprocessableEntity
-	case CodeEntityInUse:
+	case CodeEntityInUse, CodePortofolioDuplicateKode:
 		return http.StatusConflict
+	case CodePortofolioInvalidKodeFormat, CodePortofolioInvalidBMCategory:
+		return http.StatusBadRequest
 	case CodeNotFound, CodeJobNotFound:
 		return http.StatusNotFound
 	case CodeConflict:

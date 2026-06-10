@@ -44,6 +44,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/master/matauang"
 	"blips-ifrs9.tugu-re.com/internal/master/pdpefindo"
 	"blips-ifrs9.tugu-re.com/internal/master/periodebuku"
+	"blips-ifrs9.tugu-re.com/internal/master/portofolio"
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
 )
@@ -341,6 +342,21 @@ func main() {
 	periodebuku.RegisterRoutes(v1, periodeBukuHandler)
 
 	// -----------------------------------------------------------------------
+	// Master Data — Portofolio (APP-A-MSTR-010)
+	// Routes: GET/POST /api/v1/master/portofolio
+	//         GET/PUT/DELETE /api/v1/master/portofolio/:kode
+	//         GET /api/v1/master/portofolio/export
+	//         POST /api/v1/master/portofolio/:kode/{submit,review,approve,reject}
+	//         GET  /api/v1/master/portofolio/:kode/{history,workflow}
+	// -----------------------------------------------------------------------
+	portofolioRepo := portofolio.NewDBRepository(db)
+	portofolioSvc := portofolio.NewService(portofolioRepo, auditWriter, logger)
+	portofolioHook := portofolio.NewWorkflowHook(portofolioSvc, portofolioRepo)
+	wfService.RegisterEntityHook("PORTOFOLIO", portofolioHook)
+	portofolioHandler := portofolio.NewHandler(portofolioSvc, wfHandler)
+	portofolio.RegisterRoutes(v1, portofolioHandler)
+
+	// -----------------------------------------------------------------------
 	// Master Data — LGD Basel (APP-C-MSTR-ECL-001, 6-eyes + step-up MFA)
 	// -----------------------------------------------------------------------
 	lgdBaselRepo := lgdbasel.NewDBRepository(db)
@@ -371,7 +387,7 @@ func main() {
 
 	// -----------------------------------------------------------------------
 	// Master Data — PD Pefindo (APP-A ECL Param, MSTR-PDPefindo)
-	// 6-eyes workflow: ROLE-RISK → ROLE-AKUN-CTL → ROLE-ALCO × 2
+	// 6-eyes workflow: ROLE-RISK -> ROLE-AKUN-CTL -> ROLE-ALCO x 2
 	// Both approve + approve2 require step-up MFA (DEC-027).
 	// -----------------------------------------------------------------------
 	pdPefindoRepo := pdpefindo.NewDBRepository(db)
@@ -387,7 +403,7 @@ func main() {
 	// mst.impact_mev_pd: MEV-to-PD impact per skenario GOOD/BAD per periode.
 	// NORMAL implicitly 1.0 (no row stored — OQ-1 resolved 2026-06-09).
 	// Independent from impact_pd (OQ-2 resolved 2026-06-09).
-	// 6-eyes: Maker(RISK) → Reviewer(AKUN-CTL) → Approver1(RISK) → Approver2(ALCO).
+	// 6-eyes: Maker(RISK) -> Reviewer(AKUN-CTL) -> Approver1(RISK) -> Approver2(ALCO).
 	// Both approve steps require step-up MFA (DEC-027).
 	// -----------------------------------------------------------------------
 	impactMevPdRepo := impactmevpd.NewDBRepository(db)
@@ -400,7 +416,7 @@ func main() {
 	// -----------------------------------------------------------------------
 	// Master Data — Impact PD (APP-A ECL Param, DEC-010 final FL PD multiplier)
 	// mst.impact_pd: Final FL PD multiplier per periode, applied as:
-	//   ECL_FL_skenario = ECL_skenario × impact_pd.impact_multiplier
+	//   ECL_FL_skenario = ECL_skenario x impact_pd.impact_multiplier
 	// Independent from impact_mev_pd (OQ-2). Range [0.5, 2.0] (OQ-3).
 	// 6-eyes: same config as IMPACT_MEV_PD. Both approve steps step-up MFA.
 	// ECL engine Phase 4 consumes GET /master/impact-pd/active (OQ-5).
