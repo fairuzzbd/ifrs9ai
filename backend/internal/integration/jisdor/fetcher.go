@@ -11,10 +11,10 @@
 // Manual entry via POST /api/v1/master/kurs is the primary path for Phase 3.
 //
 // When Phase 4 implements the real fetcher:
-//   1. Replace the stub body in HTTPFetcher.Fetch.
-//   2. Add real HTTP client, retry logic, and SFTP/web-scrape parsing.
-//   3. Update integration tests.
-//   4. Wire fetcher into jisdor/cron.go.
+//  1. Replace the stub body in HTTPFetcher.Fetch.
+//  2. Add real HTTP client, retry logic, and SFTP/web-scrape parsing.
+//  3. Update integration tests.
+//  4. Wire fetcher into jisdor/cron.go.
 package jisdor
 
 import (
