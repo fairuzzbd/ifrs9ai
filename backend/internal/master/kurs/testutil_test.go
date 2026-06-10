@@ -18,23 +18,23 @@ import (
 
 // repoStub is a flexible Repository stub that delegates to whichever sub-stubs are set.
 type repoStub struct {
-	createErr    error
-	getByIDVal   *kurs.Kurs
-	getByIDErr   error
-	getByDateVal *kurs.Kurs
-	findPeriode  uuid.UUID
-	findPeriodeErr error
-	findMataUang bool
+	createErr       error
+	getByIDVal      *kurs.Kurs
+	getByIDErr      error
+	getByDateVal    *kurs.Kurs
+	findPeriode     uuid.UUID
+	findPeriodeErr  error
+	findMataUang    bool
 	findMataUangErr error
-	listVal      []*kurs.Kurs
-	listErr      error
-	updateVal    *kurs.Kurs
-	updateErr    error
-	softDeleteVal *kurs.Kurs
-	softDeleteErr error
-	exportReader io.Reader
-	exportCount  int
-	exportErr    error
+	listVal         []*kurs.Kurs
+	listErr         error
+	updateVal       *kurs.Kurs
+	updateErr       error
+	softDeleteVal   *kurs.Kurs
+	softDeleteErr   error
+	exportReader    io.Reader
+	exportCount     int
+	exportErr       error
 }
 
 var _ kurs.Repository = (*repoStub)(nil)

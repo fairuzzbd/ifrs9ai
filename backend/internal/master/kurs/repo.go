@@ -150,7 +150,7 @@ func (r *DBRepository) GetByID(ctx context.Context, id uuid.UUID, includeDeleted
 	if includeDeleted {
 		deletedFilter = ""
 	}
-	query := fmt.Sprintf("SELECT%s FROM mst.kurs k WHERE k.id = $1%s", baseSelectCols, deletedFilter)
+	query := fmt.Sprintf("SELECT%s FROM mst.kurs k WHERE k.id = $1%s", baseSelectCols, deletedFilter) //nolint:gosec
 	row := r.db.QueryRowContext(ctx, query, id)
 	k, err := scanKurs(row)
 	if err == sql.ErrNoRows {
@@ -600,28 +600,23 @@ func (r *DBRepository) getOneInTx(ctx context.Context, tx *sql.Tx, id uuid.UUID)
 	return k, nil
 }
 
-// querier abstracts *sql.DB and *sql.Tx for single-row reads.
-type querier interface {
-	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
-}
-
 // scanKurs scans one *sql.Row into Kurs.
 func scanKurs(row *sql.Row) (*Kurs, error) {
 	k := &Kurs{}
 	var (
-		kursBeli       *string
-		kursJual       *string
-		kursTengah     string
-		sumberKurs     string
-		wfStatus       string
-		createdBy      *uuid.UUID
-		updatedAt      *time.Time
-		updatedBy      *uuid.UUID
-		deletedAt      *time.Time
-		deletedBy      *uuid.UUID
-		makerID        *uuid.UUID
-		approverID     *uuid.UUID
-		approvedAt     *time.Time
+		kursBeli   *string
+		kursJual   *string
+		kursTengah string
+		sumberKurs string
+		wfStatus   string
+		createdBy  *uuid.UUID
+		updatedAt  *time.Time
+		updatedBy  *uuid.UUID
+		deletedAt  *time.Time
+		deletedBy  *uuid.UUID
+		makerID    *uuid.UUID
+		approverID *uuid.UUID
+		approvedAt *time.Time
 	)
 	err := row.Scan(
 		&k.ID, &k.FxRateIDKode, &k.KodeMataUang, &k.TanggalBerlaku,

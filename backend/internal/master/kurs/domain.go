@@ -53,21 +53,6 @@ const (
 	CodeKursPeriodeNotFound = "KURS_PERIODE_NOT_FOUND"
 )
 
-// HTTPStatus maps kurs-specific codes to HTTP status codes.
-// For codes registered in domainerrors package, that package handles the mapping.
-func httpStatusForKursCode(code string) int {
-	switch code {
-	case CodeKursInvalidCurrency, CodeKursInvalidRates, CodeKursPeriodeNotFound:
-		return 422
-	case CodeKursLocked:
-		return 423
-	case CodeKursDuplicateDate:
-		return 409
-	default:
-		return 500
-	}
-}
-
 // kursError is a local DomainError alias carrying kurs-specific codes.
 func newKursErr(code string, message string, details ...domainerrors.Detail) *domainerrors.DomainError {
 	// Map kurs-specific codes to standard domain codes where appropriate.
@@ -113,10 +98,10 @@ func (s WorkflowStatus) IsEditable() bool {
 type SumberKurs string
 
 const (
-	SumberKursJISDOR     SumberKurs = "BI_JISDOR"
-	SumberKursTengah     SumberKurs = "BI_KURS_TENGAH"
-	SumberKursInternal   SumberKurs = "INTERNAL"
-	SumberKursManual     SumberKurs = "MANUAL"
+	SumberKursJISDOR   SumberKurs = "BI_JISDOR"
+	SumberKursTengah   SumberKurs = "BI_KURS_TENGAH"
+	SumberKursInternal SumberKurs = "INTERNAL"
+	SumberKursManual   SumberKurs = "MANUAL"
 )
 
 // validSumberKurs is the allowed set.

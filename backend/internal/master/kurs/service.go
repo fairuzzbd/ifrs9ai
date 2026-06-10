@@ -322,55 +322,6 @@ func (s *Service) SoftDelete(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-// ─── Workflow sync ────────────────────────────────────────────────────────────
-
-// SyncWorkflowStatus is called by the generic workflow engine after a state transition.
-// It updates mst.kurs.workflow_status to stay in sync with sys.workflow_instance.
-func (s *Service) SyncWorkflowStatus(ctx context.Context, entityID uuid.UUID, newState string, action string) error {
-	claims := auth.ClaimsFromContext(ctx)
-	actorID, err := requireActor(claims)
-	if err != nil {
-		return err
-	}
-
-	wfStatus := mapWorkflowState(newState)
-	k, err := s.repo.GetByID(ctx, entityID, false)
-	if err != nil {
-		return fmt.Errorf("service.SyncWorkflowStatus kurs load: %w", err)
-	}
-	if k == nil {
-		return domainerrors.ErrNotFound("Kurs entity")
-	}
-
-	auditAction := "KURS." + action
-
-	tx, err := s.repo.BeginTx(ctx)
-	if err != nil {
-		return fmt.Errorf("service.SyncWorkflowStatus kurs: begin tx: %w", err)
-	}
-
-	if err := s.repo.UpdateWorkflowStatus(ctx, tx, entityID, wfStatus, actorID); err != nil {
-		rollbackTx(ctx, tx, s.logger)
-		return fmt.Errorf("service.SyncWorkflowStatus kurs: %w", err)
-	}
-
-	if err := s.auditWriter.WithTx(tx).Write(ctx, audit.Event{
-		Action:     auditAction,
-		EntityType: "mst.kurs",
-		EntityID:   entityID,
-		Before:     map[string]interface{}{"workflow_status": string(k.WorkflowStatus)},
-		After:      map[string]interface{}{"workflow_status": string(wfStatus)},
-	}); err != nil {
-		rollbackTx(ctx, tx, s.logger)
-		return fmt.Errorf("service.SyncWorkflowStatus kurs: audit write: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("service.SyncWorkflowStatus kurs: commit: %w", err)
-	}
-	return nil
-}
-
 // CreateApproved creates a new Kurs record with APPROVED status and auto-sets approver fields.
 // Used by the JISDOR integration worker (trusted source — bypasses 4-eyes workflow).
 func (s *Service) CreateApproved(ctx context.Context, req CreateRequest, systemActorID uuid.UUID) (*Kurs, error) {

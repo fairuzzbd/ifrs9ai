@@ -104,16 +104,6 @@ func bodyData(w *httptest.ResponseRecorder) map[string]interface{} {
 	return nil
 }
 
-// bodyError extracts the "error" key from a JSON response body.
-func bodyError(w *httptest.ResponseRecorder) map[string]interface{} {
-	var env map[string]interface{}
-	_ = json.Unmarshal(w.Body.Bytes(), &env)
-	if e, ok := env["error"].(map[string]interface{}); ok {
-		return e
-	}
-	return nil
-}
-
 // ─── Create tests ──────────────────────────────────────────────────────────
 
 func TestCreate_Success(t *testing.T) {
