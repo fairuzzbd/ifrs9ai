@@ -533,28 +533,28 @@ func ComputeBreakdownLine(
 ) BreakdownLine {
 	hundred := decimal.NewFromInt(100)
 
-	// Step 1: NAB portion (NUMERIC(20,4) — truncate to 4dp).
+	// Step 1: NAB portion (NUMERIC(20,4) — HALF_EVEN per SoW §4 / DEC-016).
 	// NABPortionIDR = nabIDR × weightPct / 100
-	nabPortion := nabIDR.Mul(weightPct).Div(hundred).Truncate(4)
+	nabPortion := nabIDR.Mul(weightPct).Div(hundred).RoundBank(4)
 
 	// Step 2: ECL per scenario (before FL multiplier).
 	// ECL_S = NABPortionIDR × PD_S × LGD
-	eclGood := nabPortion.Mul(pd.PDGood).Mul(pd.LGD).Truncate(4)
-	eclNormal := nabPortion.Mul(pd.PDNormal).Mul(pd.LGD).Truncate(4)
-	eclBad := nabPortion.Mul(pd.PDBad).Mul(pd.LGD).Truncate(4)
+	eclGood := nabPortion.Mul(pd.PDGood).Mul(pd.LGD).RoundBank(4)
+	eclNormal := nabPortion.Mul(pd.PDNormal).Mul(pd.LGD).RoundBank(4)
+	eclBad := nabPortion.Mul(pd.PDBad).Mul(pd.LGD).RoundBank(4)
 
 	// Step 3: Apply dual FL multiplier (DEC-010).
 	// ECL_FL_S = ECL_S × FL_S
-	eclFLGood := eclGood.Mul(fl.Good).Truncate(4)
-	eclFLNormal := eclNormal.Mul(fl.Normal).Truncate(4)
-	eclFLBad := eclBad.Mul(fl.Bad).Truncate(4)
+	eclFLGood := eclGood.Mul(fl.Good).RoundBank(4)
+	eclFLNormal := eclNormal.Mul(fl.Normal).RoundBank(4)
+	eclFLBad := eclBad.Mul(fl.Bad).RoundBank(4)
 
 	// Step 4: Weighted aggregate.
 	// ECL_w = ECL_FL_Good × W_Good + ECL_FL_Normal × W_Normal + ECL_FL_Bad × W_Bad
 	eclWeighted := eclFLGood.Mul(bobot.Good).
 		Add(eclFLNormal.Mul(bobot.Normal)).
 		Add(eclFLBad.Mul(bobot.Bad)).
-		Truncate(4)
+		RoundBank(4)
 
 	return BreakdownLine{
 		AssetClass:            assetClass,

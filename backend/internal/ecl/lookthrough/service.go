@@ -623,7 +623,7 @@ func NewLookthroughService(
 //  9. Return LookthroughResult.
 //
 // AC: APP-C-LKT-001-AC01..AC10.
-func (s *Service) Compute(ctx context.Context, instrumenID, runID, periodeID uuid.UUID, evaluationDate time.Time) (*Result, error) {
+func (s *Service) Compute(ctx context.Context, instrumenID, runID, periodeID uuid.UUID, evaluationDate time.Time, actorID uuid.UUID) (*Result, error) {
 	// Step 1: Load instrument.
 	inst, err := s.instRepo.GetByID(ctx, instrumenID)
 	if err != nil {
@@ -708,12 +708,12 @@ func (s *Service) Compute(ctx context.Context, instrumenID, runID, periodeID uui
 	}
 
 	// Step 7: Sum TotalECLIDR = Σ ECLWeightedIDR.
-	// Each ECLWeightedIDR is already truncated to 4dp; sum truncated again to 4dp.
+	// Each ECLWeightedIDR is already rounded to 4dp; sum rounded again (HALF_EVEN) per SoW §4.
 	var totalECL decimal.Decimal
 	for i := range breakdown {
 		totalECL = totalECL.Add(breakdown[i].ECLWeightedIDR)
 	}
-	totalECL = totalECL.Truncate(4)
+	totalECL = totalECL.RoundBank(4)
 
 	result := &Result{
 		InstrumenID:                  instrumenID,
@@ -734,12 +734,12 @@ func (s *Service) Compute(ctx context.Context, instrumenID, runID, periodeID uui
 		}
 		defer rollbackTx(ctx, tx, s.logger)
 
-		if upsertErr := s.resultRepo.UpsertResult(ctx, tx, instrumenID, runID, *result, comp.ID, periodeID, evaluationDate, defaultTenantID); upsertErr != nil {
+		if upsertErr := s.resultRepo.UpsertResult(ctx, tx, instrumenID, runID, *result, comp.ID, periodeID, evaluationDate, actorID, defaultTenantID); upsertErr != nil {
 			return nil, fmt.Errorf("lookthrough compute upsert result: %w", upsertErr)
 		}
 
 		if auditErr := s.auditWriter.Write(ctx, tx, AuditEvent{
-			ActorUserID: instrumenID, // system actor — use instrumenID as placeholder
+			ActorUserID: actorID, // JWT actor threaded from handler (F4 fix)
 			ActorRole:   "SYSTEM",
 			Action:      "LOOKTHROUGH_ECL.COMPUTE",
 			EntityType:  lookthroughEntityType,
@@ -782,7 +782,7 @@ type BulkComputeResult struct {
 // SLA target: ≤ 2s for 500 instruments (state-machine doc §6.2).
 //
 // AC: APP-C-LKT-001-AC11..AC16.
-func (s *Service) BulkCompute(ctx context.Context, runID, periodeID uuid.UUID, evaluationDate time.Time) ([]BulkComputeResult, error) {
+func (s *Service) BulkCompute(ctx context.Context, runID, periodeID uuid.UUID, evaluationDate time.Time, actorID uuid.UUID) ([]BulkComputeResult, error) {
 	startTime := time.Now()
 
 	instruments, err := s.instRepo.BulkListReksadanaForECL(ctx, defaultTenantID)
@@ -810,7 +810,7 @@ func (s *Service) BulkCompute(ctx context.Context, runID, periodeID uuid.UUID, e
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			r, computeErr := s.Compute(ctx, instrumen.ID, runID, periodeID, evaluationDate)
+			r, computeErr := s.Compute(ctx, instrumen.ID, runID, periodeID, evaluationDate, actorID)
 			br := BulkComputeResult{InstrumenID: instrumen.ID}
 			if computeErr != nil {
 				if isDomainCode(computeErr, CodeLookthroughPOCIDeferred) {
@@ -934,8 +934,8 @@ func (s *Service) Preview(ctx context.Context, periodeID uuid.UUID, evaluationDa
 			continue
 		}
 
-		// Full preview compute (no persist — pass zero runID to skip upsert).
-		previewResult, computeErr := s.Compute(ctx, inst.ID, uuid.UUID{}, periodeID, evaluationDate)
+		// Full preview compute (no persist — pass zero runID to skip upsert; actorID irrelevant).
+		previewResult, computeErr := s.Compute(ctx, inst.ID, uuid.UUID{}, periodeID, evaluationDate, uuid.UUID{})
 		if computeErr != nil {
 			if isDomainCode(computeErr, CodeLookthroughPOCIDeferred) {
 				row.Warnings = append(row.Warnings, PreviewWarning{

@@ -248,7 +248,7 @@ func TestComputeBreakdownLine_CorpBond(t *testing.T) {
 	}
 }
 
-// TestComputeBreakdownLine_DecimalPrecision ensures truncation to 4dp at each step.
+// TestComputeBreakdownLine_DecimalPrecision ensures HALF_EVEN rounding to 4dp at each step (SoW §4 / DEC-016).
 func TestComputeBreakdownLine_DecimalPrecision(t *testing.T) {
 	t.Parallel()
 	// Create values that would produce infinite decimals if using float64.
@@ -274,12 +274,12 @@ func TestComputeBreakdownLine_DecimalPrecision(t *testing.T) {
 
 	line := ComputeBreakdownLine(AssetClassEquity, weightPct, nabIDR, pd, fl, bobot)
 
-	// Verify all output fields are capped at 4 decimal places.
+	// Verify all output fields are capped at 4 decimal places (HALF_EVEN per SoW §4).
 	checkDP := func(name string, d decimal.Decimal) {
 		// Multiply by 10^4 and check that no fractional part exists.
 		shifted := d.Mul(decimal.NewFromInt(10000))
 		if !shifted.Equal(shifted.Truncate(0)) {
-			t.Errorf("%s: value %s has more than 4 decimal places after truncation", name, d)
+			t.Errorf("%s: value %s has more than 4 decimal places after rounding", name, d)
 		}
 	}
 	checkDP("NABPortionIDR", line.NABPortionIDR)
