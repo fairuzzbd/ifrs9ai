@@ -109,6 +109,17 @@ const (
 
 	// F3: POCI instruments require credit-adjusted EIR from P4-M7 (FSD-APP-C §3.5, IFRS9 §5.5.13).
 	CodePOCIDeferredToM7 Code = "POCI_DEFERRED_TO_M7" // POCI instrument — deferred to P4-M7 (HTTP 422)
+
+	// P4-M3 LPS Aggregator codes (APP-C-LPS-001..005) — docs/state-machines/p4-m3-lps.md §4.
+	CodeLPSCoverageNoActiveParam        Code = "LPS_COVERAGE_NO_ACTIVE_PARAM"        // no APPROVED mst.lps_coverage for evalDate (HTTP 422)
+	CodeLPSOverrideInstrumenNotFound    Code = "LPS_OVERRIDE_INSTRUMEN_NOT_FOUND"    // instrumenId not found (HTTP 404)
+	CodeLPSOverrideReasonTooShort       Code = "LPS_OVERRIDE_REASON_TOO_SHORT"       // exclusion_reason < 30 chars (HTTP 422)
+	CodeLPSOverrideInvalidTransition    Code = "LPS_OVERRIDE_INVALID_TRANSITION"     // invalid workflow state transition (HTTP 422)
+	CodeLPSOverrideExpired              Code = "LPS_OVERRIDE_EXPIRED"                // override effectiveTo already passed (HTTP 410)
+	CodeLPSOverrideSoDViolation         Code = "LPS_OVERRIDE_SOD_VIOLATION"          // approver == maker (HTTP 403)
+	CodeLPSOverridePeriodeInvalid       Code = "LPS_OVERRIDE_PERIODE_INVALID"        // effectiveFrom > effectiveTo (HTTP 422)
+	CodeLPSAggregateInstrumenNotDeposito Code = "LPS_AGGREGATE_INSTRUMEN_NOT_DEPOSITO" // instrument not DEPOSITO type (HTTP 422)
+	CodeLPSAggregateBulkTooLarge        Code = "LPS_AGGREGATE_BULK_TOO_LARGE"        // instrument scope > 50000 (HTTP 413)
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
@@ -166,8 +177,18 @@ func (c Code) HTTPStatus() int {
 		return http.StatusUnprocessableEntity
 	case CodeEADInstrumenNotFound:
 		return http.StatusNotFound
-	case CodeHelpersBulkTooLarge:
+	case CodeHelpersBulkTooLarge, CodeLPSAggregateBulkTooLarge:
 		return http.StatusRequestEntityTooLarge
+	case CodeLPSOverrideExpired:
+		return http.StatusGone // 410
+	case CodeLPSOverrideSoDViolation:
+		return http.StatusForbidden
+	case CodeLPSOverrideInstrumenNotFound:
+		return http.StatusNotFound
+	case CodeLPSCoverageNoActiveParam, CodeLPSOverrideReasonTooShort,
+		CodeLPSOverrideInvalidTransition, CodeLPSOverridePeriodeInvalid,
+		CodeLPSAggregateInstrumenNotDeposito:
+		return http.StatusUnprocessableEntity
 	case CodePeriodeClosed, CodeECLParamFrozen:
 		return 423 // Locked
 	case CodeRateLimited:
