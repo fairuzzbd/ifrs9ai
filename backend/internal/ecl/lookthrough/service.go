@@ -387,8 +387,13 @@ func (s *CompositionService) Approve(ctx context.Context, req WorkflowActionRequ
 	defer rollbackTx(ctx, tx, s.logger)
 
 	// If amendment: supersede old composition first (atomic in same tx).
+	// effective_to for the old row = new.effective_from - 1 day, so the two date
+	// ranges are non-overlapping: [old_from, new_from-1] and [new_from, infinity].
+	// Passing comp.EffectiveFrom directly would cause a 1-day overlap where both
+	// the old SUPERSEDED row and the new APPROVED_ACTIVE row share the same date.
 	if supersedesID != nil {
-		if err := s.compRepo.SupersedeOld(ctx, tx, *supersedesID, comp.EffectiveFrom, req.ActorID); err != nil {
+		supersedeDate := comp.EffectiveFrom.AddDate(0, 0, -1)
+		if err := s.compRepo.SupersedeOld(ctx, tx, *supersedesID, supersedeDate, req.ActorID); err != nil {
 			return nil, fmt.Errorf("lookthrough approve supersede old: %w", err)
 		}
 	}

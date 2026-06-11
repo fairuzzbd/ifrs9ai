@@ -48,8 +48,9 @@ type mockFundCompositionRepo struct {
 	updateCalled bool
 	updateErr    error
 	// SupersedeOld tracking
-	supersedeCalled bool
-	supersedeErr    error
+	supersedeCalled    bool
+	supersedeErr       error
+	supersedeDateCalled time.Time // captures the supersedeDate argument for assertion
 	// GetInstrumenTipeAndKlasifikasi response
 	tipe        string
 	klasifikasi string
@@ -91,8 +92,9 @@ func (m *mockFundCompositionRepo) UpdateWorkflowStatus(_ context.Context, _ *sql
 	return m.updateErr
 }
 
-func (m *mockFundCompositionRepo) SupersedeOld(_ context.Context, _ *sql.Tx, _ uuid.UUID, _ time.Time, _ uuid.UUID) error {
+func (m *mockFundCompositionRepo) SupersedeOld(_ context.Context, _ *sql.Tx, _ uuid.UUID, d time.Time, _ uuid.UUID) error {
 	m.supersedeCalled = true
+	m.supersedeDateCalled = d
 	return m.supersedeErr
 }
 
@@ -1500,5 +1502,158 @@ func TestLookthroughService_BulkCompute_AllFVTPL(t *testing.T) {
 	}
 	if !results[0].Result.FVTPLSkipped {
 		t.Error("expected FVTPLSkipped=true for FVTPL instrument")
+	}
+}
+
+// ─── Issue #54: SupersedeOld effective_to = new.effective_from - 1 day ────────
+
+// TestApproveComposition_SupersedeOld_EffectiveToIsNewMinus1Day verifies that when
+// Approve is called with a non-nil supersedesID, the date passed to SupersedeOld equals
+// comp.EffectiveFrom - 1 day (not comp.EffectiveFrom itself).
+//
+// Regression guard for the 1-day overlap bug fixed in Issue #54:
+// Previously: supersedeDate == comp.EffectiveFrom (both old SUPERSEDED and new APPROVED_ACTIVE
+// shared the same effective_from date → overlap).
+// Fixed:      supersedeDate == comp.EffectiveFrom.AddDate(0, 0, -1) → non-overlapping.
+func TestApproveComposition_SupersedeOld_EffectiveToIsNewMinus1Day(t *testing.T) {
+	t.Parallel()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectCommit()
+
+	makerID := uuid.New()
+	reviewerID := uuid.New()
+	approverID := uuid.New()
+	compositionID := uuid.New()
+	oldCompositionID := uuid.New()
+
+	// new composition has effective_from = 2026-07-01
+	newEffectiveFrom := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	expectedSupersedeDate := time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC) // new_from - 1 day
+
+	compRepo := &mockFundCompositionRepo{
+		composition: &FundComposition{
+			ID:             compositionID,
+			MakerID:        makerID,
+			ReviewerID:     &reviewerID,
+			WorkflowStatus: WorkflowStatusPendingApproval,
+			EffectiveFrom:  newEffectiveFrom,
+		},
+	}
+	svc := &CompositionService{
+		db:          db,
+		compRepo:    compRepo,
+		auditWriter: &mockAuditWriter{},
+		logger:      nil,
+	}
+
+	_, err = svc.Approve(context.Background(), WorkflowActionRequest{
+		CompositionID: compositionID,
+		ActorID:       approverID,
+		ActorRole:     "ROLE-ALCO",
+		Comment:       "Amendment approved",
+	}, &oldCompositionID)
+	if err != nil {
+		t.Fatalf("Approve error: %v", err)
+	}
+
+	if !compRepo.supersedeCalled {
+		t.Fatal("expected SupersedeOld to be called for amendment path")
+	}
+	if !compRepo.supersedeDateCalled.Equal(expectedSupersedeDate) {
+		t.Errorf(
+			"SupersedeOld date: expected %s (new_from - 1 day), got %s — overlap bug #54",
+			expectedSupersedeDate.Format("2006-01-02"),
+			compRepo.supersedeDateCalled.Format("2006-01-02"),
+		)
+	}
+}
+
+// TestComposition_NoEffectiveDateOverlap_AfterSupersede verifies that after Approve
+// with an amendment, the date ranges [old_from, supersedeDate] and [new_from, infinity]
+// are non-overlapping and contiguous (supersedeDate + 1 day == new_from).
+//
+// Property: effective_to_old + 1 day == effective_from_new
+func TestComposition_NoEffectiveDateOverlap_AfterSupersede(t *testing.T) {
+	t.Parallel()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectCommit()
+
+	makerID := uuid.New()
+	reviewerID := uuid.New()
+	approverID := uuid.New()
+	compositionID := uuid.New()
+	oldCompositionID := uuid.New()
+
+	// Simulate: old version valid from 2026-01-01.
+	// New version starts 2026-04-01.
+	// Old version should end 2026-03-31 (= 2026-04-01 - 1 day).
+	newEffectiveFrom := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	expectedOldEffectiveTo := newEffectiveFrom.AddDate(0, 0, -1) // 2026-03-31
+
+	compRepo := &mockFundCompositionRepo{
+		composition: &FundComposition{
+			ID:             compositionID,
+			MakerID:        makerID,
+			ReviewerID:     &reviewerID,
+			WorkflowStatus: WorkflowStatusPendingApproval,
+			EffectiveFrom:  newEffectiveFrom,
+			EffectiveTo:    time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC),
+		},
+	}
+	svc := &CompositionService{
+		db:          db,
+		compRepo:    compRepo,
+		auditWriter: &mockAuditWriter{},
+		logger:      nil,
+	}
+
+	_, err = svc.Approve(context.Background(), WorkflowActionRequest{
+		CompositionID: compositionID,
+		ActorID:       approverID,
+		ActorRole:     "ROLE-ALCO",
+		Comment:       "Amendment",
+	}, &oldCompositionID)
+	if err != nil {
+		t.Fatalf("Approve error: %v", err)
+	}
+
+	gotSupersedeDate := compRepo.supersedeDateCalled
+
+	// Range check: [old_from, supersedeDate] and [new_from, ∞] must not overlap.
+	// Overlap condition: supersedeDate >= newEffectiveFrom.
+	if !gotSupersedeDate.Before(newEffectiveFrom) {
+		t.Errorf(
+			"date overlap detected: old effective_to (%s) is not strictly before new effective_from (%s)",
+			gotSupersedeDate.Format("2006-01-02"),
+			newEffectiveFrom.Format("2006-01-02"),
+		)
+	}
+	// Contiguity check: supersedeDate + 1 day == newEffectiveFrom (no gap).
+	if !gotSupersedeDate.AddDate(0, 0, 1).Equal(newEffectiveFrom) {
+		t.Errorf(
+			"date gap detected: old effective_to (%s) + 1 day != new effective_from (%s)",
+			gotSupersedeDate.Format("2006-01-02"),
+			newEffectiveFrom.Format("2006-01-02"),
+		)
+	}
+	// Explicit equality check against expected value.
+	if !gotSupersedeDate.Equal(expectedOldEffectiveTo) {
+		t.Errorf(
+			"supersedeDate: expected %s, got %s",
+			expectedOldEffectiveTo.Format("2006-01-02"),
+			gotSupersedeDate.Format("2006-01-02"),
+		)
 	}
 }
