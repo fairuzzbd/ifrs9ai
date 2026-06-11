@@ -1,0 +1,2422 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-C EIR Newton-Raphson Solver + Amortisasi Schedule (P4-M5)
+  version: "1.0.0"
+  description: |
+    EIR computation (Newton-Raphson IRR), amortisasi schedule generation + lookup,
+    amendment re-estimation workflow (4-eyes), dan bulk re-compute batch job.
+
+    Story set: APP-C-EIR-001..005
+    FSD: FSD-APP-C-ECL-EIR-v1.0.docx §4 (EIR + amortisasi schedule, amendment re-estimation)
+    Decisions:
+    - DEC-013: EIR Newton-Raphson, tolerance 1e-10, max 100 iter, presisi 8 desimal
+    - DEC-016: EIR NUMERIC(10,8), IDR NUMERIC(20,4), no float64
+    - DEC-017: 4-eyes untuk amendment (ROLE-AKUN → ROLE-RISK → ROLE-ALCO)
+    - DEC-018: ecl.* no hard delete, schedule rows immutable (amounts tidak boleh di-UPDATE)
+
+    ## Scheme versioning (penting untuk implementasi)
+    - Rows aktif di ecl.eir_amortization_schedule = recomputed_from_seq IS NULL
+    - Rows superseded = recomputed_from_seq = {periode_seq pertama schedule baru}
+    - Saat amendment approve: UPDATE baris lama SET recomputed_from_seq = X
+      (hanya kolom tracking; opening_carrying, pendapatan_bunga_eir, dst TIDAK BOLEH DIUBAH),
+      INSERT baris baru dengan recomputed_from_seq = NULL
+
+    ## Permission model
+    - eir.compute            — ROLE-RISK (manual trigger), System worker (auto)
+    - eir.preview            — ROLE-RISK, ROLE-AKUN, ROLE-AUDIT
+    - eir.amend.propose      — ROLE-AKUN (maker)
+    - eir.amend.review       — ROLE-RISK (reviewer, ≠ maker)
+    - eir.amend.approve      — ROLE-ALCO (approver, step-up MFA per DEC-027)
+    - eir.bulk_recompute     — ROLE-RISK, System
+
+    ## Audit events
+    EIR.COMPUTE, EIR.COMPUTE_FAILED, EIR.SCHEDULE_GENERATED,
+    EIR.SCHEDULE_EXPORT, EIR.AMEND_PROPOSED, EIR.AMEND_REVIEWED,
+    EIR.AMEND_APPROVED, EIR.AMEND_REJECTED, EIR.REESTIMATION_FAILED,
+    EIR.BULK_RECOMPUTE, EIR.BULK_RECOMPUTE_CANCELLED
+
+    ## Performance SLA
+    - Single compute: ≤ 200ms P99
+    - Bulk 1000 instruments: ≤ 5 detik (compute + validation only, no insert)
+
+servers:
+  - url: /api/v1
+    description: BLIPS REST API v1
+
+tags:
+  - name: eir-compute
+    description: EIR computation (Newton-Raphson IRR solver)
+  - name: eir-schedule
+    description: Amortisasi schedule generation, lookup, dan history
+  - name: eir-amendment
+    description: Amendment re-estimation workflow — 4-eyes (ROLE-AKUN → ROLE-RISK → ROLE-ALCO)
+  - name: eir-bulk
+    description: Bulk EIR re-compute batch job (drift detection, report-only)
+
+paths:
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/eir/compute — single EIR compute (Story 1)
+  # ---------------------------------------------------------------------------
+  /ecl/eir/compute:
+    post:
+      operationId: computeEIR
+      summary: Compute EIR menggunakan Newton-Raphson IRR solver
+      description: |
+        Menghitung EIR dari cashflow projection instrumen menggunakan Newton-Raphson.
+        Synchronous — tidak melalui Asynq (SLA: ≤ 200ms P99).
+
+        Permission: eir.compute
+        Roles: ROLE-RISK (manual trigger); System (auto saat instrumen AKTIF + eir_awal IS NULL)
+
+        Perilaku berdasarkan request:
+        - persistResult=false (default): hanya compute, tidak simpan ke DB (preview mode)
+        - persistResult=true: simpan eir_awal ke mst.instrumen, simpan metadata
+
+        FVTPL dan FVOCI_ELECTION → tolak 422 EIR_INSTRUMEN_FVTPL_NO_EIR.
+        eir_awal sudah terisi tanpa forceRecompute=true → tolak 409 EIR_ALREADY_COMPUTED.
+
+        POCI: jika pociMode=true, cashflow harus sudah PD-adjusted (caller responsibility).
+        Response akan berisi eirType="CREDIT_ADJUSTED". POCI full logic deferred to M7;
+        M5 hanya menerima PD-adjusted cashflow dan menandai flag di response.
+        Jika instrumen POCI tapi cashflow tidak di-adjust → 422 EIR_POCI_REQUIRES_PD_ADJUSTED_CF.
+
+        Idempotency-Key wajib untuk persistResult=true.
+        Audit event EIR.COMPUTE ditulis in-transaction saat persistResult=true.
+        Audit event EIR.COMPUTE_FAILED ditulis jika solver gagal konvergen.
+      tags: [eir-compute]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EIRComputeRequest"
+            example:
+              instrumenId: "550e8400-e29b-41d4-a716-446655440010"
+              cashflowProjection:
+                - date: "2026-01-01"
+                  amountIdr: -1005000000.0000
+                - date: "2026-07-01"
+                  amountIdr: 40000000.0000
+                - date: "2027-01-01"
+                  amountIdr: 40000000.0000
+                - date: "2031-01-01"
+                  amountIdr: 1040000000.0000
+              initialPrincipalIdr: 1005000000.0000
+              couponRate: 0.04000000
+              persistResult: false
+              pociMode: false
+      responses:
+        "200":
+          description: EIR berhasil di-compute
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/EIRComputeResponse"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  instrumenId: "550e8400-e29b-41d4-a716-446655440010"
+                  eirPerPeriod: "0.04200000"
+                  eirAnnualEquivalent: "0.08570240"
+                  iterationsUsed: 7
+                  convergenceResidual: "0.0000000001"
+                  eirType: "STANDARD"
+                  persisted: false
+                  computedAt: "2026-06-12T10:30:00+07:00"
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Instrumen tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: EIR_INSTRUMEN_NOT_FOUND
+                  message: "Instrumen tidak ditemukan"
+                  details: []
+                  traceId: "01HXY..."
+        "409":
+          description: EIR sudah dihitung sebelumnya
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: EIR_ALREADY_COMPUTED
+                  message: "EIR sudah dihitung. Gunakan amendment flow untuk re-estimasi."
+                  details: []
+                  traceId: "01HXY..."
+        "422":
+          description: |
+            Domain validation gagal — klasifikasi FVTPL, cashflow invalid,
+            sign mismatch, POCI tanpa PD-adjusted CF, atau non-convergence.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                fvtplNoEir:
+                  summary: Instrumen FVTPL tidak menggunakan EIR
+                  value:
+                    error:
+                      code: EIR_INSTRUMEN_FVTPL_NO_EIR
+                      message: "EIR tidak berlaku untuk instrumen FVTPL. Hanya AC dan FVOCI debt yang menggunakan amortized cost."
+                      details: []
+                      traceId: "01HXY..."
+                nonConvergent:
+                  summary: Newton-Raphson gagal konvergen
+                  value:
+                    error:
+                      code: EIR_NON_CONVERGENT
+                      message: "Newton-Raphson tidak konvergen dalam 100 iterasi. Periksa cashflow projection."
+                      details:
+                        - field: "body.cashflowProjection"
+                          rule: "convergence"
+                          message: "Residual terakhir: 0.0001234567 melebihi tolerance 1e-10"
+                      traceId: "01HXY..."
+                cashflowInvalid:
+                  summary: Cashflow projection kosong atau null
+                  value:
+                    error:
+                      code: EIR_CASHFLOW_INVALID
+                      message: "cashflowProjection tidak boleh kosong"
+                      details:
+                        - field: "body.cashflowProjection"
+                          rule: "required"
+                          message: "Minimal 2 cashflow items (CF_0 negatif + setidaknya 1 inflow)"
+                      traceId: "01HXY..."
+                signMismatch:
+                  summary: CF_0 harus negatif (outflow)
+                  value:
+                    error:
+                      code: EIR_CASHFLOW_SIGN_MISMATCH
+                      message: "cashflowProjection[0].amountIdr harus negatif (initial outflow)"
+                      details:
+                        - field: "body.cashflowProjection[0].amountIdr"
+                          rule: "sign_negative"
+                          message: "CF_0 harus merepresentasikan initial investment (negatif)"
+                      traceId: "01HXY..."
+                pociNoPd:
+                  summary: POCI tanpa PD-adjusted cashflow
+                  value:
+                    error:
+                      code: EIR_POCI_REQUIRES_PD_ADJUSTED_CF
+                      message: "Instrumen POCI membutuhkan cashflow yang sudah PD-adjusted. Set pociMode=true dan sediakan cashflow PD-adjusted."
+                      details: []
+                      traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/eir/generate-schedule — generate + persist amortisasi schedule (Story 2)
+  # ---------------------------------------------------------------------------
+  /ecl/eir/generate-schedule:
+    post:
+      operationId: generateEIRSchedule
+      summary: Generate dan persist seluruh amortisasi schedule untuk instrumen
+      description: |
+        Membangun schedule amortisasi dari origination sampai jatuh tempo berdasarkan
+        EIR yang sudah di-compute, lalu INSERT ke ecl.eir_amortization_schedule.
+
+        Permission: eir.compute
+        Roles: ROLE-RISK; System (auto-invoked setelah compute sukses)
+
+        Pre-conditions:
+        - mst.instrumen.eir_awal harus sudah terisi (compute EIR lebih dulu)
+        - Tidak ada rows aktif di ecl.eir_amortization_schedule untuk instrumen ini
+          (recomputed_from_seq IS NULL); jika ada → 409 EIR_SCHEDULE_DUPLICATE
+          (kecuali forceRegenerate=true — HANYA untuk initial origination tanpa schedule;
+          amendment path menggunakan endpoint amendment workflow, bukan endpoint ini)
+
+        Schedule formula per periode t:
+          pendapatan_bunga_eir_t = opening_carrying_{t-1} × eir_per_periode
+          amortisasi_p_d_t       = pendapatan_bunga_eir_t − cash_inflow_t
+          closing_carrying_t     = opening_carrying_{t-1} + amortisasi_p_d_t − pelunasan_pokok_t
+        closing_carrying pada periode terakhir harus ≈ 0 (toleransi HALF_EVEN ≤ IDR 1).
+
+        Semua amounts menggunakan NUMERIC(20,4); no float64 path.
+        Semua rows: status_posting = 'PROYEKSI', recomputed_from_seq = NULL.
+        Immutability: DB trigger menolak UPDATE pada amounts finansial setelah INSERT.
+
+        Idempotency-Key wajib.
+        Audit event: EIR.SCHEDULE_GENERATED ditulis in-transaction.
+      tags: [eir-schedule]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EIRGenerateScheduleRequest"
+            example:
+              instrumenId: "550e8400-e29b-41d4-a716-446655440010"
+              cashflowProjection:
+                - date: "2026-01-01"
+                  amountIdr: -1005000000.0000
+                - date: "2026-07-01"
+                  amountIdr: 40000000.0000
+                - date: "2027-01-01"
+                  amountIdr: 40000000.0000
+                - date: "2031-01-01"
+                  amountIdr: 1040000000.0000
+              initialPrincipalIdr: 1005000000.0000
+              couponRate: 0.04000000
+              forceRegenerate: false
+      responses:
+        "201":
+          description: Schedule berhasil di-generate dan di-persist
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/EIRScheduleGenerateResponse"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  instrumenId: "550e8400-e29b-41d4-a716-446655440010"
+                  scheduleSeq: "01JXYZ-SCHED-001"
+                  totalRows: 10
+                  eirPerPeriod: "0.04200000"
+                  openingCarryingFirst: "1005000000.0000"
+                  closingCarryingLast: "0.0000"
+                  closingRoundingDelta: "0.0001"
+                  generatedAt: "2026-06-12T10:30:00+07:00"
+                  schedule:
+                    - periodeSeq: 1
+                      tanggalPosting: "2026-07-01"
+                      openingCarryingIdr: "1005000000.0000"
+                      cashInflowIdr: "40000000.0000"
+                      pendapatanBungaEirIdr: "42210000.0000"
+                      amortisasiPdIdr: "2210000.0000"
+                      pelunasanPokokIdr: "0.0000"
+                      closingCarryingIdr: "1007210000.0000"
+                      eirPeriode: "0.04200000"
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Instrumen tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: EIR_INSTRUMEN_NOT_FOUND
+                  message: "Instrumen tidak ditemukan"
+                  details: []
+                  traceId: "01HXY..."
+        "409":
+          description: Schedule sudah ada untuk instrumen ini
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: EIR_DUPLICATE_SCHEDULE_VERSION
+                  message: "Instrumen OBL-2026-00001 sudah punya schedule aktif. Gunakan amendment workflow untuk re-estimasi."
+                  details: []
+                  traceId: "01HXY..."
+        "422":
+          description: EIR belum dihitung atau domain validation gagal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: EIR_NOT_YET_COMPUTED
+                  message: "mst.instrumen.eir_awal IS NULL. Compute EIR terlebih dahulu sebelum generate schedule."
+                  details:
+                    - field: "instrumen.eirAwal"
+                      rule: "required"
+                      message: "Nilai EIR belum tersedia"
+                  traceId: "01HXY..."
+        "423":
+          $ref: "#/components/responses/PeriodeClosed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/eir/schedule/{instrumenId} — lookup schedule row per periode (Story 3)
+  # ---------------------------------------------------------------------------
+  /ecl/eir/schedule/{instrumenId}:
+    get:
+      operationId: getEIRScheduleForPeriode
+      summary: Baca schedule row aktif untuk instrumen pada periode tertentu
+      description: |
+        Kembalikan row(s) aktif di ecl.eir_amortization_schedule yang tanggal_posting-nya
+        jatuh dalam range periode yang diminta. Rows aktif = recomputed_from_seq IS NULL.
+
+        Primary consumer: ECL calc engine (read pendapatan_bunga_eir untuk EAD accrued interest).
+        Secondary: ROLE-RISK preview via UI; ROLE-AUDIT read-only.
+
+        Permission: eir.preview
+        Roles: ROLE-RISK, ROLE-AKUN, ROLE-AUDIT
+
+        Instrumen belum punya schedule → 200 dengan data=[] dan warning message (bukan 4xx).
+        FVTPL instrumen → 200 dengan data=[] dan info "EIR tidak berlaku untuk FVTPL".
+
+        include_superseded=true hanya boleh untuk ROLE-RISK dan ROLE-AUDIT.
+        ROLE-AKUN yang coba include_superseded=true → 403 FORBIDDEN.
+
+        Audit: read tidak di-audit. Export di-audit dengan EIR.SCHEDULE_EXPORT.
+      tags: [eir-schedule]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/instrumenIdPath"
+        - name: periode
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+            description: "Format YYYY-MM-DD. Cari row yang tanggal_posting-nya dalam bulan ini."
+          example: "2026-06-01"
+        - name: periode_from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+          description: "Tanggal awal range (inklusif). Pakai bersama periode_to."
+        - name: periode_to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+          description: "Tanggal akhir range (inklusif). Pakai bersama periode_from."
+        - name: include_superseded
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: |
+            true = tampilkan juga rows superseded (recomputed_from_seq IS NOT NULL).
+            Hanya ROLE-RISK dan ROLE-AUDIT. ROLE-AKUN → 403 jika diset true.
+      responses:
+        "200":
+          description: |
+            Schedule rows aktif. data=[] jika belum ada schedule (graceful, bukan 4xx).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/EIRScheduleRow"
+                  warning:
+                    type: string
+                    nullable: true
+                    description: |
+                      Populated jika instrumen belum punya schedule atau tidak menggunakan EIR.
+                      Contoh: "Instrumen ini belum punya schedule EIR. ECL engine akan menggunakan
+                      outstanding saldo sebagai carrying."
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  - id: "550e8400-0000-0001-0001-000000000005"
+                    scheduleIdKode: "SCHED-001-S05"
+                    instrumenId: "550e8400-e29b-41d4-a716-446655440010"
+                    periodeSeq: 5
+                    tanggalPosting: "2028-07-01"
+                    openingCarryingIdr: "1012800000.0000"
+                    cashInflowIdr: "40000000.0000"
+                    pendapatanBungaEirIdr: "42537600.0000"
+                    amortisasiPdIdr: "2537600.0000"
+                    pelunasanPokokIdr: "0.0000"
+                    closingCarryingIdr: "1015337600.0000"
+                    eirPeriode: "0.04200000"
+                    stageSaatPosting: "STAGE_1"
+                    statusPosting: "PROYEKSI"
+                    recomputedFromSeq: null
+                    createdAt: "2026-06-12T10:30:00+07:00"
+                warning: null
+                meta:
+                  traceId: "01HXY..."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Instrumen tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: EIR_INSTRUMEN_NOT_FOUND
+                  message: "Instrumen tidak ditemukan"
+                  details: []
+                  traceId: "01HXY..."
+        "422":
+          description: Periode out of range untuk instrumen ini
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: EIR_SCHEDULE_PERIODE_OUT_OF_RANGE
+                  message: "Periode 2035-01-01 melewati tanggal jatuh tempo instrumen (2031-01-01)"
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/eir/schedule/{instrumenId}/full — DataTable list semua rows (Story 3, UX §1)
+  # ---------------------------------------------------------------------------
+  /ecl/eir/schedule/{instrumenId}/full:
+    get:
+      operationId: listEIRScheduleFull
+      summary: List lengkap amortisasi schedule dengan sort+paging+filter+export (DataTable)
+      description: |
+        Full DataTable view dari ecl.eir_amortization_schedule untuk satu instrumen.
+        Cursor pagination, sort, filter, export CSV/XLSX (UX patterns §1).
+
+        Permission: eir.preview
+        Roles: ROLE-RISK, ROLE-AKUN, ROLE-AUDIT
+
+        Allowed sort columns: periode_seq, tanggal_posting, opening_carrying,
+                              closing_carrying, pendapatan_bunga_eir, amortisasi_p_d, eir_periode
+        Allowed filter columns: status_posting, periode_seq (gte/lte/between),
+                                tanggal_posting (gte/lte/between),
+                                recomputed_from_seq (is_null / is_not_null)
+
+        Export:
+        - Dataset per instrumen umumnya < 10k rows → inline export (bukan async).
+        - Format: CSV (UTF-8 with BOM, header Bahasa Indonesia), XLSX (header bold + freeze).
+        - Filter aktif dihormati saat export.
+        - Audit event EIR.SCHEDULE_EXPORT saat export.
+
+        Default filter: recomputed_from_seq IS NULL (hanya rows aktif).
+        Untuk lihat semua versi, gunakan endpoint /history.
+      tags: [eir-schedule]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/instrumenIdPath"
+        - $ref: "#/components/parameters/cursor"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/sortParam"
+        - $ref: "#/components/parameters/searchParam"
+        - name: filter[status_posting]
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [PROYEKSI, POSTED, REVERSED, RECOMPUTED]
+          description: Filter by status posting
+        - name: filter[periode_seq]
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Format: gte:1 atau between:1,10"
+        - name: filter[tanggal_posting]
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Format: gte:2026-06-01 atau between:2026-01-01,2026-12-31"
+        - name: filter[recomputed_from_seq]
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [is_null, is_not_null]
+          description: "is_null = hanya rows aktif (default), is_not_null = hanya superseded"
+        - name: export
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [csv, xlsx]
+          description: Jika diset, response adalah file download
+      responses:
+        "200":
+          description: |
+            List schedule rows (JSON) atau file download jika ?export=csv|xlsx.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EIRScheduleListResponse"
+            text/csv:
+              schema:
+                type: string
+                format: binary
+                description: "UTF-8 with BOM. Header row Bahasa Indonesia."
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+                description: "XLSX, header bold + freeze row, money #,##0.0000."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/eir/schedule/{instrumenId}/history — semua versi schedule (Story 3)
+  # ---------------------------------------------------------------------------
+  /ecl/eir/schedule/{instrumenId}/history:
+    get:
+      operationId: getEIRScheduleHistory
+      summary: Riwayat semua versi schedule termasuk superseded rows
+      description: |
+        Kembalikan seluruh rows di ecl.eir_amortization_schedule untuk instrumen,
+        termasuk rows lama yang sudah di-supersede (recomputed_from_seq IS NOT NULL).
+
+        Permission: eir.preview
+        Roles: ROLE-RISK, ROLE-AUDIT (ROLE-AKUN tidak punya akses ke superseded rows)
+
+        Dipakai untuk audit trail setelah amendment.
+        Cursor pagination, default sort: periode_seq ASC, dengan secondary sort created_at DESC
+        untuk membedakan rows aktif vs superseded pada periode_seq yang sama.
+
+        Allowed filter: recomputed_from_seq (is_null/is_not_null/specific int value)
+      tags: [eir-schedule]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/instrumenIdPath"
+        - $ref: "#/components/parameters/cursor"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/sortParam"
+        - name: filter[recomputed_from_seq]
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            is_null = hanya aktif; is_not_null = hanya superseded; angka = seq tertentu.
+            Default: tampilkan semua (aktif + superseded).
+        - name: export
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [csv, xlsx]
+      responses:
+        "200":
+          description: Riwayat lengkap semua versi schedule
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EIRScheduleListResponse"
+            text/csv:
+              schema:
+                type: string
+                format: binary
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/eir/amendments — propose amendment re-estimation (Story 4, ROLE-AKUN maker)
+  # ---------------------------------------------------------------------------
+  /ecl/eir/amendments:
+    post:
+      operationId: proposeEIRAmendment
+      summary: ROLE-AKUN mengajukan proposal amendment re-estimation EIR
+      description: |
+        Maker (ROLE-AKUN) membuat proposal amandemen kontrak yang membutuhkan
+        re-estimasi EIR. Membuat row di ecl.eir_reestimation_log dengan
+        workflow_status = 'DRAFT'.
+
+        Permission: eir.amend.propose
+        Role: ROLE-AKUN (maker)
+
+        Validasi:
+        - instrumenId harus AKTIF dan eir_awal sudah terisi
+        - amendmentDate tidak boleh jatuh dalam periode hard-closed
+        - dokumenPendukungId wajib (harus ada di doc.upload)
+        - revisedCashflows tidak boleh kosong; CF_0 harus negatif
+        - Tidak boleh ada proposal DRAFT/PENDING_REVIEW/PENDING_APPROVAL untuk
+          instrumen yang sama (satu proposal aktif per instrumen)
+
+        SoD: maker_id diambil dari JWT. Reviewer dan approver harus berbeda.
+        Idempotency-Key wajib.
+        Audit event: EIR.AMEND_PROPOSED
+      tags: [eir-amendment]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EIRAmendmentProposeRequest"
+            example:
+              instrumenId: "550e8400-e29b-41d4-a716-446655440010"
+              amendmentDate: "2028-01-01"
+              revisedCashflows:
+                - date: "2028-01-01"
+                  amountIdr: -1015337600.0000
+                - date: "2028-07-01"
+                  amountIdr: 45602592.0000
+                - date: "2031-01-01"
+                  amountIdr: 1045602592.0000
+              alasan: "Amandemen kupon dari 8% ke 9% sesuai addendum kontrak tanggal 2027-12-15"
+              dokumenPendukungId: "doc-uuid-12345"
+      responses:
+        "201":
+          description: Proposal amendment berhasil dibuat, menunggu review
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/EIRAmendmentProposal"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Instrumen atau dokumen tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: EIR_INSTRUMEN_NOT_FOUND
+                  message: "Instrumen tidak ditemukan atau sudah dihapus"
+                  details: []
+                  traceId: "01HXY..."
+        "409":
+          description: Sudah ada proposal aktif untuk instrumen ini
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: CONFLICT
+                  message: "Sudah ada proposal amendment aktif untuk instrumen ini. Selesaikan atau reject proposal sebelumnya."
+                  details: []
+                  traceId: "01HXY..."
+        "422":
+          description: Domain validation gagal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                cashflowInvalid:
+                  summary: Cashflow kosong
+                  value:
+                    error:
+                      code: EIR_CASHFLOW_INVALID
+                      message: "revisedCashflows tidak boleh kosong"
+                      details: []
+                      traceId: "01HXY..."
+                missingDocument:
+                  summary: Dokumen pendukung wajib
+                  value:
+                    error:
+                      code: VALIDATION_FAILED
+                      message: "dokumen_pendukung_id wajib diisi untuk amendment proposal"
+                      details:
+                        - field: "body.dokumenPendukungId"
+                          rule: "required"
+                          message: "Dokumen pendukung (addendum kontrak) wajib dilampirkan"
+                      traceId: "01HXY..."
+        "423":
+          $ref: "#/components/responses/PeriodeClosed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    get:
+      operationId: listEIRAmendments
+      summary: List semua proposal amendment (sort+page+filter, DataTable)
+      description: |
+        List ecl.eir_reestimation_log dengan cursor pagination, sort, dan filter.
+
+        Permission: eir.preview
+        Roles: ROLE-AKUN (lihat miliknya sendiri), ROLE-RISK (lihat semua),
+               ROLE-ALCO (lihat PENDING_APPROVAL+), ROLE-AUDIT (semua)
+
+        Allowed sort: created_at, tanggal_re_estimation, instrumen_kode, workflow_status, eir_sebelum, eir_sesudah
+        Allowed filter: workflow_status, instrumen_id, tanggal_re_estimation, trigger_type, created_at
+
+        Export: CSV, XLSX (inline)
+        Audit event EIR.SCHEDULE_EXPORT saat export.
+      tags: [eir-amendment]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/cursor"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/sortParam"
+        - $ref: "#/components/parameters/searchParam"
+        - name: filter[workflow_status]
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [DRAFT, PENDING_REVIEW, PENDING_APPROVAL, APPROVED, REJECTED]
+          description: Filter by workflow status
+        - name: filter[instrumen_id]
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: filter[tanggal_re_estimation]
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Format: gte:2026-01-01 atau between:2026-01-01,2026-12-31"
+        - name: export
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [csv, xlsx]
+      responses:
+        "200":
+          description: List amendment proposals
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EIRAmendmentListResponse"
+            text/csv:
+              schema:
+                type: string
+                format: binary
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/eir/amendments/{id} — get single amendment proposal (Story 4)
+  # ---------------------------------------------------------------------------
+  /ecl/eir/amendments/{id}:
+    get:
+      operationId: getEIRAmendment
+      summary: Baca detail satu proposal amendment
+      description: |
+        Permission: eir.preview
+        Roles: ROLE-AKUN (hanya miliknya), ROLE-RISK, ROLE-ALCO, ROLE-AUDIT
+      tags: [eir-amendment]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/amendmentIdPath"
+      responses:
+        "200":
+          description: Detail proposal amendment
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/EIRAmendmentProposal"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/eir/amendments/{id}/review — ROLE-RISK review (Story 4)
+  # ---------------------------------------------------------------------------
+  /ecl/eir/amendments/{id}/review:
+    post:
+      operationId: reviewEIRAmendment
+      summary: ROLE-RISK reviewer sign-off proposal amendment
+      description: |
+        Reviewer (ROLE-RISK, ≠ maker) menyetujui atau menolak proposal.
+        Transisi: DRAFT → PENDING_APPROVAL (jika approve) atau REJECTED.
+
+        Permission: eir.amend.review
+        Role: ROLE-RISK (reviewer, ≠ maker)
+
+        SoD: reviewer_id ≠ maker_id → SOD_VIOLATION 403 jika sama.
+        Audit event: EIR.AMEND_REVIEWED
+        Idempotency-Key wajib.
+      tags: [eir-amendment]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/amendmentIdPath"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowActionRequest"
+            example:
+              action: "APPROVE"
+              comment: "Cashflow revisi sudah diverifikasi sesuai addendum kontrak"
+              signatureMethod: "JWT_STANDARD"
+      responses:
+        "200":
+          description: Review berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/EIRAmendmentProposal"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Permission tidak terpenuhi atau SoD violation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                forbidden:
+                  value:
+                    error:
+                      code: FORBIDDEN
+                      message: "Permission eir.amend.review diperlukan"
+                      details: []
+                      traceId: "01HXY..."
+                sod:
+                  value:
+                    error:
+                      code: SOD_VIOLATION
+                      message: "Maker tidak bisa menjadi reviewer untuk proposal yang dia ajukan sendiri."
+                      details: []
+                      traceId: "01HXY..."
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/WorkflowInvalidTransition"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/eir/amendments/{id}/approve — ROLE-ALCO approve + execute (Story 4)
+  # ---------------------------------------------------------------------------
+  /ecl/eir/amendments/{id}/approve:
+    post:
+      operationId: approveEIRAmendment
+      summary: ROLE-ALCO final approve — re-estimasi dieksekusi (step-up MFA wajib)
+      description: |
+        ROLE-ALCO menyetujui proposal. Step-up MFA wajib (DEC-026, DEC-027).
+
+        Setelah approve, service mengeksekusi:
+        1. Re-run Newton-Raphson dengan revisedCashflows (seed = eir_sebelum)
+        2. Hitung catch_up_adjustment = NPV difference pada amendmentDate
+        3. UPDATE rows lama ecl.eir_amortization_schedule
+           SET recomputed_from_seq = first_new_periode_seq
+           WHERE instrumen_id = X AND periode_seq >= amendmentPeriodeSeq
+           AND recomputed_from_seq IS NULL
+           (HANYA kolom tracking; amounts finansial TIDAK BOLEH DIUBAH)
+        4. INSERT rows baru mulai amendmentDate, recomputed_from_seq = NULL
+        5. UPDATE mst.instrumen SET eir_awal = new_eir
+        6. UPDATE eir_reestimation_log: workflow_status = 'APPROVED', approved_at,
+           approver_id, eir_sesudah, signature_hash_approve
+        7. Tulis EIR.AMEND_APPROVED ke aud.audit_log
+
+        Jika re-estimasi solver gagal konvergen → rollback seluruh transaksi,
+        workflow_status kembali ke PENDING_APPROVAL,
+        tulis EIR.REESTIMATION_FAILED ke aud.audit_log.
+
+        Permission: eir.amend.approve
+        Role: ROLE-ALCO
+        MFA: Step-up MFA wajib (X-Step-Up-Token header)
+
+        SoD: approver_id ≠ maker_id ≠ reviewer_id → SOD_VIOLATION 403.
+        Audit event: EIR.AMEND_APPROVED (atau EIR.REESTIMATION_FAILED jika solver gagal)
+        Idempotency-Key wajib.
+      tags: [eir-amendment]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/amendmentIdPath"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/XStepUpToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowActionRequest"
+            example:
+              action: "APPROVE"
+              comment: "Disetujui. EIR baru akan berlaku mulai periode 5."
+              signatureMethod: "JWT_STEP_UP"
+      responses:
+        "200":
+          description: Proposal approved, re-estimasi dieksekusi, schedule diperbarui
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/EIRAmendmentProposal"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Permission, SoD, atau step-up MFA tidak terpenuhi
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                stepUpRequired:
+                  value:
+                    error:
+                      code: STEP_UP_REQUIRED
+                      message: "Action ini membutuhkan step-up MFA. Lakukan POST /auth/step-up terlebih dahulu."
+                      details: []
+                      traceId: "01HXY..."
+                sod:
+                  value:
+                    error:
+                      code: SOD_VIOLATION
+                      message: "Approver tidak boleh sama dengan maker atau reviewer."
+                      details: []
+                      traceId: "01HXY..."
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: Workflow transition tidak valid atau solver gagal konvergen
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                invalidTransition:
+                  $ref: "#/components/responses/WorkflowInvalidTransition"
+                nonConvergent:
+                  value:
+                    error:
+                      code: EIR_NON_CONVERGENT
+                      message: "Re-estimasi EIR gagal konvergen. Proposal dikembalikan ke PENDING_APPROVAL. Periksa cashflow revisi."
+                      details: []
+                      traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/eir/amendments/{id}/reject — reject proposal (Story 4)
+  # ---------------------------------------------------------------------------
+  /ecl/eir/amendments/{id}/reject:
+    post:
+      operationId: rejectEIRAmendment
+      summary: Reject proposal amendment (ROLE-RISK atau ROLE-ALCO)
+      description: |
+        Menolak proposal di state DRAFT, PENDING_REVIEW, atau PENDING_APPROVAL.
+        Schedule aktif di ecl.eir_amortization_schedule TIDAK berubah.
+
+        Permission: eir.amend.review (dari PENDING_REVIEW) atau eir.amend.approve (dari PENDING_APPROVAL)
+        Roles: ROLE-RISK (dari PENDING_REVIEW), ROLE-ALCO (dari PENDING_APPROVAL)
+
+        Setelah reject: workflow_status = 'REJECTED', tidak bisa diubah.
+        Maker dapat membuat proposal baru dengan Idempotency-Key baru.
+
+        Audit event: EIR.AMEND_REJECTED
+        Idempotency-Key wajib.
+      tags: [eir-amendment]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/amendmentIdPath"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowRejectRequest"
+            example:
+              comment: "Cashflow revisi tidak sesuai dengan term addendum. Mohon koreksi dan ajukan ulang."
+              signatureMethod: "JWT_STANDARD"
+      responses:
+        "200":
+          description: Proposal berhasil ditolak
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/EIRAmendmentProposal"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/WorkflowInvalidTransition"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/eir/bulk-recompute — trigger batch EIR validation (Story 5)
+  # ---------------------------------------------------------------------------
+  /ecl/eir/bulk-recompute:
+    post:
+      operationId: triggerEIRBulkRecompute
+      summary: Trigger bulk EIR re-compute batch job (drift detection, report-only)
+      description: |
+        Trigger Asynq job untuk re-validasi EIR semua instrumen aktif.
+        Long-running per UX §3 — return 202 + jobId, progress via SSE.
+
+        Permission: eir.bulk_recompute
+        Roles: ROLE-RISK (manual trigger); System (scheduled cron)
+
+        Job steps:
+        1. Query instrumen aktif: eir_method_flag=TRUE, klasifikasi_psak71 IN ('AC','FVOCI')
+        2. Per instrumen: re-compute EIR, bandingkan dengan eir_awal tersimpan
+        3. Validate schedule: rows aktif ada, closing_carrying terakhir ≈ 0, no gaps
+        4. Kumpulkan drift_report: EIR drift > 1e-6 atau schedule missing/broken
+        5. TIDAK mengubah eir_awal atau schedule (report-only)
+        6. Simpan hasil ke sys.job.result_jsonb
+
+        SLA: ≤ 5 detik untuk 1000 instrumen (compute + validation, no insert).
+        Concurrency guard: tolak 409 jika ada job EIR_BULK_RECOMPUTE yang running
+        untuk tenant yang sama.
+
+        Memory: streaming per instrument (≤ 10KB per instrument di memory).
+        Partial failure: instrument error tidak menghentikan batch, dicatat di result.errors.
+
+        Audit event: EIR.BULK_RECOMPUTE (start + complete + per-instrument error summary)
+        Idempotency-Key wajib.
+      tags: [eir-bulk]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EIRBulkRecomputeRequest"
+            example:
+              scope: "ALL_ACTIVE"
+              periodeId: null
+              reason: "Rekonsiliasi bulanan Juni 2026"
+      responses:
+        "202":
+          description: |
+            Job diterima dan di-queue. Subscribe SSE di streamUrl untuk progress.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/JobAcceptedResponse"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  jobId: "01JXYZ-BULK-001"
+                  type: "EIR_BULK_RECOMPUTE"
+                  statusUrl: "/api/v1/jobs/01JXYZ-BULK-001"
+                  streamUrl: "/api/v1/jobs/01JXYZ-BULK-001/stream"
+                  estimatedDurationSeconds: 5
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: Scope tidak valid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: EIR_BULK_RECOMPUTE_INVALID_SCOPE
+                  message: "scope harus ALL_ACTIVE atau subset instrumenIds yang valid"
+                  details: []
+                  traceId: "01HXY..."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Job bulk re-compute sedang berjalan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: CONFLICT
+                  message: "Bulk EIR re-compute sedang berjalan (jobId: 01JXYZ-BULK-000). Tunggu hingga selesai."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/eir/jobs/{jobId} — status job bulk recompute (Story 5, UX §3)
+  # ---------------------------------------------------------------------------
+  /ecl/eir/jobs/{jobId}:
+    get:
+      operationId: getEIRBulkJob
+      summary: Get status dan result bulk EIR re-compute job
+      description: |
+        Polling endpoint untuk EIR bulk re-compute job.
+        Alias convenience ke /api/v1/jobs/{jobId} — redirect atau proxy ke jobs endpoint.
+        Client juga dapat langsung GET /api/v1/jobs/{jobId}.
+
+        Permission: eir.bulk_recompute (untuk ROLE-RISK) atau eir.preview
+        Note: job result mengandung drift_report yang sensitive — hanya ROLE-RISK dan ROLE-AUDIT.
+      tags: [eir-bulk]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Job ID dari response 202 bulk-recompute
+      responses:
+        "200":
+          description: Status dan progress job, atau result jika selesai
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/EIRBulkJobResult"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  jobId: "01JXYZ-BULK-001"
+                  type: "EIR_BULK_RECOMPUTE"
+                  status: "completed"
+                  progress: 100
+                  currentStep: "Selesai"
+                  startedAt: "2026-06-12T10:30:00+07:00"
+                  completedAt: "2026-06-12T10:30:04+07:00"
+                  canCancel: false
+                  result:
+                    total: 1000
+                    valid: 995
+                    driftCount: 3
+                    scheduleMissing: 2
+                    totalErrors: 0
+                    completedWithErrors: false
+                    driftInstruments:
+                      - instrumenId: "550e8400-e29b-41d4-a716-446655440099"
+                        eirStored: "0.04000000"
+                        eirComputed: "0.04150000"
+                        delta: "0.00150000"
+                    scheduleMissingInstruments:
+                      - instrumenId: "550e8400-e29b-41d4-a716-446655440088"
+                        actionRequired: "ACTION_REQUIRED: generate schedule"
+                    errors: []
+                meta:
+                  traceId: "01HXY..."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Job tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: JOB_NOT_FOUND
+                  message: "Job tidak ditemukan"
+                  details: []
+                  traceId: "01HXY..."
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+# =============================================================================
+# COMPONENTS
+# =============================================================================
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT RSA-2048 signed oleh Keycloak. Access token TTL 15 menit (DEC-025).
+
+  parameters:
+    instrumenIdPath:
+      name: instrumenId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: UUID instrumen dari mst.instrumen
+
+    amendmentIdPath:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: UUID proposal dari ecl.eir_reestimation_log
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: UUID v4 unik per request. TTL replay 24 jam (DEC-021).
+
+    XStepUpToken:
+      name: X-Step-Up-Token
+      in: header
+      required: false
+      schema:
+        type: string
+      description: |
+        Token dari POST /auth/step-up. Wajib untuk approve endpoint ROLE-ALCO.
+        TTL 5 menit. Expired → STEP_UP_EXPIRED 403.
+
+    cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+      description: Opaque base64 cursor dari pagination.nextCursor (DEC-022)
+
+    limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+      description: Jumlah item per halaman. Default 50, max 200.
+
+    sortParam:
+      name: sort
+      in: query
+      required: false
+      schema:
+        type: string
+        pattern: "^[a-z_]+(:(asc|desc))?(,[a-z_]+(:(asc|desc))?)*$"
+      description: "Multi-column sort. Format: col1:asc,col2:desc. Max 3 kolom."
+
+    searchParam:
+      name: q
+      in: query
+      required: false
+      schema:
+        type: string
+        maxLength: 200
+      description: Text search global
+
+    includeDeleted:
+      name: include_deleted
+      in: query
+      required: false
+      schema:
+        type: boolean
+        default: false
+      description: "Tampilkan soft-deleted records. Hanya ROLE-AUDIT."
+
+  schemas:
+
+    # ---- Common reuse -------------------------------------------------------
+    ResponseMeta:
+      type: object
+      properties:
+        traceId:
+          type: string
+          example: "01HXY..."
+
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details, traceId]
+          properties:
+            code:
+              $ref: "#/components/schemas/EIRErrorCode"
+            message:
+              type: string
+              description: Human-readable message Bahasa Indonesia. Jangan expose stack trace.
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  rule:
+                    type: string
+                  message:
+                    type: string
+            traceId:
+              type: string
+
+    # ---- Error codes (EIR-specific + inherited) ----------------------------
+    EIRErrorCode:
+      type: string
+      description: |
+        Stable error code — termasuk semua code dari _common.yaml plus EIR-specific.
+        Ditambahkan ke _common.yaml ErrorCode enum.
+      enum:
+        # dari _common.yaml (subset yang relevan untuk konteks ini)
+        - VALIDATION_FAILED
+        - UNAUTHORIZED
+        - FORBIDDEN
+        - SOD_VIOLATION
+        - MFA_REQUIRED
+        - NOT_FOUND
+        - CONFLICT
+        - IDEMPOTENCY_REPLAY
+        - IDEMPOTENCY_MISMATCH
+        - WORKFLOW_INVALID_TRANSITION
+        - PERIODE_CLOSED
+        - RATE_LIMITED
+        - INTERNAL
+        - STEP_UP_REQUIRED
+        - STEP_UP_EXPIRED
+        - JOB_NOT_FOUND
+        # EIR-specific (P4-M5) — tambahkan ke _common.yaml ErrorCode enum
+        - EIR_NON_CONVERGENT                  # 422 — Newton-Raphson exceeded max iterations (100)
+        - EIR_DIVERGENT                       # 422 — residual growing antara iterasi
+        - EIR_CASHFLOW_INVALID                # 422 — null/empty/negative amount atau missing jatuh tempo
+        - EIR_CASHFLOW_SIGN_MISMATCH          # 422 — CF_0 harus negatif (initial outflow)
+        - EIR_INSTRUMEN_FVTPL_NO_EIR          # 422 — FVTPL/FVOCI_ELECTION tidak pakai amortized cost
+        - EIR_SCHEDULE_NOT_FOUND              # 404 — schedule belum ada untuk instrumen
+        - EIR_SCHEDULE_PERIODE_OUT_OF_RANGE   # 422 — periode melebihi tanggal jatuh tempo instrumen
+        - EIR_DUPLICATE_SCHEDULE_VERSION      # 409 — schedule aktif sudah ada (gunakan amendment flow)
+        - EIR_POCI_REQUIRES_PD_ADJUSTED_CF    # 422 — instrumen POCI tapi CF tidak PD-adjusted
+        - EIR_BULK_RECOMPUTE_INVALID_SCOPE    # 400 — scope parameter tidak valid
+        - EIR_INSTRUMEN_NOT_FOUND             # 404 — instrumen tidak ada di mst.instrumen
+        - EIR_ALREADY_COMPUTED                # 409 — eir_awal sudah terisi, gunakan amendment
+        - EIR_NOT_YET_COMPUTED                # 422 — generate schedule sebelum EIR dihitung
+
+    # ---- Job accepted response (202) ----------------------------------------
+    JobAcceptedResponse:
+      type: object
+      required: [jobId, type, statusUrl, streamUrl]
+      properties:
+        jobId:
+          type: string
+          description: "Job identifier (ULID). Persistent di sys.job."
+          example: "01JXYZ-BULK-001"
+        type:
+          type: string
+          description: "Job type identifier"
+          example: "EIR_BULK_RECOMPUTE"
+        statusUrl:
+          type: string
+          description: "GET /api/v1/jobs/{jobId}"
+          example: "/api/v1/jobs/01JXYZ-BULK-001"
+        streamUrl:
+          type: string
+          description: "SSE stream — gunakan Authorization: Bearer header (bukan ?token=)"
+          example: "/api/v1/jobs/01JXYZ-BULK-001/stream"
+        estimatedDurationSeconds:
+          type: integer
+          nullable: true
+          description: Estimasi durasi berdasarkan jumlah instrumen aktif
+
+    # ---- Cashflow item -------------------------------------------------------
+    CashflowItem:
+      type: object
+      required: [date, amountIdr]
+      properties:
+        date:
+          type: string
+          format: date
+          description: "Tanggal cashflow. CF_0 = tanggal penempatan/origination."
+          example: "2026-01-01"
+        amountIdr:
+          type: number
+          description: |
+            Amount IDR. CF_0 HARUS negatif (initial outflow: -(nominal + biaya_transaksi)).
+            CF_t positif (inflows: kupon + pelunasan pokok).
+            Presisi NUMERIC(20,4) — no float64 di DB.
+          example: -1005000000.0000
+
+    # ---- EIR Compute Request ------------------------------------------------
+    EIRComputeRequest:
+      type: object
+      required: [instrumenId, cashflowProjection, initialPrincipalIdr]
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+          description: UUID instrumen dari mst.instrumen. Harus AC atau FVOCI.
+        cashflowProjection:
+          type: array
+          items:
+            $ref: "#/components/schemas/CashflowItem"
+          minItems: 2
+          description: |
+            Array cashflow. Index 0 = CF_0 (negatif, outflow).
+            Sisanya = inflows (kupon + pelunasan pokok pada jatuh tempo).
+            Untuk deposito reguler, dapat di-auto-generate dari instrumen fields.
+        initialPrincipalIdr:
+          type: number
+          description: "Nominal + biaya_transaksi_capitalized. Harus > 0."
+          example: 1005000000.0000
+        couponRate:
+          type: number
+          nullable: true
+          description: |
+            Rate kupon per periode (bukan annualized). Dipakai sebagai seed r_initial.
+            Jika null, solver menggunakan r_initial = 0.10 (DEC-013).
+          example: 0.04000000
+        persistResult:
+          type: boolean
+          default: false
+          description: |
+            false (default): hanya compute, return result, tidak simpan ke DB (preview).
+            true: simpan eir_awal ke mst.instrumen. Audit event EIR.COMPUTE ditulis.
+        forceRecompute:
+          type: boolean
+          default: false
+          description: |
+            Hanya relevan saat persistResult=true.
+            false (default): jika eir_awal sudah terisi → 409 EIR_ALREADY_COMPUTED.
+            true: izinkan re-compute meski eir_awal sudah ada (untuk koreksi origination).
+            Amendment kontrak menggunakan amendment workflow, bukan flag ini.
+        pociMode:
+          type: boolean
+          default: false
+          description: |
+            true: instrumen POCI, cashflowProjection harus sudah PD-adjusted.
+            Solver berjalan dengan cashflow tersebut, response berisi eirType="CREDIT_ADJUSTED".
+            POCI full logic deferred ke M7; M5 hanya menerima CF dan menandai flag.
+
+    # ---- EIR Compute Response -----------------------------------------------
+    EIRComputeResponse:
+      type: object
+      required:
+        - instrumenId
+        - eirPerPeriod
+        - eirAnnualEquivalent
+        - iterationsUsed
+        - convergenceResidual
+        - eirType
+        - persisted
+        - computedAt
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+        eirPerPeriod:
+          type: string
+          description: |
+            EIR per periode sebagai string NUMERIC(10,8).
+            Contoh: "0.04200000" (4.2% per semester).
+            String untuk preserve 8 desimal tanpa float precision loss.
+          example: "0.04200000"
+        eirAnnualEquivalent:
+          type: string
+          description: |
+            EIR tahunan equivalen: (1 + eirPerPeriod)^freq - 1.
+            Untuk display UI; perhitungan internal tetap pakai eirPerPeriod.
+          example: "0.08570240"
+        iterationsUsed:
+          type: integer
+          description: Jumlah iterasi Newton-Raphson yang digunakan. Max 100 (DEC-013).
+          example: 7
+        convergenceResidual:
+          type: string
+          description: |
+            Nilai |f(r)| pada iterasi terakhir sebagai string.
+            Harus < 1e-10 jika konvergen (DEC-013).
+          example: "0.0000000001"
+        eirType:
+          type: string
+          enum: [STANDARD, CREDIT_ADJUSTED]
+          description: |
+            STANDARD: EIR biasa untuk instrumen non-POCI.
+            CREDIT_ADJUSTED: EIR credit-adjusted untuk instrumen POCI (pociMode=true).
+        persisted:
+          type: boolean
+          description: true jika eir_awal sudah disimpan ke mst.instrumen (persistResult=true)
+        computedAt:
+          type: string
+          format: date-time
+          description: Timestamp saat compute dilakukan
+
+    # ---- EIR Generate Schedule Request --------------------------------------
+    EIRGenerateScheduleRequest:
+      type: object
+      required: [instrumenId, cashflowProjection, initialPrincipalIdr]
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+        cashflowProjection:
+          type: array
+          items:
+            $ref: "#/components/schemas/CashflowItem"
+          minItems: 2
+        initialPrincipalIdr:
+          type: number
+          description: "Nominal + biaya_transaksi_capitalized untuk opening_carrying row-1."
+          example: 1005000000.0000
+        couponRate:
+          type: number
+          nullable: true
+          description: "Rate kupon per periode. Opsional — jika null, baca dari mst.instrumen.kupon."
+          example: 0.04000000
+        forceRegenerate:
+          type: boolean
+          default: false
+          description: |
+            true: izinkan regenerate jika schedule belum ada tapi rows aktif = 0.
+            TIDAK untuk amendment — gunakan amendment workflow.
+
+    # ---- EIR Generate Schedule Response -------------------------------------
+    EIRScheduleGenerateResponse:
+      type: object
+      required:
+        - instrumenId
+        - scheduleSeq
+        - totalRows
+        - eirPerPeriod
+        - openingCarryingFirst
+        - closingCarryingLast
+        - closingRoundingDelta
+        - generatedAt
+        - schedule
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+        scheduleSeq:
+          type: string
+          description: "Business key pertama dari schedule yang baru dibuat (schedule_id_kode row-1)."
+        totalRows:
+          type: integer
+          description: Jumlah rows yang diinsert ke ecl.eir_amortization_schedule
+        eirPerPeriod:
+          type: string
+          description: EIR per periode yang digunakan, NUMERIC(10,8)
+          example: "0.04200000"
+        openingCarryingFirst:
+          type: string
+          description: "opening_carrying baris pertama (= nominal + biaya_transaksi)"
+          example: "1005000000.0000"
+        closingCarryingLast:
+          type: string
+          description: "closing_carrying baris terakhir. Harus ≈ 0."
+          example: "0.0000"
+        closingRoundingDelta:
+          type: string
+          description: |
+            Selisih rounding pada baris terakhir setelah HALF_EVEN rounding.
+            Harus ≤ IDR 1.
+          example: "0.0001"
+        generatedAt:
+          type: string
+          format: date-time
+        schedule:
+          type: array
+          items:
+            $ref: "#/components/schemas/EIRScheduleRow"
+          description: Semua rows yang baru diinsert (preview). Untuk instrumen besar, pagination tidak berlaku di sini — full schedule di-return.
+
+    # ---- EIR Schedule Row ---------------------------------------------------
+    EIRScheduleRow:
+      type: object
+      required:
+        - id
+        - scheduleIdKode
+        - instrumenId
+        - periodeSeq
+        - tanggalPosting
+        - openingCarryingIdr
+        - cashInflowIdr
+        - pendapatanBungaEirIdr
+        - amortisasiPdIdr
+        - pelunasanPokokIdr
+        - closingCarryingIdr
+        - eirPeriode
+        - statusPosting
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: UUID row dari ecl.eir_amortization_schedule
+        scheduleIdKode:
+          type: string
+          description: Business key VARCHAR(30), mis. "SCHED-OBL-001-S01"
+          example: "SCHED-OBL-001-S01"
+        instrumenId:
+          type: string
+          format: uuid
+        periodeSeq:
+          type: integer
+          description: Urutan periode (1, 2, ..., N)
+          example: 1
+        tanggalPosting:
+          type: string
+          format: date
+          description: Tanggal jatuh tempo per periode
+          example: "2026-07-01"
+        openingCarryingIdr:
+          type: string
+          description: "Gross Carrying opening. NUMERIC(20,4) sebagai string."
+          example: "1005000000.0000"
+        cashInflowIdr:
+          type: string
+          description: "Kupon kontraktual yang diterima pada periode ini. NUMERIC(20,4)."
+          example: "40000000.0000"
+        pendapatanBungaEirIdr:
+          type: string
+          description: "= opening_carrying × eir_per_periode. NUMERIC(20,4)."
+          example: "42210000.0000"
+        amortisasiPdIdr:
+          type: string
+          description: |
+            = pendapatan_bunga_eir − cash_inflow.
+            Positif = amortisasi diskonto (carrying naik).
+            Negatif = amortisasi premium (carrying turun).
+            NUMERIC(20,4).
+          example: "2210000.0000"
+        pelunasanPokokIdr:
+          type: string
+          description: "Pelunasan pokok pada periode ini. 0 kecuali periode jatuh tempo. NUMERIC(20,4)."
+          example: "0.0000"
+        closingCarryingIdr:
+          type: string
+          description: |
+            = opening_carrying + amortisasi_p_d − pelunasan_pokok.
+            ≈ 0 pada periode terakhir (HALF_EVEN rounding).
+            NUMERIC(20,4).
+          example: "1007210000.0000"
+        eirPeriode:
+          type: string
+          description: "EIR per periode. NUMERIC(10,8)."
+          example: "0.04200000"
+        stageSaatPosting:
+          type: string
+          enum: [STAGE_1, STAGE_2, STAGE_3]
+          nullable: true
+          description: Stage instrumen saat row ini dibuat/diposting
+          example: "STAGE_1"
+        statusPosting:
+          type: string
+          enum: [PROYEKSI, POSTED, REVERSED, RECOMPUTED]
+          description: Status posting row ini
+          example: "PROYEKSI"
+        jurnalReferenceId:
+          type: string
+          format: uuid
+          nullable: true
+          description: FK ke jrnl.header jika sudah di-posting ke jurnal
+        recomputedFromSeq:
+          type: integer
+          nullable: true
+          description: |
+            NULL = row aktif (active schedule).
+            NOT NULL = superseded; nilai = periode_seq pertama dari schedule pengganti.
+        createdAt:
+          type: string
+          format: date-time
+          description: Immutable — row append-only setelah INSERT
+
+    # ---- EIR Schedule List Response -----------------------------------------
+    EIRScheduleListResponse:
+      type: object
+      required: [data, pagination, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/EIRScheduleRow"
+        pagination:
+          type: object
+          required: [hasMore]
+          properties:
+            nextCursor:
+              type: string
+              nullable: true
+            hasMore:
+              type: boolean
+            totalEstimate:
+              type: integer
+              nullable: true
+            limit:
+              type: integer
+        appliedSort:
+          type: array
+          items:
+            type: object
+            properties:
+              col:
+                type: string
+              dir:
+                type: string
+                enum: [asc, desc]
+        appliedFilter:
+          type: object
+          additionalProperties: true
+        meta:
+          $ref: "#/components/schemas/ResponseMeta"
+
+    # ---- EIR Amendment Propose Request --------------------------------------
+    EIRAmendmentProposeRequest:
+      type: object
+      required: [instrumenId, amendmentDate, revisedCashflows, alasan, dokumenPendukungId]
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+          description: UUID instrumen yang akan di-amandemen
+        amendmentDate:
+          type: string
+          format: date
+          description: |
+            Tanggal berlakunya amandemen. Rows lama dengan tanggal_posting >= amendmentDate
+            akan di-supersede. Harus > tanggal last POSTED row.
+          example: "2028-01-01"
+        revisedCashflows:
+          type: array
+          items:
+            $ref: "#/components/schemas/CashflowItem"
+          minItems: 2
+          description: |
+            Cashflow revisi mulai dari amendmentDate.
+            CF_0 = negative (outstanding balance saat amandemen).
+            Sisanya = inflows baru sesuai kontrak revisi.
+        alasan:
+          type: string
+          minLength: 30
+          maxLength: 2000
+          description: Justifikasi amendment. Minimum 30 karakter.
+          example: "Amandemen kupon dari 8% ke 9% sesuai addendum kontrak tanggal 2027-12-15"
+        dokumenPendukungId:
+          type: string
+          format: uuid
+          description: UUID dokumen addendum dari doc.upload. WAJIB untuk setiap amendment.
+
+    # ---- EIR Amendment Proposal (response entity) ---------------------------
+    EIRAmendmentProposal:
+      type: object
+      required:
+        - id
+        - logIdKode
+        - instrumenId
+        - tanggalReEstimation
+        - triggerType
+        - eirSebelum
+        - workflowStatus
+        - makerId
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: UUID row dari ecl.eir_reestimation_log
+        logIdKode:
+          type: string
+          description: Business key VARCHAR(30), mis. "REEST-OBL-001-001"
+          example: "REEST-OBL-001-001"
+        instrumenId:
+          type: string
+          format: uuid
+        kodeInstrumen:
+          type: string
+          nullable: true
+          example: "OBL-2026-00001"
+        tanggalReEstimation:
+          type: string
+          format: date
+          description: Tanggal amandemen berlaku
+          example: "2028-01-01"
+        triggerType:
+          type: string
+          description: |
+            Tipe trigger re-estimasi.
+            Untuk M5: "KONTRAK_AMANDEMEN" (perubahan kupon, tenor, dll).
+          example: "KONTRAK_AMANDEMEN"
+        eirSebelum:
+          type: string
+          description: "EIR sebelum re-estimasi. NUMERIC(10,8). Immutable setelah proposal dibuat."
+          example: "0.04200000"
+        eirSesudah:
+          type: string
+          nullable: true
+          description: "EIR baru setelah re-estimasi. Populated hanya setelah APPROVED dan solver sukses."
+          example: "0.04680000"
+        catchUpAdjustment:
+          type: string
+          nullable: true
+          description: "NPV difference pada tanggal amandemen. NUMERIC(20,4). Populated setelah APPROVED."
+          example: "12500000.0000"
+        modifikasiTermsJson:
+          type: object
+          nullable: true
+          description: Detail perubahan kontrak dalam JSONB. Contoh: {kupon_lama: 0.08, kupon_baru: 0.09}
+          additionalProperties: true
+        dokumenPendukungId:
+          type: string
+          format: uuid
+          nullable: true
+        workflowStatus:
+          type: string
+          enum: [DRAFT, PENDING_REVIEW, PENDING_APPROVAL, APPROVED, REJECTED]
+          description: |
+            State machine amendment:
+            DRAFT → PENDING_REVIEW (setelah submit awal, menunggu ROLE-RISK)
+            → PENDING_APPROVAL (setelah ROLE-RISK review)
+            → APPROVED (setelah ROLE-ALCO approve + solver sukses) / REJECTED
+        makerId:
+          type: string
+          format: uuid
+          description: ROLE-AKUN yang propose
+        makerNama:
+          type: string
+          nullable: true
+        reviewerId:
+          type: string
+          format: uuid
+          nullable: true
+          description: ROLE-RISK yang review
+        reviewerNama:
+          type: string
+          nullable: true
+        reviewedAt:
+          type: string
+          format: date-time
+          nullable: true
+        reviewerComment:
+          type: string
+          nullable: true
+          maxLength: 1000
+        reviewerSignatureHash:
+          type: string
+          nullable: true
+          description: "SHA-256(reviewerId || REVIEW || proposalId || reviewedAt || comment)"
+        approverId:
+          type: string
+          format: uuid
+          nullable: true
+          description: ROLE-ALCO yang approve
+        approverNama:
+          type: string
+          nullable: true
+        approvedAt:
+          type: string
+          format: date-time
+          nullable: true
+        approverComment:
+          type: string
+          nullable: true
+          maxLength: 1000
+        approverSignatureHash:
+          type: string
+          nullable: true
+          description: "SHA-256(approverId || APPROVE || proposalId || approvedAt || comment)"
+        rejectionComment:
+          type: string
+          nullable: true
+          maxLength: 2000
+          description: Alasan penolakan jika workflowStatus=REJECTED
+        revisedCashflows:
+          type: array
+          nullable: true
+          items:
+            $ref: "#/components/schemas/CashflowItem"
+          description: Cashflow revisi yang diajukan oleh maker. Tersimpan di modifikasiTermsJson.
+        newScheduleFirstSeq:
+          type: integer
+          nullable: true
+          description: periode_seq pertama dari schedule baru setelah APPROVED. Null jika belum APPROVED.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    # ---- EIR Amendment List Response ----------------------------------------
+    EIRAmendmentListResponse:
+      type: object
+      required: [data, pagination, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/EIRAmendmentProposal"
+        pagination:
+          type: object
+          required: [hasMore]
+          properties:
+            nextCursor:
+              type: string
+              nullable: true
+            hasMore:
+              type: boolean
+            totalEstimate:
+              type: integer
+              nullable: true
+            limit:
+              type: integer
+        appliedSort:
+          type: array
+          items:
+            type: object
+            properties:
+              col:
+                type: string
+              dir:
+                type: string
+                enum: [asc, desc]
+        appliedFilter:
+          type: object
+          additionalProperties: true
+        meta:
+          $ref: "#/components/schemas/ResponseMeta"
+
+    # ---- Workflow Action Request (reuse dari staging pattern) ----------------
+    WorkflowActionRequest:
+      type: object
+      required: [action, signatureMethod]
+      properties:
+        action:
+          type: string
+          enum: [APPROVE, REJECT]
+          description: Aksi workflow yang dilakukan
+        comment:
+          type: string
+          maxLength: 1000
+          nullable: true
+          description: Komentar reviewer/approver
+        signatureMethod:
+          type: string
+          enum: [JWT_STANDARD, JWT_STEP_UP]
+          description: |
+            JWT_STANDARD: untuk review endpoint (ROLE-RISK).
+            JWT_STEP_UP: untuk approve endpoint (ROLE-ALCO, step-up MFA wajib).
+
+    # ---- Workflow Reject Request --------------------------------------------
+    WorkflowRejectRequest:
+      type: object
+      required: [comment, signatureMethod]
+      properties:
+        comment:
+          type: string
+          minLength: 10
+          maxLength: 2000
+          description: Alasan penolakan. Wajib dan minimal 10 karakter.
+        signatureMethod:
+          type: string
+          enum: [JWT_STANDARD, JWT_STEP_UP]
+
+    # ---- EIR Bulk Recompute Request -----------------------------------------
+    EIRBulkRecomputeRequest:
+      type: object
+      properties:
+        scope:
+          type: string
+          enum: [ALL_ACTIVE, SUBSET]
+          default: ALL_ACTIVE
+          description: |
+            ALL_ACTIVE: semua instrumen AKTIF dengan eir_method_flag=TRUE dan klasifikasi AC/FVOCI.
+            SUBSET: subset instrumen dari instrumenIds (wajib diisi jika SUBSET).
+        instrumenIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          maxItems: 1000
+          nullable: true
+          description: Wajib jika scope=SUBSET. Max 1000 instrumen per request.
+        periodeId:
+          type: string
+          format: uuid
+          nullable: true
+          description: UUID periode buku untuk konteks audit. Null = periode aktif.
+        reason:
+          type: string
+          maxLength: 500
+          nullable: true
+          description: Alasan manual trigger untuk audit log
+
+    # ---- EIR Bulk Job Result ------------------------------------------------
+    EIRBulkJobResult:
+      type: object
+      required: [jobId, type, status, progress]
+      properties:
+        jobId:
+          type: string
+          example: "01JXYZ-BULK-001"
+        type:
+          type: string
+          example: "EIR_BULK_RECOMPUTE"
+        status:
+          type: string
+          enum: [queued, running, completed, failed, cancelled, completed_with_errors]
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Persen progress (0-100)
+        currentStep:
+          type: string
+          nullable: true
+          description: "Deskripsi step saat ini, mis. 'Memproses instrumen 500 dari 1000'"
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+        canCancel:
+          type: boolean
+          default: false
+          description: true jika job masih bisa di-cancel (status=running)
+        result:
+          $ref: "#/components/schemas/EIRBulkRecomputeResult"
+          nullable: true
+          description: Populated hanya jika status=completed atau completed_with_errors
+        error:
+          type: object
+          nullable: true
+          description: "Error detail jika status=failed. Struktur: {code, message}."
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+
+    # ---- EIR Bulk Recompute Result (stored di sys.job.result_jsonb) ----------
+    EIRBulkRecomputeResult:
+      type: object
+      required: [total, valid, driftCount, scheduleMissing, totalErrors]
+      properties:
+        total:
+          type: integer
+          description: Total instrumen yang diproses
+        valid:
+          type: integer
+          description: Instrumen yang EIR-nya valid (tidak ada drift, schedule OK)
+        driftCount:
+          type: integer
+          description: Instrumen dengan EIR drift > 1e-6 antara eir_awal tersimpan dan re-computed
+        scheduleMissing:
+          type: integer
+          description: Instrumen dengan eir_awal terisi tapi tidak ada rows di eir_amortization_schedule
+        totalErrors:
+          type: integer
+          description: Instrumen yang mengalami error saat processing (cashflow corrupt, dll)
+        completedWithErrors:
+          type: boolean
+          description: true jika ada instrumen yang error tapi batch tetap selesai
+        driftInstruments:
+          type: array
+          nullable: true
+          items:
+            type: object
+            required: [instrumenId, eirStored, eirComputed, delta]
+            properties:
+              instrumenId:
+                type: string
+                format: uuid
+              kodeInstrumen:
+                type: string
+                nullable: true
+              eirStored:
+                type: string
+                description: "EIR tersimpan di mst.instrumen.eir_awal. NUMERIC(10,8)."
+              eirComputed:
+                type: string
+                description: "EIR hasil re-compute. NUMERIC(10,8)."
+              delta:
+                type: string
+                description: "Selisih absolut |eirComputed - eirStored|. NUMERIC(10,8)."
+        scheduleMissingInstruments:
+          type: array
+          nullable: true
+          items:
+            type: object
+            required: [instrumenId, actionRequired]
+            properties:
+              instrumenId:
+                type: string
+                format: uuid
+              kodeInstrumen:
+                type: string
+                nullable: true
+              actionRequired:
+                type: string
+                example: "ACTION_REQUIRED: generate schedule"
+        errors:
+          type: array
+          nullable: true
+          items:
+            type: object
+            required: [instrumenId, error]
+            properties:
+              instrumenId:
+                type: string
+                format: uuid
+              kodeInstrumen:
+                type: string
+                nullable: true
+              error:
+                type: string
+                description: "Error code, mis. EIR_CASHFLOW_INVALID"
+              detail:
+                type: string
+                nullable: true
+
+  # -------------------------------------------------------------------------
+  # Reusable Responses
+  # -------------------------------------------------------------------------
+  responses:
+    ValidationFailed:
+      description: Validasi field atau cross-field gagal
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: VALIDATION_FAILED
+              message: "1 field tidak valid"
+              details:
+                - field: "body.dokumenPendukungId"
+                  rule: "required"
+                  message: "Dokumen pendukung wajib diisi"
+              traceId: "01HXY..."
+
+    Unauthorized:
+      description: JWT tidak valid, missing, atau expired
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: UNAUTHORIZED
+              message: "Token JWT tidak valid atau sudah expired"
+              details: []
+              traceId: "01HXY..."
+
+    Forbidden:
+      description: Permission tidak terpenuhi
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: FORBIDDEN
+              message: "Anda tidak memiliki permission 'eir.compute'"
+              details: []
+              traceId: "01HXY..."
+
+    NotFound:
+      description: Entity tidak ditemukan
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: NOT_FOUND
+              message: "Entity tidak ditemukan"
+              details: []
+              traceId: "01HXY..."
+
+    Conflict:
+      description: Optimistic lock conflict atau duplikasi
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: CONFLICT
+              message: "Konflik — row sudah diubah atau duplikasi terdeteksi."
+              details: []
+              traceId: "01HXY..."
+
+    WorkflowInvalidTransition:
+      description: State machine menolak transisi
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: WORKFLOW_INVALID_TRANSITION
+              message: "Transisi tidak valid dari state saat ini."
+              details:
+                - field: "state"
+                  rule: "invalid_transition"
+                  message: "Proposal harus dalam state PENDING_REVIEW untuk di-review"
+              traceId: "01HXY..."
+
+    PeriodeClosed:
+      description: Periode buku sudah hard-closed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: PERIODE_CLOSED
+              message: "Periode buku sudah hard-closed. Tidak bisa mutasi."
+              details: []
+              traceId: "01HXY..."
+
+    RateLimited:
+      description: Too many requests
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: RATE_LIMITED
+              message: "Terlalu banyak request. Coba lagi dalam 60 detik."
+              details: []
+              traceId: "01HXY..."
+
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: INTERNAL
+              message: "Terjadi kesalahan internal. Hubungi admin dengan traceId."
+              details: []
+              traceId: "01HXY..."
