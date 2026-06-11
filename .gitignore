@@ -57,3 +57,4 @@ Thumbs.db
 
 # build artifacts
 backend/api
+/backend/*coverage*.out
