@@ -769,8 +769,8 @@ func TestGetPDFromBatchParams_POCI_Returns_DeferredToM7(t *testing.T) {
 }
 
 func TestTraceIDFromCtx_WithValue(t *testing.T) {
-	// F5: traceIDFromCtx extracts trace ID from context.
-	ctx := context.WithValue(context.Background(), "X-Trace-Id", "test-trace-123")
+	// F5: traceIDFromCtx extracts trace ID from context using typed key.
+	ctx := context.WithValue(context.Background(), TraceIDCtxKey, "test-trace-123")
 	result := traceIDFromCtx(ctx)
 	if result != "test-trace-123" {
 		t.Errorf("traceIDFromCtx want test-trace-123 got %q", result)

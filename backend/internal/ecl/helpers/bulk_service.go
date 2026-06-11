@@ -473,10 +473,18 @@ func (s *bulkHelperService) writeAuditBulkComplete(
 	}
 }
 
+// traceIDCtxKey is the typed key under which middleware stores the request trace ID.
+// Use a package-local string type per revive context-keys-type lint rule.
+type traceIDCtxKeyType string
+
+// TraceIDCtxKey is the canonical context key for the request trace ID, exported so
+// middleware setting the value uses the exact same key.
+const TraceIDCtxKey traceIDCtxKeyType = "X-Trace-Id"
+
 // traceIDFromCtx extracts the trace ID from a context, if set by middleware.
 // Returns empty string when not present (safe to log as-is).
 func traceIDFromCtx(ctx context.Context) string {
-	if v := ctx.Value("X-Trace-Id"); v != nil {
+	if v := ctx.Value(TraceIDCtxKey); v != nil {
 		if s, ok := v.(string); ok {
 			return s
 		}
