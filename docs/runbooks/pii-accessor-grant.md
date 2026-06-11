@@ -10,7 +10,7 @@ DEC-028). The `sec.decrypt(TEXT)` function uses a role-gate — only callers tha
 `INSUFFICIENT_PRIVILEGE: sec.decrypt() requires blips_pii_accessor role`.
 
 This runbook MUST be executed once per environment (dev / UAT / prod / DR), **after** migration
-`000015_counterparty_rating_schema_fix.up.sql` has been applied (which re-declares the PII
+`000021_counterparty_rating_schema_fix.up.sql` has been applied (which re-declares the PII
 column comments and documents the grant requirement), and **before** the `blips_app_user` DB role
 is wired to JWT claims in Keycloak.
 
@@ -18,7 +18,7 @@ References:
 - Security baseline: `.claude/memory/security-baseline.md` §Column-level encrypted PII fields
 - DB conventions: `.claude/memory/db-conventions.md` §Audit log
 - Migration that introduces the columns: `db/migrations/000003_pii_encrypt_functions.up.sql`
-- Migration that documents the grant: `db/migrations/000015_counterparty_rating_schema_fix.up.sql`
+- Migration that documents the grant: `db/migrations/000021_counterparty_rating_schema_fix.up.sql`
 
 ---
 
@@ -37,7 +37,7 @@ References:
 
 - PostgreSQL superuser access (role `postgres` or equivalent) for the target environment
 - `psql` client installed, or access via `kubectl exec` / `docker exec` to the DB container
-- Migration `000015_counterparty_rating_schema_fix.up.sql` already applied:
+- Migration `000021_counterparty_rating_schema_fix.up.sql` already applied:
   ```sql
   SELECT version FROM schema_migrations WHERE version = '15'; -- must return a row
   ```

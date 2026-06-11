@@ -1,4 +1,4 @@
--- migration: 0015 counterparty_rating_schema_fix
+-- migration: 0021 counterparty_rating_schema_fix
 -- author: data-modeler
 -- requires: 0001, 0003 (sec.encrypt/decrypt), 0007, 0008
 -- description: PII columns (nomor_rekening_encrypted, ktp_encrypted)
