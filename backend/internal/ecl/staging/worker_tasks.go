@@ -1,9 +1,9 @@
 // Package staging — Asynq worker task handlers for staging engine background jobs.
 //
 // Three tasks (per state-machine §7):
-//   1. TaskEvaluateStaging     — ECL_STAGING_EVALUATE: evaluate one instrument per periode.
-//   2. TaskCureAssessmentBatch — ECL_CURE_ASSESSMENT: batch cure check for all Stage 2 instruments.
-//   3. TaskOverrideExpiryCheck — ECL_OVERRIDE_EXPIRY_CHECK: mark expired ACTIVE overrides.
+//  1. TaskEvaluateStaging     — ECL_STAGING_EVALUATE: evaluate one instrument per periode.
+//  2. TaskCureAssessmentBatch — ECL_CURE_ASSESSMENT: batch cure check for all Stage 2 instruments.
+//  3. TaskOverrideExpiryCheck — ECL_OVERRIDE_EXPIRY_CHECK: mark expired ACTIVE overrides.
 //
 // All tasks are registered on the Asynq ServeMux in cmd/api/main.go.
 // Progress is reported via sys.job table (UX pattern §3 — long-running process).
@@ -11,6 +11,7 @@ package staging
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -94,14 +95,14 @@ func NewOverrideExpiryCheckTask(p OverrideExpiryCheckPayload) (*asynq.Task, erro
 
 // TaskWorker handles all staging background tasks.
 type TaskWorker struct {
-	svc          *StagingService
+	svc          *Service
 	histRepo     StageHistoryRepository
 	overrideRepo OverrideProposalRepository
 	logger       *slog.Logger
 }
 
 // NewTaskWorker creates a TaskWorker.
-func NewTaskWorker(svc *StagingService, histRepo StageHistoryRepository, overrideRepo OverrideProposalRepository, logger *slog.Logger) *TaskWorker {
+func NewTaskWorker(svc *Service, histRepo StageHistoryRepository, overrideRepo OverrideProposalRepository, logger *slog.Logger) *TaskWorker {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -233,7 +234,9 @@ func (w *TaskWorker) HandleOverrideExpiryCheck(ctx context.Context, t *asynq.Tas
 			continue
 		}
 		if err := w.overrideRepo.MarkExpired(ctx, tx, prop.ID, systemActor); err != nil {
-			_ = tx.Rollback()
+			if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+				w.logger.WarnContext(ctx, "staging expiry: rollback failed", "id", prop.ID, "error", rbErr)
+			}
 			w.logger.WarnContext(ctx, "staging expiry: MarkExpired failed", "id", prop.ID, "error", err)
 			failed++
 			continue

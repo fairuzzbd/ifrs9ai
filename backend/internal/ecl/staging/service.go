@@ -98,8 +98,10 @@ type InstrumenSnapshot struct {
 
 // ─── Service ─────────────────────────────────────────────────────────────────
 
-// StagingService is the business logic layer for the staging engine.
-type StagingService struct {
+// Service is the business logic layer for the staging engine.
+//
+// Previously named StagingService; renamed to avoid revive stutter (package staging + type StagingService).
+type Service struct {
 	dpdRepo         DPDRepository
 	histRepo        StageHistoryRepository
 	overrideRepo    OverrideProposalRepository
@@ -109,7 +111,11 @@ type StagingService struct {
 	logger          *slog.Logger
 }
 
-// NewStagingService constructs a StagingService.
+// StagingService is an alias kept for backwards compatibility with cmd/api wiring.
+// New code should use *Service directly.
+type StagingService = Service
+
+// NewStagingService constructs a Service (alias: StagingService).
 func NewStagingService(
 	dpdRepo DPDRepository,
 	histRepo StageHistoryRepository,
@@ -118,11 +124,11 @@ func NewStagingService(
 	periodeReader PeriodeBukuReader,
 	auditWriter *audit.Writer,
 	logger *slog.Logger,
-) *StagingService {
+) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &StagingService{
+	return &Service{
 		dpdRepo:         dpdRepo,
 		histRepo:        histRepo,
 		overrideRepo:    overrideRepo,
@@ -148,7 +154,7 @@ type txBeginnerHist interface {
 // FVTPL instruments are skipped (no ECL per PSAK 71 §5.5.15).
 // Stage 3 auto-evaluation is a no-op — cure requires manual override.
 // DPD ≥ 90 from Stage 1 → atomic double-insert (Stage1→2, Stage2→3).
-func (s *StagingService) EvaluateSingleInstrumen(ctx context.Context, instrumenID uuid.UUID, tanggalAssessment time.Time, jobID *uuid.UUID) (*EvaluationResult, error) {
+func (s *Service) EvaluateSingleInstrumen(ctx context.Context, instrumenID uuid.UUID, tanggalAssessment time.Time, jobID *uuid.UUID) (*EvaluationResult, error) {
 	claims := auth.ClaimsFromContext(ctx)
 	actorID, err := requireActor(claims)
 	if err != nil {
@@ -204,9 +210,19 @@ func (s *StagingService) EvaluateSingleInstrumen(ctx context.Context, instrumenI
 	originRating := ""
 	currentRating := ""
 	if origErr == nil {
-		originRating, _ = s.instrumenReader.GetRatingAtDate(ctx, instrumenID, origDate)
+		r, ratingErr := s.instrumenReader.GetRatingAtDate(ctx, instrumenID, origDate)
+		if ratingErr != nil {
+			s.logger.WarnContext(ctx, "staging: GetRatingAtDate (origination) failed; continuing without origin rating",
+				"instrumen_id", instrumenID, "error", ratingErr)
+		}
+		originRating = r
 	}
-	currentRating, _ = s.instrumenReader.GetRatingAtDate(ctx, instrumenID, tanggalAssessment)
+	r2, ratingErr2 := s.instrumenReader.GetRatingAtDate(ctx, instrumenID, tanggalAssessment)
+	if ratingErr2 != nil {
+		s.logger.WarnContext(ctx, "staging: GetRatingAtDate (current) failed; continuing without current rating",
+			"instrumen_id", instrumenID, "error", ratingErr2)
+	}
+	currentRating = r2
 
 	// Run SICR evaluation (DEC-011).
 	// ratingPrevious is empty here (batch mode); IG→non-IG relies on notch delta as proxy.
@@ -278,7 +294,7 @@ func (s *StagingService) EvaluateSingleInstrumen(ctx context.Context, instrumenI
 	inserted1, err := s.histRepo.Insert(ctx, tx, entry1)
 	if err != nil {
 		if err == ErrConflict {
-			_ = tx.Rollback()
+			rollbackTx(ctx, tx, s.logger)
 			rowsInserted = 0
 			return &EvaluationResult{
 				InstrumenID:         instrumenID,
@@ -357,7 +373,7 @@ func (s *StagingService) EvaluateSingleInstrumen(ctx context.Context, instrumenI
 
 // RecordDPD upserts a DPD record for (instrumen_id, periode).
 // Source must be 'MANUAL' or 'APP_B' per migration 000022 CHECK constraint.
-func (s *StagingService) RecordDPD(ctx context.Context, instrumenID uuid.UUID, periode time.Time, dpdValue int, source string, catatan *string) (*DPDRecord, error) {
+func (s *Service) RecordDPD(ctx context.Context, instrumenID uuid.UUID, periode time.Time, dpdValue int, source string, catatan *string) (*DPDRecord, error) {
 	claims := auth.ClaimsFromContext(ctx)
 	actorID, err := requireActor(claims)
 	if err != nil {
@@ -415,7 +431,7 @@ func (s *StagingService) RecordDPD(ctx context.Context, instrumenID uuid.UUID, p
 
 // GetCurrentStage returns the current staging status for an instrument.
 // Returns a StageStatus with CurrentStage=nil when the instrument has never been evaluated.
-func (s *StagingService) GetCurrentStage(ctx context.Context, instrumenID uuid.UUID) (*StageStatus, error) {
+func (s *Service) GetCurrentStage(ctx context.Context, instrumenID uuid.UUID) (*StageStatus, error) {
 	entry, err := s.histRepo.GetCurrentStage(ctx, instrumenID)
 	if err != nil {
 		return nil, fmt.Errorf("staging GetCurrentStage: %w", err)
@@ -437,7 +453,7 @@ func (s *StagingService) GetCurrentStage(ctx context.Context, instrumenID uuid.U
 // ─── GetHistory ──────────────────────────────────────────────────────────────
 
 // GetHistory returns paginated stage_history for an instrument (newest first).
-func (s *StagingService) GetHistory(ctx context.Context, instrumenID uuid.UUID, q listquery.Query, cursor string, limit int) ([]*StageHistoryEntry, pagination.Result, error) {
+func (s *Service) GetHistory(ctx context.Context, instrumenID uuid.UUID, q listquery.Query, cursor string, limit int) ([]*StageHistoryEntry, pagination.Result, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -456,7 +472,7 @@ func (s *StagingService) GetHistory(ctx context.Context, instrumenID uuid.UUID, 
 //  5. If all 3 pass → insert Stage2 → Stage1 transition (TriggerCure3PeriodeBulanan).
 //
 // Stage 3 cure is MANUAL ONLY (override proposal required).
-func (s *StagingService) AssessCure(ctx context.Context, instrumenID uuid.UUID) (cured bool, err error) {
+func (s *Service) AssessCure(ctx context.Context, instrumenID uuid.UUID) (cured bool, err error) {
 	claims := auth.ClaimsFromContext(ctx)
 	actorID, err := requireActor(claims)
 	if err != nil {
@@ -538,7 +554,7 @@ func (s *StagingService) AssessCure(ctx context.Context, instrumenID uuid.UUID) 
 	inserted, err := s.histRepo.Insert(ctx, tx, cureEntry)
 	if err != nil {
 		if err == ErrConflict {
-			_ = tx.Rollback()
+			rollbackTx(ctx, tx, s.logger)
 			return true, nil // idempotent
 		}
 		return false, fmt.Errorf("staging AssessCure: Insert: %w", err)
@@ -569,7 +585,7 @@ func (s *StagingService) AssessCure(ctx context.Context, instrumenID uuid.UUID) 
 // Stage 2→1: 4-eyes (RISK maker + RISK reviewer + ALCO).
 //
 // Enforces: one active proposal per instrument; valid stage transition.
-func (s *StagingService) SubmitOverride(ctx context.Context, req OverrideSubmitRequest) (*OverrideProposal, error) {
+func (s *Service) SubmitOverride(ctx context.Context, req OverrideSubmitRequest) (*OverrideProposal, error) {
 	claims := auth.ClaimsFromContext(ctx)
 	actorID, err := requireActor(claims)
 	if err != nil {
@@ -605,10 +621,9 @@ func (s *StagingService) SubmitOverride(ctx context.Context, req OverrideSubmitR
 	}
 
 	now := time.Now().UTC()
-	var periodeAkhir time.Time
-	// Parse PeriodeAkhir from the request; for now default to end of year if not provided.
+	// periodeAkhir defaults to 1 year from now if not provided by request.
 	// In production this would come from mst.periode_buku.
-	periodeAkhir = now.AddDate(1, 0, 0)
+	periodeAkhir := now.AddDate(1, 0, 0)
 
 	prop := &OverrideProposal{
 		ID:                   uuid.New(),
@@ -663,7 +678,7 @@ func (s *StagingService) SubmitOverride(ctx context.Context, req OverrideSubmitR
 
 // ReviewOverride transitions PENDING_REVIEW → PENDING_APPROVAL.
 // SoD: reviewer ≠ maker.
-func (s *StagingService) ReviewOverride(ctx context.Context, proposalID uuid.UUID, req WorkflowActionRequest) (*OverrideProposal, error) {
+func (s *Service) ReviewOverride(ctx context.Context, proposalID uuid.UUID, req WorkflowActionRequest) (*OverrideProposal, error) {
 	claims := auth.ClaimsFromContext(ctx)
 	actorID, err := requireActor(claims)
 	if err != nil {
@@ -734,7 +749,7 @@ func (s *StagingService) ReviewOverride(ctx context.Context, proposalID uuid.UUI
 //
 // Requires step-up MFA (DEC-027). SoD: approver_alco ≠ reviewer ≠ maker.
 // For Stage 2→1 (4-eyes), this is the final approval → activates override.
-func (s *StagingService) ApproveALCO(ctx context.Context, proposalID uuid.UUID, req WorkflowActionRequest) (*OverrideProposal, error) {
+func (s *Service) ApproveALCO(ctx context.Context, proposalID uuid.UUID, req WorkflowActionRequest) (*OverrideProposal, error) {
 	claims := auth.ClaimsFromContext(ctx)
 	actorID, err := requireActor(claims)
 	if err != nil {
@@ -829,7 +844,7 @@ func (s *StagingService) ApproveALCO(ctx context.Context, proposalID uuid.UUID, 
 // ApproveKomite transitions APPROVED_ALCO → ACTIVE (6-eyes final).
 //
 // Only for Stage 3→2. Requires step-up MFA. SoD: 4 different people.
-func (s *StagingService) ApproveKomite(ctx context.Context, proposalID uuid.UUID, req WorkflowActionRequest) (*OverrideProposal, error) {
+func (s *Service) ApproveKomite(ctx context.Context, proposalID uuid.UUID, req WorkflowActionRequest) (*OverrideProposal, error) {
 	claims := auth.ClaimsFromContext(ctx)
 	actorID, err := requireActor(claims)
 	if err != nil {
@@ -921,7 +936,7 @@ func (s *StagingService) ApproveKomite(ctx context.Context, proposalID uuid.UUID
 
 // RejectOverride transitions any in-progress state → REJECTED.
 // SoD: rejecter ≠ maker.
-func (s *StagingService) RejectOverride(ctx context.Context, proposalID uuid.UUID, req WorkflowRejectRequest) (*OverrideProposal, error) {
+func (s *Service) RejectOverride(ctx context.Context, proposalID uuid.UUID, req WorkflowRejectRequest) (*OverrideProposal, error) {
 	claims := auth.ClaimsFromContext(ctx)
 	actorID, err := requireActor(claims)
 	if err != nil {
@@ -984,7 +999,7 @@ func (s *StagingService) RejectOverride(ctx context.Context, proposalID uuid.UUI
 // ─── GetOverride / ListOverrides ──────────────────────────────────────────────
 
 // GetOverride returns a single OverrideProposal by ID.
-func (s *StagingService) GetOverride(ctx context.Context, id uuid.UUID) (*OverrideProposal, error) {
+func (s *Service) GetOverride(ctx context.Context, id uuid.UUID) (*OverrideProposal, error) {
 	prop, err := s.overrideRepo.GetByID(ctx, id, false)
 	if err != nil {
 		if err == ErrNotFound {
@@ -996,7 +1011,7 @@ func (s *StagingService) GetOverride(ctx context.Context, id uuid.UUID) (*Overri
 }
 
 // ListOverrides returns paginated override proposals with filter/sort.
-func (s *StagingService) ListOverrides(ctx context.Context, q listquery.Query, cursor string, limit int) ([]*OverrideProposal, pagination.Result, error) {
+func (s *Service) ListOverrides(ctx context.Context, q listquery.Query, cursor string, limit int) ([]*OverrideProposal, pagination.Result, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -1004,7 +1019,7 @@ func (s *StagingService) ListOverrides(ctx context.Context, q listquery.Query, c
 }
 
 // GetDPDHistory returns paginated DPD records for an instrument.
-func (s *StagingService) GetDPDHistory(ctx context.Context, instrumenID uuid.UUID, q listquery.Query, cursor string, limit int) ([]*DPDRecord, pagination.Result, error) {
+func (s *Service) GetDPDHistory(ctx context.Context, instrumenID uuid.UUID, q listquery.Query, cursor string, limit int) ([]*DPDRecord, pagination.Result, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -1015,7 +1030,7 @@ func (s *StagingService) GetDPDHistory(ctx context.Context, instrumenID uuid.UUI
 
 // activateOverride inserts the stage_history row for an approved override (within tx).
 // Returns the new history row ID.
-func (s *StagingService) activateOverride(ctx context.Context, tx *sql.Tx, prop *OverrideProposal, actorID uuid.UUID, tenantID string) (uuid.UUID, error) {
+func (s *Service) activateOverride(ctx context.Context, tx *sql.Tx, prop *OverrideProposal, actorID uuid.UUID, tenantID string) (uuid.UUID, error) {
 	now := time.Now().UTC()
 	entry := &StageHistoryEntry{
 		ID:                 uuid.New(),

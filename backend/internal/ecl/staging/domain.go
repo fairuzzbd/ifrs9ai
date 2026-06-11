@@ -63,26 +63,6 @@ const (
 	CodeStagingCalcRunSealed = "STAGING_CALC_RUN_SEALED"
 )
 
-// HTTPStatus returns the HTTP status code for a staging-specific error code string.
-// Staging codes are not in the shared domainerrors.Code type; use this helper.
-func stagingHTTPStatus(code string) int {
-	switch code {
-	case CodeStagingEvalInstrumenNotFound:
-		return 404
-	case CodeStagingOverrideInvalidTransition,
-		CodeStagingDPDMissing,
-		CodeStagingCurePeriodeInsufficient,
-		CodeStagingRatingBaselineMissing:
-		return 422
-	case CodeStagingCalcRunSealed:
-		return 423
-	case CodeStagingOverrideExpired:
-		return 410
-	default:
-		return 500
-	}
-}
-
 // errStaging builds a DomainError with a staging-specific code string cast to domainerrors.Code.
 // Callers relying on HTTP status should use ErrStaging* constructors below.
 func errStaging(code string, msg string, details ...domainerrors.Detail) *domainerrors.DomainError {
@@ -151,15 +131,15 @@ func (s Stage) String() string { return string(s) }
 type TriggerType string
 
 const (
-	TriggerRatingDowngrade    TriggerType = "RATING_DOWNGRADE"
-	TriggerIGToNonIG          TriggerType = "IG_TO_NON_IG"
-	TriggerRatingDefault      TriggerType = "RATING_DEFAULT"
-	TriggerDPDGte30           TriggerType = "DPD_GTE_30"
-	TriggerDPDGte90           TriggerType = "DPD_GTE_90"
+	TriggerRatingDowngrade     TriggerType = "RATING_DOWNGRADE"
+	TriggerIGToNonIG           TriggerType = "IG_TO_NON_IG"
+	TriggerRatingDefault       TriggerType = "RATING_DEFAULT"
+	TriggerDPDGte30            TriggerType = "DPD_GTE_30"
+	TriggerDPDGte90            TriggerType = "DPD_GTE_90"
 	TriggerCure3PeriodeBulanan TriggerType = "CURE_3_PERIODE_BULANAN"
-	TriggerManualOverride     TriggerType = "MANUAL_OVERRIDE"
-	TriggerOverrideExpired    TriggerType = "OVERRIDE_EXPIRED"
-	TriggerInitial            TriggerType = "INITIAL"
+	TriggerManualOverride      TriggerType = "MANUAL_OVERRIDE"
+	TriggerOverrideExpired     TriggerType = "OVERRIDE_EXPIRED"
+	TriggerInitial             TriggerType = "INITIAL"
 )
 
 // IsValid returns true if t is a defined trigger.
@@ -192,12 +172,12 @@ const (
 type OverrideWorkflowStatus string
 
 const (
-	OverrideStatusPendingReview  OverrideWorkflowStatus = "PENDING_REVIEW"
+	OverrideStatusPendingReview   OverrideWorkflowStatus = "PENDING_REVIEW"
 	OverrideStatusPendingApproval OverrideWorkflowStatus = "PENDING_APPROVAL"
-	OverrideStatusApprovedALCO   OverrideWorkflowStatus = "APPROVED_ALCO"
-	OverrideStatusActive         OverrideWorkflowStatus = "ACTIVE"
-	OverrideStatusExpired        OverrideWorkflowStatus = "EXPIRED"
-	OverrideStatusRejected       OverrideWorkflowStatus = "REJECTED"
+	OverrideStatusApprovedALCO    OverrideWorkflowStatus = "APPROVED_ALCO"
+	OverrideStatusActive          OverrideWorkflowStatus = "ACTIVE"
+	OverrideStatusExpired         OverrideWorkflowStatus = "EXPIRED"
+	OverrideStatusRejected        OverrideWorkflowStatus = "REJECTED"
 )
 
 // IsTerminal returns true if the status has reached a final state.
@@ -388,23 +368,23 @@ func ComputeNewStage(currentStage Stage, sicrResult SICRResult, dpdValue int) (n
 // DPDRecord mirrors trx.dpd_record (migration 000022 §Section 1).
 // DPD value is a plain int — not money, not decimal.
 type DPDRecord struct {
-	ID          uuid.UUID  `db:"id"`
-	InstrumenID uuid.UUID  `db:"instrumen_id"`
+	ID          uuid.UUID `db:"id"`
+	InstrumenID uuid.UUID `db:"instrumen_id"`
 	// Periode is the first day of the month (YYYY-MM-01) per migration comment.
-	Periode     time.Time  `db:"periode"`
-	DPDValue    int        `db:"dpd_value"`
-	Source      string     `db:"source"` // MANUAL | APP_B
-	Catatan     *string    `db:"catatan"`
-	RecordedBy  uuid.UUID  `db:"recorded_by"`
-	RecordedAt  time.Time  `db:"recorded_at"`
-	CreatedAt   time.Time  `db:"created_at"`
-	CreatedBy   uuid.UUID  `db:"created_by"`
-	UpdatedAt   time.Time  `db:"updated_at"`
-	UpdatedBy   uuid.UUID  `db:"updated_by"`
-	DeletedAt   *time.Time `db:"deleted_at"`
-	DeletedBy   *uuid.UUID `db:"deleted_by"`
-	RowVersion  int64      `db:"row_version"`
-	TenantID    string     `db:"tenant_id"`
+	Periode    time.Time  `db:"periode"`
+	DPDValue   int        `db:"dpd_value"`
+	Source     string     `db:"source"` // MANUAL | APP_B
+	Catatan    *string    `db:"catatan"`
+	RecordedBy uuid.UUID  `db:"recorded_by"`
+	RecordedAt time.Time  `db:"recorded_at"`
+	CreatedAt  time.Time  `db:"created_at"`
+	CreatedBy  uuid.UUID  `db:"created_by"`
+	UpdatedAt  time.Time  `db:"updated_at"`
+	UpdatedBy  uuid.UUID  `db:"updated_by"`
+	DeletedAt  *time.Time `db:"deleted_at"`
+	DeletedBy  *uuid.UUID `db:"deleted_by"`
+	RowVersion int64      `db:"row_version"`
+	TenantID   string     `db:"tenant_id"`
 }
 
 // ─── StageHistoryEntry ────────────────────────────────────────────────────────
@@ -440,33 +420,33 @@ type StageHistoryEntry struct {
 // 6-eyes workflow for Stage 3→2 (ALCO + KOMITE); 4-eyes for Stage 2→1 (ALCO only).
 // Ref: state-machine doc §2.
 type OverrideProposal struct {
-	ID                       uuid.UUID              `db:"id"`
-	InstrumenID              uuid.UUID              `db:"instrumen_id"`
-	StageFrom                Stage                  `db:"stage_from"`
-	StageTo                  Stage                  `db:"stage_to"`
-	Alasan                   string                 `db:"alasan"`
-	ReasonCategory           *string                `db:"reason_category"`
-	DokumenPendukungID       *uuid.UUID             `db:"dokumen_pendukung_id"`
-	PeriodeID                uuid.UUID              `db:"periode_id"`
-	PeriodeAkhir             time.Time              `db:"periode_akhir"`
-	WorkflowStatus           OverrideWorkflowStatus `db:"workflow_status"`
-	CurrentStageAtSubmit     *Stage                 `db:"current_stage_at_submit"`
-	MakerID                  uuid.UUID              `db:"maker_id"`
-	ReviewerID               *uuid.UUID             `db:"reviewer_id"`
-	SignedAtReview            *time.Time             `db:"signed_at_review"`
-	SignatureHashReview       []byte                 `db:"signature_hash_review"`
-	CommentReview            *string                `db:"comment_review"`
-	ApproverALCOID           *uuid.UUID             `db:"approver_alco_id"`
-	SignedAtApproveALCO       *time.Time             `db:"signed_at_approve_alco"`
-	SignatureHashApproveALCO  []byte                 `db:"signature_hash_approve_alco"`
-	CommentApproveALCO       *string                `db:"comment_approve_alco"`
-	ApproverKomiteID         *uuid.UUID             `db:"approver_komite_id"`
-	SignedAtApproveKomite     *time.Time             `db:"signed_at_approve_komite"`
-	SignatureHashApproveKomite []byte                `db:"signature_hash_approve_komite"`
-	CommentApproveKomite     *string                `db:"comment_approve_komite"`
-	RejectReason             *string                `db:"reject_reason"`
-	StageHistoryRowID        *uuid.UUID             `db:"stage_history_row_id"`
-	ExpiresAfterPeriode      *time.Time             `db:"expires_after_periode"`
+	ID                         uuid.UUID              `db:"id"`
+	InstrumenID                uuid.UUID              `db:"instrumen_id"`
+	StageFrom                  Stage                  `db:"stage_from"`
+	StageTo                    Stage                  `db:"stage_to"`
+	Alasan                     string                 `db:"alasan"`
+	ReasonCategory             *string                `db:"reason_category"`
+	DokumenPendukungID         *uuid.UUID             `db:"dokumen_pendukung_id"`
+	PeriodeID                  uuid.UUID              `db:"periode_id"`
+	PeriodeAkhir               time.Time              `db:"periode_akhir"`
+	WorkflowStatus             OverrideWorkflowStatus `db:"workflow_status"`
+	CurrentStageAtSubmit       *Stage                 `db:"current_stage_at_submit"`
+	MakerID                    uuid.UUID              `db:"maker_id"`
+	ReviewerID                 *uuid.UUID             `db:"reviewer_id"`
+	SignedAtReview             *time.Time             `db:"signed_at_review"`
+	SignatureHashReview        []byte                 `db:"signature_hash_review"`
+	CommentReview              *string                `db:"comment_review"`
+	ApproverALCOID             *uuid.UUID             `db:"approver_alco_id"`
+	SignedAtApproveALCO        *time.Time             `db:"signed_at_approve_alco"`
+	SignatureHashApproveALCO   []byte                 `db:"signature_hash_approve_alco"`
+	CommentApproveALCO         *string                `db:"comment_approve_alco"`
+	ApproverKomiteID           *uuid.UUID             `db:"approver_komite_id"`
+	SignedAtApproveKomite      *time.Time             `db:"signed_at_approve_komite"`
+	SignatureHashApproveKomite []byte                 `db:"signature_hash_approve_komite"`
+	CommentApproveKomite       *string                `db:"comment_approve_komite"`
+	RejectReason               *string                `db:"reject_reason"`
+	StageHistoryRowID          *uuid.UUID             `db:"stage_history_row_id"`
+	ExpiresAfterPeriode        *time.Time             `db:"expires_after_periode"`
 	// Standard audit columns:
 	CreatedAt  time.Time  `db:"created_at"`
 	CreatedBy  uuid.UUID  `db:"created_by"`
@@ -486,8 +466,10 @@ func (p *OverrideProposal) Is6Eyes() bool {
 
 // ─── Request / Response types ─────────────────────────────────────────────────
 
-// StagingEvaluateRequest is the body for POST /ecl/staging/evaluate.
-type StagingEvaluateRequest struct {
+// EvaluateRequest is the body for POST /ecl/staging/evaluate.
+//
+// Previously named StagingEvaluateRequest; renamed to avoid revive stutter.
+type EvaluateRequest struct {
 	// InstrumenIDs is an optional subset; empty = all active AC/FVOCI instruments.
 	// Max 500 per OpenAPI spec.
 	InstrumenIDs []uuid.UUID `json:"instrumenIds"`
@@ -513,12 +495,12 @@ type OverrideSubmitRequest struct {
 type WorkflowActionRequest struct {
 	Action          string  `json:"action"          binding:"required"` // APPROVE | REJECT
 	Comment         *string `json:"comment"`
-	SignatureMethod  string  `json:"signatureMethod"`
+	SignatureMethod string  `json:"signatureMethod"`
 }
 
 // WorkflowRejectRequest is the body for the reject endpoint (comment required).
 type WorkflowRejectRequest struct {
-	Comment        string `json:"comment"        binding:"required,min=5"`
+	Comment         string `json:"comment"        binding:"required,min=5"`
 	SignatureMethod string `json:"signatureMethod"`
 }
 
@@ -534,30 +516,30 @@ type DPDRecordCreateRequest struct {
 
 // StageStatus is the response for GET /ecl/staging/instrumen/{id}.
 type StageStatus struct {
-	InstrumenID             uuid.UUID  `json:"instrumenId"`
-	KodeInstrumen           string     `json:"kodeInstrumen"`
-	NamaInstrumen           string     `json:"namaInstrumen"`
-	KlasifikasiPsak71       string     `json:"klasifikasiPsak71"`
-	CurrentStage            *Stage     `json:"currentStage"` // nil if never evaluated
-	LastTransitionDate      *time.Time `json:"lastTransitionDate"`
-	LastTriggerType         *TriggerType `json:"lastTriggerType"`
-	LastTriggerDetail       *string    `json:"lastTriggerDetail"`
-	LastRatingSaatMigrasi   *string    `json:"lastRatingSaatMigrasi"`
-	LastDPD                 *int       `json:"lastDpd"`
+	InstrumenID             uuid.UUID       `json:"instrumenId"`
+	KodeInstrumen           string          `json:"kodeInstrumen"`
+	NamaInstrumen           string          `json:"namaInstrumen"`
+	KlasifikasiPsak71       string          `json:"klasifikasiPsak71"`
+	CurrentStage            *Stage          `json:"currentStage"` // nil if never evaluated
+	LastTransitionDate      *time.Time      `json:"lastTransitionDate"`
+	LastTriggerType         *TriggerType    `json:"lastTriggerType"`
+	LastTriggerDetail       *string         `json:"lastTriggerDetail"`
+	LastRatingSaatMigrasi   *string         `json:"lastRatingSaatMigrasi"`
+	LastDPD                 *int            `json:"lastDpd"`
 	LastStatusApproval      *StatusApproval `json:"lastStatusApproval"`
-	ActiveOverrideID        *uuid.UUID `json:"activeOverrideId"`
-	ActiveOverrideExpiresAt *time.Time `json:"activeOverrideExpiresAt"`
+	ActiveOverrideID        *uuid.UUID      `json:"activeOverrideId"`
+	ActiveOverrideExpiresAt *time.Time      `json:"activeOverrideExpiresAt"`
 }
 
 // EvaluationResult is returned by EvaluateInstrumen.
 type EvaluationResult struct {
-	InstrumenID     uuid.UUID
-	PreviousStage   *Stage
-	NewStage        *Stage
-	SICRResult      SICRResult
+	InstrumenID         uuid.UUID
+	PreviousStage       *Stage
+	NewStage            *Stage
+	SICRResult          SICRResult
 	HistoryRowsInserted int
-	Skipped         bool
-	SkipReason      string
+	Skipped             bool
+	SkipReason          string
 }
 
 // CureResult summarizes a cure assessment job run.

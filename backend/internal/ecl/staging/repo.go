@@ -265,7 +265,8 @@ func (r *DBDPDRepository) ListDPD(ctx context.Context, instrumenID uuid.UUID, q 
 		orderBy = "d.periode DESC"
 	}
 	fetch := limit + 1
-	sql := fmt.Sprintf(`
+	//nolint:gosec // G201: SQL built from validated allowlist columns only; no user input in SQL structure.
+	sqlQ := fmt.Sprintf(`
 		SELECT id, instrumen_id, periode, dpd_value, source, catatan,
 		       recorded_by, recorded_at,
 		       created_at, created_by, updated_at, updated_by,
@@ -275,7 +276,7 @@ func (r *DBDPDRepository) ListDPD(ctx context.Context, instrumenID uuid.UUID, q 
 		ORDER BY %s
 		LIMIT %d`, full, orderBy, fetch)
 
-	rows, err := r.db.QueryContext(ctx, sql, args...)
+	rows, err := r.db.QueryContext(ctx, sqlQ, args...)
 	if err != nil {
 		return nil, pagination.Result{}, fmt.Errorf("staging DPD ListDPD: %w", err)
 	}
@@ -451,6 +452,7 @@ func (r *DBStageHistoryRepository) ListHistory(ctx context.Context, instrumenID 
 		orderBy = "sh.tanggal_migrasi DESC, sh.created_at DESC"
 	}
 	fetch := limit + 1
+	//nolint:gosec // G201: SQL built from validated allowlist columns only; no user input in SQL structure.
 	sqlStr := fmt.Sprintf(`
 		SELECT sh.id, sh.instrumen_id, sh.stage_sebelum, sh.stage_sesudah, sh.trigger_type,
 		       sh.detail_trigger, sh.rating_saat_migrasi, sh.dpd, sh.tanggal_migrasi,
@@ -807,6 +809,7 @@ func (r *DBOverrideProposalRepository) ListOverrides(ctx context.Context, q list
 	}
 	fetch := limit + 1
 
+	//nolint:gosec // G201: SQL built from validated allowlist columns only; no user input in SQL structure.
 	sqlStr := fmt.Sprintf(`
 		SELECT id FROM ecl.staging_override_proposal p
 		WHERE %s ORDER BY %s LIMIT %d`, full, orderBy, fetch)

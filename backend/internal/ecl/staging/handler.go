@@ -1,17 +1,18 @@
 // Package staging — HTTP handler layer for ECL Staging Engine (APP-C-STG-001..005).
 //
 // 11 endpoints per api/openapi/app-c-staging.yaml:
-//   POST   /ecl/staging/evaluate                       → EvaluateHandler (202)
-//   GET    /ecl/staging/instrumen/{id}                 → GetCurrentStageHandler
-//   GET    /ecl/staging/instrumen/{id}/history         → GetHistoryHandler
-//   POST   /ecl/staging/override/submit                → SubmitOverrideHandler
-//   POST   /ecl/staging/override/{id}/review           → ReviewOverrideHandler
-//   POST   /ecl/staging/override/{id}/approve          → ApproveALCOHandler
-//   POST   /ecl/staging/override/{id}/approve2         → ApproveKomiteHandler
-//   POST   /ecl/staging/override/{id}/reject           → RejectOverrideHandler
-//   GET    /ecl/staging/overrides                      → ListOverridesHandler
-//   POST   /ecl/dpd/record                             → RecordDPDHandler
-//   GET    /ecl/dpd/instrumen/{id}                     → GetDPDHistoryHandler
+//
+//	POST   /ecl/staging/evaluate                       → EvaluateHandler (202)
+//	GET    /ecl/staging/instrumen/{id}                 → GetCurrentStageHandler
+//	GET    /ecl/staging/instrumen/{id}/history         → GetHistoryHandler
+//	POST   /ecl/staging/override/submit                → SubmitOverrideHandler
+//	POST   /ecl/staging/override/{id}/review           → ReviewOverrideHandler
+//	POST   /ecl/staging/override/{id}/approve          → ApproveALCOHandler
+//	POST   /ecl/staging/override/{id}/approve2         → ApproveKomiteHandler
+//	POST   /ecl/staging/override/{id}/reject           → RejectOverrideHandler
+//	GET    /ecl/staging/overrides                      → ListOverridesHandler
+//	POST   /ecl/dpd/record                             → RecordDPDHandler
+//	GET    /ecl/dpd/instrumen/{id}                     → GetDPDHistoryHandler
 //
 // All POST endpoints require Idempotency-Key header (enforced by middleware, DEC-021).
 // Handlers contain no business logic; they only parse → delegate → serialize.
@@ -32,11 +33,11 @@ import (
 
 // Handler is the HTTP handler for staging endpoints.
 type Handler struct {
-	svc *StagingService
+	svc *Service
 }
 
 // NewHandler creates a Handler.
-func NewHandler(svc *StagingService) *Handler {
+func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
@@ -46,7 +47,7 @@ func NewHandler(svc *StagingService) *Handler {
 // Returns 202 Accepted — triggers SICR evaluation for submitted instrument IDs.
 // Idempotency-Key enforced by middleware.
 func (h *Handler) EvaluateHandler(c *gin.Context) {
-	var req StagingEvaluateRequest
+	var req EvaluateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.Error(c, domainerrors.New(domainerrors.CodeValidationFailed,
 			"Request body tidak valid: "+err.Error()))
@@ -84,7 +85,7 @@ func (h *Handler) EvaluateHandler(c *gin.Context) {
 
 // GetCurrentStageHandler handles GET /api/v1/ecl/staging/instrumen/{id}.
 func (h *Handler) GetCurrentStageHandler(c *gin.Context) {
-	instrumenID, err := parseUUIDParam(c, "id")
+	instrumenID, err := parseIDParam(c)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -102,7 +103,7 @@ func (h *Handler) GetCurrentStageHandler(c *gin.Context) {
 
 // GetHistoryHandler handles GET /api/v1/ecl/staging/instrumen/{id}/history.
 func (h *Handler) GetHistoryHandler(c *gin.Context) {
-	instrumenID, err := parseUUIDParam(c, "id")
+	instrumenID, err := parseIDParam(c)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -164,7 +165,7 @@ func (h *Handler) SubmitOverrideHandler(c *gin.Context) {
 
 // ReviewOverrideHandler handles POST /api/v1/ecl/staging/override/{id}/review.
 func (h *Handler) ReviewOverrideHandler(c *gin.Context) {
-	propID, err := parseUUIDParam(c, "id")
+	propID, err := parseIDParam(c)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -190,7 +191,7 @@ func (h *Handler) ReviewOverrideHandler(c *gin.Context) {
 // ApproveALCOHandler handles POST /api/v1/ecl/staging/override/{id}/approve.
 // Requires step-up MFA (DEC-027). Enforced in service.
 func (h *Handler) ApproveALCOHandler(c *gin.Context) {
-	propID, err := parseUUIDParam(c, "id")
+	propID, err := parseIDParam(c)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -216,7 +217,7 @@ func (h *Handler) ApproveALCOHandler(c *gin.Context) {
 // ApproveKomiteHandler handles POST /api/v1/ecl/staging/override/{id}/approve2.
 // 6-eyes second approval (KOMITE). Requires step-up MFA (DEC-027).
 func (h *Handler) ApproveKomiteHandler(c *gin.Context) {
-	propID, err := parseUUIDParam(c, "id")
+	propID, err := parseIDParam(c)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -241,7 +242,7 @@ func (h *Handler) ApproveKomiteHandler(c *gin.Context) {
 
 // RejectOverrideHandler handles POST /api/v1/ecl/staging/override/{id}/reject.
 func (h *Handler) RejectOverrideHandler(c *gin.Context) {
-	propID, err := parseUUIDParam(c, "id")
+	propID, err := parseIDParam(c)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -340,7 +341,7 @@ func (h *Handler) RecordDPDHandler(c *gin.Context) {
 
 // GetDPDHistoryHandler handles GET /api/v1/ecl/dpd/instrumen/{id}.
 func (h *Handler) GetDPDHistoryHandler(c *gin.Context) {
-	instrumenID, err := parseUUIDParam(c, "id")
+	instrumenID, err := parseIDParam(c)
 	if err != nil {
 		response.Error(c, err)
 		return
@@ -368,12 +369,13 @@ func (h *Handler) GetDPDHistoryHandler(c *gin.Context) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-func parseUUIDParam(c *gin.Context, name string) (uuid.UUID, error) {
-	s := c.Param(name)
+// parseIDParam parses the ":id" route parameter as a UUID.
+func parseIDParam(c *gin.Context) (uuid.UUID, error) {
+	s := c.Param("id")
 	id, err := uuid.Parse(s)
 	if err != nil {
 		return uuid.Nil, domainerrors.New(domainerrors.CodeValidationFailed,
-			"Parameter '"+name+"' harus berformat UUID")
+			"Parameter 'id' harus berformat UUID")
 	}
 	return id, nil
 }
