@@ -490,12 +490,15 @@ func DefaultConfigs() map[string]*Config {
 				Approver2NotAnyPrevious:    true,
 			},
 		},
-		// LOOKTHROUGH_COMPOSITION — P4-M4 fund composition 6-eyes workflow
-		// (ROLE-AKUN maker → ROLE-RISK reviewer → ROLE-ALCO approver).
+		// LOOKTHROUGH_COMPOSITION — P4-M4 fund composition 4-eyes workflow
+		// (ROLE-AKUN maker → ROLE-RISK reviewer → ROLE-ALCO approver = 3 distinct actors).
+		// BLIPS taxonomy: 3 distinct actors = 4-eyes (FSD-APP-C §2.1, DEC-017).
+		// Eyes:6 would require a second approver step (PENDING_APPROVAL_2) which is NOT in
+		// the state machine (p4-m4-lookthrough.md §5.2). Corrected to Eyes:4.
 		// MFA: ROLE-ALCO wajib MFA (DEC-026). No step-up (state-machine p4-m4-lookthrough.md §5.2).
 		"LOOKTHROUGH_COMPOSITION": {
 			EntityType:  "LOOKTHROUGH_COMPOSITION",
-			Eyes:        6,
+			Eyes:        4,
 			Retractable: false,
 			RequiredPermissions: map[string]string{
 				"submit":   "fund_composition.create",
