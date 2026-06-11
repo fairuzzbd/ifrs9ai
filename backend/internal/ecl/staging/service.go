@@ -1,6 +1,6 @@
 // Package staging — service layer for ECL Staging Engine.
 //
-// StagingService owns all business logic:
+// Service owns all business logic:
 //   - SICR evaluation per DEC-011 (3 triggers).
 //   - Stage transition with append-only ecl.stage_history rows.
 //   - Cure assessment per DEC-012 (3 consecutive closed BULANAN periods).
@@ -99,8 +99,6 @@ type InstrumenSnapshot struct {
 // ─── Service ─────────────────────────────────────────────────────────────────
 
 // Service is the business logic layer for the staging engine.
-//
-// Previously named StagingService; renamed to avoid revive stutter (package staging + type StagingService).
 type Service struct {
 	dpdRepo         DPDRepository
 	histRepo        StageHistoryRepository
@@ -111,12 +109,8 @@ type Service struct {
 	logger          *slog.Logger
 }
 
-// StagingService is an alias kept for backwards compatibility with cmd/api wiring.
-// New code should use *Service directly.
-type StagingService = Service
-
-// NewStagingService constructs a Service (alias: StagingService).
-func NewStagingService(
+// NewService constructs the Service.
+func NewService(
 	dpdRepo DPDRepository,
 	histRepo StageHistoryRepository,
 	overrideRepo OverrideProposalRepository,

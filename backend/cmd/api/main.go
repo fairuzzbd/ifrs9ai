@@ -499,7 +499,7 @@ func main() {
 	stagingInstrumenReader := staging.NewDBInstrumenReader(db)
 	// periodeReader adapter: queries mst.periode_buku directly via *sql.DB.
 	stagingPeriodeReader := staging.NewDBPeriodeBukuReader(db)
-	stagingSvc := staging.NewStagingService(
+	stagingSvc := staging.NewService(
 		stagingDPDRepo,
 		stagingHistRepo,
 		stagingOverrideRepo,

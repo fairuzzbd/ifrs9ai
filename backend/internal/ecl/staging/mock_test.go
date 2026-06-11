@@ -322,7 +322,7 @@ func newTestService(
 	instrumen staging.InstrumenReader,
 	periode staging.PeriodeBukuReader,
 ) *staging.Service {
-	return staging.NewStagingService(
+	return staging.NewService(
 		dpdRepo,
 		histRepo,
 		overrideRepo,

@@ -88,7 +88,7 @@ func newTestWorker(
 	instrumen staging.InstrumenReader,
 	periodeReader staging.PeriodeBukuReader,
 ) *staging.TaskWorker {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), histRepo, overRepo,
 		instrumen, periodeReader,
 		noopAuditWriter(), noopLogger(),
@@ -98,7 +98,7 @@ func newTestWorker(
 
 // TestNewTaskWorker_NilLogger_UsesDefault covers the nil logger branch in NewTaskWorker.
 func TestNewTaskWorker_NilLogger_UsesDefault(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),

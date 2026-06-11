@@ -1088,7 +1088,7 @@ func TestSubmitOverride_Success_Stage2_TargetStage1(t *testing.T) {
 
 // ─── AssessCure additional paths ─────────────────────────────────────────────
 
-// ─── NewStagingService ───────────────────────────────────────────────────────
+// ─── NewService ───────────────────────────────────────────────────────
 
 // ─── tenantFromClaims coverage ────────────────────────────────────────────────
 
@@ -1109,7 +1109,7 @@ func TestGetCurrentStage_EmptyRoles_ClaimsRole_Returns_Empty(t *testing.T) {
 	instrumen := defaultMockInstrumen()
 	instrumen.originRating = "idAAA"
 	instrumen.currentRating = "idAA" // 2-notch downgrade → SICR
-	svc2 := staging.NewStagingService(
+	svc2 := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		instrumen, &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -1144,11 +1144,11 @@ func TestGetCurrentStage_EmptyTenantID_UsesDefault(t *testing.T) {
 	_ = stage
 }
 
-// ─── NewStagingService coverage ───────────────────────────────────────────────
+// ─── NewService coverage ───────────────────────────────────────────────
 
-// TestNewStagingService_NilLogger_UsesDefault verifies that a nil logger is replaced by slog.Default().
-func TestNewStagingService_NilLogger_UsesDefault(t *testing.T) {
-	svc := staging.NewStagingService(
+// TestNewService_NilLogger_UsesDefault verifies that a nil logger is replaced by slog.Default().
+func TestNewService_NilLogger_UsesDefault(t *testing.T) {
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), nil, // nil logger → use slog.Default()

@@ -27,52 +27,6 @@ func init() {
 	gin.SetMode(gin.TestMode)
 }
 
-// ─── stub service ─────────────────────────────────────────────────────────────
-
-// stubService implements only the service methods called by handlers, returning
-// controlled responses for each test.
-type stubService struct {
-	evaluateResult []*staging.EvaluationResult
-	evaluateErr    error
-	currentStage   *staging.StageStatus
-	currentErr     error
-	historyItems   []*staging.StageHistoryEntry
-	historyErr     error
-	submitResult   *staging.OverrideProposal
-	submitErr      error
-	approveResult  *staging.OverrideProposal
-	approveErr     error
-	rejectResult   *staging.OverrideProposal
-	rejectErr      error
-	dpdResult      *staging.DPDRecord
-	dpdErr         error
-	dpdHistItems   []*staging.DPDRecord
-	dpdHistErr     error
-	overrideItems  []*staging.OverrideProposal
-	overrideErr    error
-}
-
-// stubbedHandler creates a Handler with a stub service injected.
-// Because Handler.svc is *staging.Service and Service has concrete methods,
-// we cannot inject a stub interface directly.  Instead we build a real Service
-// backed by mock repos that produce the desired outcomes.
-func stubbedHandlerForEvaluate(evalErr error, evalResult []*staging.EvaluationResult) *staging.Handler {
-	instrumen := defaultMockInstrumen()
-	if evalErr != nil {
-		instrumen.getErr = evalErr
-	}
-	histRepo := newMockHistRepo()
-	dpdRepo := newMockDPDRepo()
-	overRepo := newMockOverrideRepo()
-
-	svc := staging.NewStagingService(
-		dpdRepo, histRepo, overRepo,
-		instrumen, &mockPeriodeReader{},
-		noopAuditWriter(), noopLogger(),
-	)
-	return staging.NewHandler(svc)
-}
-
 // ─── TestEvaluate_202_ReturnsJobID ────────────────────────────────────────────
 
 func TestEvaluate_202_ReturnsResults(t *testing.T) {
@@ -81,7 +35,7 @@ func TestEvaluate_202_ReturnsResults(t *testing.T) {
 	instrumen.originRating = "idA"
 	instrumen.currentRating = "idA" // no SICR
 
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		instrumen, &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -122,7 +76,7 @@ func TestEvaluate_404_InstrumenNotFound(t *testing.T) {
 	instrumen := defaultMockInstrumen()
 	instrumen.getErr = staging.ErrNotFound // instrument not found
 
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		instrumen, &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -153,7 +107,7 @@ func TestEvaluate_404_InstrumenNotFound(t *testing.T) {
 // ─── TestSubmitOverride_400_ReasonTooShort ────────────────────────────────────
 
 func TestSubmitOverride_400_ReasonTooShort(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -201,7 +155,7 @@ func TestSubmitOverride_403_SoDViolation(t *testing.T) {
 	overRepo := newMockOverrideRepo()
 	instrumen := defaultMockInstrumen()
 
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), histRepo, overRepo,
 		instrumen, &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -232,7 +186,7 @@ func TestSubmitOverride_403_SoDViolation(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected data in submit response, got: %v", submitResp)
 	}
-	// OverrideProposal has db tags but no json tags — Go serialises as "ID" (uppercase).
+	// OverrideProposal has db tags but no json tags — Go serializes as "ID" (uppercase).
 	propIDStr, _ := dataMap["ID"].(string)
 	propID, _ := uuid.Parse(propIDStr)
 
@@ -272,7 +226,7 @@ func TestApproveALCO_403_StepUpRequired(t *testing.T) {
 		TenantID:       "TUGURE",
 	}
 
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), overRepo,
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -305,7 +259,7 @@ func TestGetHistory_AppliesListQuery_SortAndFilter(t *testing.T) {
 	instrumenID := uuid.New()
 	instrumen := defaultMockInstrumen()
 
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		instrumen, &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -331,7 +285,7 @@ func TestGetHistory_AppliesListQuery_SortAndFilter(t *testing.T) {
 // TestGetHistory_RejectsUnknownSortCol ensures 400 for unknown sort column.
 func TestGetHistory_RejectsUnknownSortCol(t *testing.T) {
 	instrumenID := uuid.New()
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -358,7 +312,7 @@ func TestGetHistory_RejectsUnknownSortCol(t *testing.T) {
 
 func TestRecordDPD_201_Success(t *testing.T) {
 	instrumenID := uuid.New()
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -397,7 +351,7 @@ func TestIdempotencyKeyReplay_ReturnsCachedResponse(t *testing.T) {
 
 	// First call: no conflict.
 	histRepo := newMockHistRepo()
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), histRepo, newMockOverrideRepo(),
 		instrumen, &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -435,7 +389,7 @@ func TestIdempotencyKeyReplay_ReturnsCachedResponse(t *testing.T) {
 
 func TestGetCurrentStageHandler_200_NoHistory(t *testing.T) {
 	instrumenID := uuid.New()
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -479,7 +433,7 @@ func TestApproveKomiteHandler_422_WrongStatus(t *testing.T) {
 		TenantID:       "TUGURE",
 	}
 
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), overRepo,
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -520,7 +474,7 @@ func TestRejectOverrideHandler_200_Success(t *testing.T) {
 		TenantID:       "TUGURE",
 	}
 
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), overRepo,
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -546,7 +500,7 @@ func TestRejectOverrideHandler_200_Success(t *testing.T) {
 // ─── TestListOverridesHandler ─────────────────────────────────────────────────
 
 func TestListOverridesHandler_200_OK(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -569,7 +523,7 @@ func TestListOverridesHandler_200_OK(t *testing.T) {
 
 func TestGetDPDHistoryHandler_200_OK(t *testing.T) {
 	instrumenID := uuid.New()
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -609,7 +563,7 @@ func TestReviewOverrideHandler_200_Success(t *testing.T) {
 		TenantID:       "TUGURE",
 	}
 
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), overRepo,
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -652,7 +606,7 @@ func TestApproveALCOHandler_200_Success(t *testing.T) {
 		TenantID:       "TUGURE",
 	}
 
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), overRepo,
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -678,7 +632,7 @@ func TestApproveALCOHandler_200_Success(t *testing.T) {
 // ─── TestRecordDPD_400_NegativeDPD ───────────────────────────────────────────
 
 func TestRecordDPD_400_NegativeDPD(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -706,7 +660,7 @@ func TestRecordDPD_400_NegativeDPD(t *testing.T) {
 
 // TestRecordDPD_400_InvalidSource.
 func TestRecordDPD_400_InvalidSource(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -734,7 +688,7 @@ func TestRecordDPD_400_InvalidSource(t *testing.T) {
 
 // TestRecordDPD_400_InvalidPeriodeFormat.
 func TestRecordDPD_400_InvalidPeriodeFormat(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -763,7 +717,7 @@ func TestRecordDPD_400_InvalidPeriodeFormat(t *testing.T) {
 // ─── TestSubmitOverrideHandler_400_InvalidStageTarget ────────────────────────
 
 func TestSubmitOverrideHandler_400_InvalidStageTarget(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -792,7 +746,7 @@ func TestSubmitOverrideHandler_400_InvalidStageTarget(t *testing.T) {
 // ─── TestGetCurrentStageHandler_400_InvalidID ─────────────────────────────────
 
 func TestGetCurrentStageHandler_400_InvalidID(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -815,7 +769,7 @@ func TestGetCurrentStageHandler_400_InvalidID(t *testing.T) {
 // ─── TestListOverridesHandler_InvalidSort ─────────────────────────────────────
 
 func TestListOverridesHandler_400_InvalidSort(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -837,7 +791,7 @@ func TestListOverridesHandler_400_InvalidSort(t *testing.T) {
 // ─── TestEvaluateHandler_400_MissingBody ──────────────────────────────────────
 
 func TestEvaluateHandler_400_MissingBody(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -866,7 +820,7 @@ func TestRegisterRoutes_RegistersAllEndpoints(t *testing.T) {
 	engine := gin.New()
 	rg := engine.Group("/api/v1")
 
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -910,7 +864,7 @@ func TestRegisterRoutes_RegistersAllEndpoints(t *testing.T) {
 
 // TestRejectOverrideHandler_400_EmptyComment checks empty comment → 400.
 func TestRejectOverrideHandler_400_EmptyComment(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -937,7 +891,7 @@ func TestRejectOverrideHandler_400_EmptyComment(t *testing.T) {
 
 // TestRejectOverrideHandler_400_InvalidID checks invalid UUID param → 400.
 func TestRejectOverrideHandler_400_InvalidID(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -963,7 +917,7 @@ func TestRejectOverrideHandler_400_InvalidID(t *testing.T) {
 
 // TestRejectOverrideHandler_400_BadBody checks invalid JSON body → 400.
 func TestRejectOverrideHandler_400_BadBody(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -991,7 +945,7 @@ func TestRejectOverrideHandler_400_BadBody(t *testing.T) {
 
 // TestGetDPDHistoryHandler_400_InvalidID checks invalid UUID param → 400.
 func TestGetDPDHistoryHandler_400_InvalidID(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -1013,7 +967,7 @@ func TestGetDPDHistoryHandler_400_InvalidID(t *testing.T) {
 
 // TestGetDPDHistoryHandler_400_InvalidSort checks invalid sort column → 400.
 func TestGetDPDHistoryHandler_400_InvalidSort(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -1040,7 +994,7 @@ func TestGetDPDHistoryHandler_400_InvalidSort(t *testing.T) {
 
 // TestGetHistoryHandler_400_InvalidID checks invalid UUID param → 400.
 func TestGetHistoryHandler_400_InvalidID(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -1062,7 +1016,7 @@ func TestGetHistoryHandler_400_InvalidID(t *testing.T) {
 
 // TestGetHistoryHandler_400_InvalidSort checks invalid sort column → 400.
 func TestGetHistoryHandler_400_InvalidSort(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -1089,7 +1043,7 @@ func TestGetHistoryHandler_400_InvalidSort(t *testing.T) {
 
 // TestReviewOverrideHandler_400_InvalidID checks invalid UUID → 400.
 func TestReviewOverrideHandler_400_InvalidID(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -1117,7 +1071,7 @@ func TestReviewOverrideHandler_400_InvalidID(t *testing.T) {
 
 // TestApproveALCOHandler_400_InvalidID checks invalid UUID → 400.
 func TestApproveALCOHandler_400_InvalidID(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -1145,7 +1099,7 @@ func TestApproveALCOHandler_400_InvalidID(t *testing.T) {
 
 // TestApproveKomiteHandler_400_InvalidID checks invalid UUID → 400.
 func TestApproveKomiteHandler_400_InvalidID(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -1173,7 +1127,7 @@ func TestApproveKomiteHandler_400_InvalidID(t *testing.T) {
 
 // TestListOverridesHandler_400_InvalidLimit checks non-numeric limit → 400.
 func TestListOverridesHandler_400_InvalidLimit(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -1194,7 +1148,7 @@ func TestListOverridesHandler_400_InvalidLimit(t *testing.T) {
 
 // TestGetDPDHistoryHandler_400_InvalidLimit checks non-numeric limit → 400.
 func TestGetDPDHistoryHandler_400_InvalidLimit(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -1219,7 +1173,7 @@ func TestGetDPDHistoryHandler_400_InvalidLimit(t *testing.T) {
 
 // TestGetHistoryHandler_400_InvalidLimit checks non-numeric limit → 400.
 func TestGetHistoryHandler_400_InvalidLimit(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -1245,7 +1199,7 @@ func TestGetHistoryHandler_400_InvalidLimit(t *testing.T) {
 // TestRecordDPDHandler_401_NoActor covers the service error path in RecordDPDHandler.
 // A valid body is submitted without auth context → service.RecordDPD returns UNAUTHORIZED.
 func TestRecordDPDHandler_401_NoActor(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -1280,7 +1234,7 @@ func TestRecordDPDHandler_401_NoActor(t *testing.T) {
 
 // TestRecordDPDHandler_400_MissingInstrumenID checks zero-value instrumen_id → 400.
 func TestRecordDPDHandler_400_MissingInstrumenID(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -1311,7 +1265,7 @@ func TestRecordDPDHandler_400_MissingInstrumenID(t *testing.T) {
 // TestSubmitOverrideHandler_400_NilInstrumenID checks zero-value instrumen_id triggers handler validation.
 // Note: gin binding:"required" may or may not catch uuid.Nil — the handler has explicit check.
 func TestSubmitOverrideHandler_400_NilInstrumenID(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -1342,7 +1296,7 @@ func TestSubmitOverrideHandler_400_NilInstrumenID(t *testing.T) {
 
 // TestSubmitOverrideHandler_400_EmptyAlasan checks empty alasan triggers binding validation.
 func TestSubmitOverrideHandler_400_EmptyAlasan(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -1371,7 +1325,7 @@ func TestSubmitOverrideHandler_400_EmptyAlasan(t *testing.T) {
 
 // TestSubmitOverrideHandler_400_BadBody checks malformed JSON → 400.
 func TestSubmitOverrideHandler_400_BadBody(t *testing.T) {
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		defaultMockInstrumen(), &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
@@ -1400,7 +1354,7 @@ func TestRecordDPDHandler_422_ServiceError(t *testing.T) {
 	instrumen := defaultMockInstrumen()
 	instrumen.getErr = domainerrors.New(staging.CodeStagingEvalInstrumenNotFound, "instrumen not found")
 
-	svc := staging.NewStagingService(
+	svc := staging.NewService(
 		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
 		instrumen, &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
