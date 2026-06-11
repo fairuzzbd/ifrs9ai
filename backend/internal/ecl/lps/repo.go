@@ -348,6 +348,11 @@ func scanInstrumenDepositoRows(rows *sql.Rows) ([]InstrumenDepositoRow, error) {
 // OverrideRepoIface defines CRUD operations on ecl.lps_exclusion_override.
 // No hard delete (ecl schema rule — migration 000005 fn_ecl_no_hard_delete trigger).
 type OverrideRepoIface interface {
+	// GetInstrumenTipe fetches tipe_instrumen from mst.instrumen for the given ID.
+	// Returns (tipe, nil) on success, ("", domainerrors.ErrNotFound) if not found or soft-deleted.
+	// Used by OverrideService.Submit to validate instrumenID existence and DEPOSITO type (F1, F3).
+	GetInstrumenTipe(ctx context.Context, instrumenID uuid.UUID) (string, error)
+
 	// GetByID loads one override by primary key.
 	// Returns (nil, nil) if not found (soft-deleted counts as not found).
 	GetByID(ctx context.Context, id uuid.UUID) (*LPSExclusionOverride, error)
@@ -410,6 +415,29 @@ func init() {
 			panic("lps: AllowedSortColsOverride contains column not in allowedOverrideSortCols: " + col)
 		}
 	}
+}
+
+const instrumenTipeQuery = `
+SELECT tipe_instrumen
+FROM mst.instrumen
+WHERE id = $1
+  AND deleted_at IS NULL`
+
+// GetInstrumenTipe fetches tipe_instrumen from mst.instrumen.
+// Returns ("", domainerrors.ErrNotFound("instrumen")) if not found or soft-deleted.
+func (r *DBOverrideRepo) GetInstrumenTipe(ctx context.Context, instrumenID uuid.UUID) (string, error) {
+	if r.db == nil {
+		return "", fmt.Errorf("lps override repo: db not initialized")
+	}
+	var tipe string
+	err := r.db.QueryRowContext(ctx, instrumenTipeQuery, instrumenID).Scan(&tipe)
+	if err == sql.ErrNoRows {
+		return "", domainerrors.ErrNotFound("instrumen")
+	}
+	if err != nil {
+		return "", err
+	}
+	return tipe, nil
 }
 
 const overrideByIDQuery = `

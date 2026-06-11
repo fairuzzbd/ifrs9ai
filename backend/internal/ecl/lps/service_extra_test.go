@@ -36,6 +36,10 @@ func TestSubmitOverride_Success(t *testing.T) {
 	newID := uuid.New()
 	now := time.Now()
 
+	// GetInstrumenTipe is called first (F1+F3 fix), before all other checks.
+	mock.ExpectQuery("SELECT tipe_instrumen").
+		WillReturnRows(sqlmock.NewRows([]string{"tipe_instrumen"}).AddRow("DEPOSITO"))
+
 	// HasActiveOrPendingForInstrumen is called before BeginTx.
 	mock.ExpectQuery("SELECT id").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "workflow_status"}))
@@ -54,12 +58,7 @@ func TestSubmitOverride_Success(t *testing.T) {
 	ovRepo := newDBOverrideRepoForTest(db)
 	auditW := &mockAuditWriter{}
 
-	svc := &OverrideService{
-		db:           db,
-		overrideRepo: ovRepo,
-		periodeRepo:  periodeRepo,
-		auditWriter:  auditW,
-	}
+	svc := NewOverrideService(db, ovRepo, periodeRepo, auditW)
 
 	req := SubmitOverrideRequest{
 		InstrumenID:        uuid.New(),
@@ -138,11 +137,7 @@ func TestApproveOverride_Success(t *testing.T) {
 
 	ovRepo := newDBOverrideRepoForTest(db)
 	auditW := &mockAuditWriter{}
-	svc := &OverrideService{
-		db:           db,
-		overrideRepo: ovRepo,
-		auditWriter:  auditW,
-	}
+	svc := NewOverrideService(db, ovRepo, nil, auditW)
 
 	result, err := svc.ApproveOverride(context.Background(), overrideID, approverID, "ROLE-ALCO", "comment", "TUGURE")
 	if err != nil {
@@ -211,11 +206,7 @@ func TestRejectOverride_Success(t *testing.T) {
 
 	ovRepo := newDBOverrideRepoForTest(db)
 	auditW := &mockAuditWriter{}
-	svc := &OverrideService{
-		db:           db,
-		overrideRepo: ovRepo,
-		auditWriter:  auditW,
-	}
+	svc := NewOverrideService(db, ovRepo, nil, auditW)
 
 	result, err := svc.RejectOverride(context.Background(), overrideID, actorID, "ROLE-ALCO", "bad override", "TUGURE")
 	if err != nil {
@@ -257,7 +248,7 @@ func TestListOverrides_Success(t *testing.T) {
 	mock.ExpectQuery("SELECT").WillReturnRows(rows)
 
 	ovRepo := NewDBOverrideRepo(db)
-	svc := &OverrideService{overrideRepo: ovRepo}
+	svc := NewOverrideService(nil, ovRepo, nil, &mockAuditWriter{})
 
 	result, nextCursor, hasMore, err := svc.ListOverrides(context.Background(),
 		"PENDING_APPROVAL", "", "", "", "created_at", "desc", "", 50)

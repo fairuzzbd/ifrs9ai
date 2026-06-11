@@ -7,8 +7,11 @@ import (
 	"testing"
 	"time"
 
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
+
+	domainerrors "blips-ifrs9.tugu-re.com/internal/common/errors"
 )
 
 // ─── Test doubles ─────────────────────────────────────────────────────────────
@@ -43,13 +46,25 @@ func (m *mockDepositoRepo) BulkListDepositoForAggregate(ctx context.Context, eva
 
 // mockOverrideRepo implements OverrideRepoIface.
 type mockOverrideRepo struct {
-	overrides     map[uuid.UUID]*LPSExclusionOverride
-	activeSet     map[uuid.UUID]*LPSExclusionOverride
-	hasActivePend bool
-	conflictID    string
-	createErr     error
-	approveErr    error
-	rejectErr     error
+	overrides        map[uuid.UUID]*LPSExclusionOverride
+	activeSet        map[uuid.UUID]*LPSExclusionOverride
+	hasActivePend    bool
+	conflictID       string
+	createErr        error
+	approveErr       error
+	rejectErr        error
+	instrumenTipe    string // returned by GetInstrumenTipe; default "" means "not found"
+	instrumenTipeErr error  // if non-nil, returned directly by GetInstrumenTipe
+}
+
+func (m *mockOverrideRepo) GetInstrumenTipe(ctx context.Context, instrumenID uuid.UUID) (string, error) {
+	if m.instrumenTipeErr != nil {
+		return "", m.instrumenTipeErr
+	}
+	if m.instrumenTipe == "" {
+		return "", domainerrors.ErrNotFound("instrumen")
+	}
+	return m.instrumenTipe, nil
 }
 
 func (m *mockOverrideRepo) GetByID(ctx context.Context, id uuid.UUID) (*LPSExclusionOverride, error) {
@@ -433,16 +448,12 @@ func TestAggregate_FCYMissingKurs(t *testing.T) {
 func newTestOverrideService(ovRepo OverrideRepoIface, periodeRepo PeriodeBukuRepoIface) *OverrideService {
 	// Use nil db — Submit/Approve/Reject use the tx param passed by repo.
 	// For unit tests, we skip DB transaction by using mockRepo which ignores tx.
-	return &OverrideService{
-		db:           nil,
-		overrideRepo: ovRepo,
-		periodeRepo:  periodeRepo,
-		auditWriter:  &mockAuditWriter{},
-	}
+	// Use NewOverrideService constructor to exercise the nil-panic guard (F5).
+	return NewOverrideService(nil, ovRepo, periodeRepo, &mockAuditWriter{})
 }
 
 func TestSubmitOverride_ReasonTooShort(t *testing.T) {
-	svc := newTestOverrideService(&mockOverrideRepo{}, nil)
+	svc := newTestOverrideService(&mockOverrideRepo{instrumenTipe: "DEPOSITO"}, nil)
 	req := SubmitOverrideRequest{
 		InstrumenID:        uuid.New(),
 		ExclusionReason:    "too short",
@@ -470,7 +481,7 @@ func TestSubmitOverride_PeriodeInvalid(t *testing.T) {
 		starts: map[uuid.UUID]time.Time{fromID: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)},
 		ends:   map[uuid.UUID]time.Time{toID: time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC)},
 	}
-	svc := newTestOverrideService(&mockOverrideRepo{}, periodeRepo)
+	svc := newTestOverrideService(&mockOverrideRepo{instrumenTipe: "DEPOSITO"}, periodeRepo)
 	req := SubmitOverrideRequest{
 		InstrumenID:        uuid.New(),
 		ExclusionReason:    "This reason is definitely longer than 30 characters, valid",
@@ -491,7 +502,7 @@ func TestSubmitOverride_DuplicateActive(t *testing.T) {
 		starts: map[uuid.UUID]time.Time{fromID: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)},
 		ends:   map[uuid.UUID]time.Time{toID: time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)},
 	}
-	ovRepo := &mockOverrideRepo{hasActivePend: true, conflictID: "existing-id"}
+	ovRepo := &mockOverrideRepo{instrumenTipe: "DEPOSITO", hasActivePend: true, conflictID: "existing-id"}
 	svc := newTestOverrideService(ovRepo, periodeRepo)
 	req := SubmitOverrideRequest{
 		InstrumenID:        uuid.New(),
@@ -517,7 +528,7 @@ func TestApproveOverride_SoDViolation(t *testing.T) {
 			},
 		},
 	}
-	svc := &OverrideService{overrideRepo: ovRepo, auditWriter: &mockAuditWriter{}}
+	svc := NewOverrideService(nil, ovRepo, nil, &mockAuditWriter{})
 	// Approver == maker → SoD violation.
 	_, err := svc.ApproveOverride(context.Background(), overrideID, makerID, "ROLE-ALCO", "approved", "TUGURE")
 	if err == nil {
@@ -543,7 +554,7 @@ func TestApproveOverride_AlreadyRejected(t *testing.T) {
 			},
 		},
 	}
-	svc := &OverrideService{overrideRepo: ovRepo, auditWriter: &mockAuditWriter{}}
+	svc := NewOverrideService(nil, ovRepo, nil, &mockAuditWriter{})
 	_, err := svc.ApproveOverride(context.Background(), overrideID, uuid.New(), "ROLE-ALCO", "", "TUGURE")
 	if err == nil {
 		t.Fatal("expected error for transition from REJECTED")
@@ -561,7 +572,7 @@ func TestRejectOverride_NotPending(t *testing.T) {
 			},
 		},
 	}
-	svc := &OverrideService{overrideRepo: ovRepo, auditWriter: &mockAuditWriter{}}
+	svc := NewOverrideService(nil, ovRepo, nil, &mockAuditWriter{})
 	_, err := svc.RejectOverride(context.Background(), overrideID, uuid.New(), "ROLE-ALCO", "rejected", "TUGURE")
 	if err == nil {
 		t.Fatal("expected error for reject from APPROVED_ACTIVE")
@@ -570,7 +581,7 @@ func TestRejectOverride_NotPending(t *testing.T) {
 
 func TestRejectOverride_NotFound(t *testing.T) {
 	ovRepo := &mockOverrideRepo{overrides: map[uuid.UUID]*LPSExclusionOverride{}}
-	svc := &OverrideService{overrideRepo: ovRepo, auditWriter: &mockAuditWriter{}}
+	svc := NewOverrideService(nil, ovRepo, nil, &mockAuditWriter{})
 	_, err := svc.RejectOverride(context.Background(), uuid.New(), uuid.New(), "ROLE-ALCO", "rejected", "TUGURE")
 	if err == nil {
 		t.Fatal("expected error for not found override")
@@ -636,4 +647,136 @@ func TestAggregateBulk_TooLarge(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected bulk too large error")
 	}
+}
+
+// ─── F1+F3: SubmitOverride instrumen validation ───────────────────────────────
+
+// TestSubmitOverride_RejectsNonExistentInstrumen verifies that Submit returns
+// ErrLPSOverrideInstrumenNotFound (HTTP 404) when instrumenID is absent from
+// mst.instrumen. FK would have generated an opaque 500; the pre-check surfaces
+// a typed error before the transaction is opened (F3 fix).
+func TestSubmitOverride_RejectsNonExistentInstrumen(t *testing.T) {
+	// mockOverrideRepo with instrumenTipe="" → GetInstrumenTipe returns ErrNotFound.
+	ovRepo := &mockOverrideRepo{instrumenTipe: ""}
+	svc := newTestOverrideService(ovRepo, nil)
+	req := SubmitOverrideRequest{
+		InstrumenID:        uuid.New(),
+		ExclusionReason:    "This exclusion reason is definitely longer than thirty characters",
+		ValidFromPeriodeID: uuid.New(),
+		ValidToPeriodeID:   uuid.New(),
+	}
+	_, err := svc.Submit(context.Background(), req, uuid.New(), "ROLE-RISK", "TUGURE")
+	if err == nil {
+		t.Fatal("expected error for non-existent instrumen")
+	}
+	de, ok := err.(*domainerrors.DomainError)
+	if !ok {
+		t.Fatalf("expected DomainError, got %T: %v", err, err)
+	}
+	if string(de.Code()) != CodeLPSOverrideInstrumenNotFound {
+		t.Errorf("code = %s, want %s", string(de.Code()), CodeLPSOverrideInstrumenNotFound)
+	}
+}
+
+// TestSubmitOverride_RejectsNonDepositoInstrumen verifies that Submit returns
+// ErrLPSAggregateInstrumenNotDeposito (HTTP 422) when instrumenID exists but is
+// not of tipe_instrumen=DEPOSITO. This prevents orphaned overrides on OBLIGASI
+// or SAHAM instruments (F1 fix).
+func TestSubmitOverride_RejectsNonDepositoInstrumen(t *testing.T) {
+	for _, tipe := range []string{"OBLIGASI", "SAHAM", "REKSADANA", "KAS"} {
+		tipe := tipe
+		t.Run(tipe, func(t *testing.T) {
+			ovRepo := &mockOverrideRepo{instrumenTipe: tipe}
+			svc := newTestOverrideService(ovRepo, nil)
+			req := SubmitOverrideRequest{
+				InstrumenID:        uuid.New(),
+				ExclusionReason:    "This exclusion reason is definitely longer than thirty characters",
+				ValidFromPeriodeID: uuid.New(),
+				ValidToPeriodeID:   uuid.New(),
+			}
+			_, err := svc.Submit(context.Background(), req, uuid.New(), "ROLE-RISK", "TUGURE")
+			if err == nil {
+				t.Fatalf("expected error for tipe=%s", tipe)
+			}
+			de, ok := err.(*domainerrors.DomainError)
+			if !ok {
+				t.Fatalf("expected DomainError, got %T: %v", err, err)
+			}
+			if string(de.Code()) != CodeLPSAggregateInstrumenNotDeposito {
+				t.Errorf("code = %s, want %s", string(de.Code()), CodeLPSAggregateInstrumenNotDeposito)
+			}
+		})
+	}
+}
+
+// TestSubmitOverride_HappyPathAfterInstrumenCheck verifies the instrumen check
+// does not interfere with the successful submit flow — the new lookup is prepended
+// but the rest of the validation chain is unaffected (F1+F3 regression guard).
+// Uses sqlmock so BeginTx succeeds with a real *sql.DB.
+func TestSubmitOverride_HappyPathAfterInstrumenCheck(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	fromID := uuid.New()
+	toID := uuid.New()
+	newID := uuid.New()
+	makerID := uuid.New()
+	now := time.Now()
+
+	// GetInstrumenTipe returns DEPOSITO.
+	mock.ExpectQuery("SELECT tipe_instrumen").
+		WillReturnRows(sqlmock.NewRows([]string{"tipe_instrumen"}).AddRow("DEPOSITO"))
+	// HasActiveOrPendingForInstrumen returns empty (no duplicate).
+	mock.ExpectQuery("SELECT id").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "workflow_status"}))
+	// BeginTx → INSERT → Commit.
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO ecl.lps_exclusion_override").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at", "row_version"}).
+			AddRow(newID, now, now, 1))
+	mock.ExpectCommit()
+
+	periodeRepo := &mockPeriodeRepo{
+		starts: map[uuid.UUID]time.Time{fromID: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)},
+		ends:   map[uuid.UUID]time.Time{toID: time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)},
+	}
+	ovRepo := NewDBOverrideRepo(db)
+	svc := NewOverrideService(db, ovRepo, periodeRepo, &mockAuditWriter{})
+
+	req := SubmitOverrideRequest{
+		InstrumenID:        uuid.New(),
+		ExclusionReason:    "Bilateral interbank deposit per LEG-2026-042, more than 30 chars",
+		ValidFromPeriodeID: fromID,
+		ValidToPeriodeID:   toID,
+	}
+	result, err := svc.Submit(context.Background(), req, makerID, "ROLE-RISK", "TUGURE")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.WorkflowStatus != WorkflowStatusPendingApproval {
+		t.Errorf("status = %s, want PENDING_APPROVAL", result.WorkflowStatus)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// ─── F5: NewOverrideService nil auditWriter panic ─────────────────────────────
+
+// TestNewOverrideService_PanicsWhenAuditWriterNil verifies that the constructor
+// panics immediately when auditWriter is nil. This prevents mis-wired production
+// deployments from silently skipping the mandatory audit trail (DEC-018).
+func TestNewOverrideService_PanicsWhenAuditWriterNil(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic when auditWriter is nil, got none")
+		}
+	}()
+	NewOverrideService(nil, &mockOverrideRepo{}, &mockPeriodeRepo{}, nil)
 }

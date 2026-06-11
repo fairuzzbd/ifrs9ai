@@ -18,6 +18,7 @@ func init() {
 }
 
 // newTestHandler creates a Handler with mock services.
+// Uses NewOverrideService constructor to exercise the nil-panic guard (F5).
 func newTestHandler(
 	cov LPSCoverageRepoIface,
 	dep DepositoInstrumenRepoIface,
@@ -26,12 +27,7 @@ func newTestHandler(
 	periodeRepo PeriodeBukuRepoIface,
 ) *Handler {
 	agg := NewAggregatorService(cov, dep, ovRepo, kurs)
-	ovSvc := &OverrideService{
-		db:           nil,
-		overrideRepo: ovRepo,
-		periodeRepo:  periodeRepo,
-		auditWriter:  &mockAuditWriter{},
-	}
+	ovSvc := NewOverrideService(nil, ovRepo, periodeRepo, &mockAuditWriter{})
 	return NewHandler(agg, ovSvc)
 }
 
@@ -249,7 +245,7 @@ func TestHandlerSubmitOverride_ReasonTooShort(t *testing.T) {
 		starts: map[uuid.UUID]time.Time{fromID: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)},
 		ends:   map[uuid.UUID]time.Time{toID: time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)},
 	}
-	h := newTestHandler(&mockCoverageRepo{}, &mockDepositoRepo{}, &mockOverrideRepo{}, &mockKursRepo{}, periodeRepo)
+	h := newTestHandler(&mockCoverageRepo{}, &mockDepositoRepo{}, &mockOverrideRepo{instrumenTipe: "DEPOSITO"}, &mockKursRepo{}, periodeRepo)
 	r := setupRouter(h)
 
 	body, _ := json.Marshal(map[string]string{

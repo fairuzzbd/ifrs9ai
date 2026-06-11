@@ -629,25 +629,47 @@ type OverrideService struct {
 }
 
 // NewOverrideService creates an OverrideService.
+// Panics if auditWriter is nil — a nil audit writer in production silently skips
+// the legally-required audit trail (DEC-018), which is a compliance violation.
+// Logger falls back to slog.Default() if nil (safe; audit is not).
 func NewOverrideService(
 	db *sql.DB,
 	overrideRepo OverrideRepoIface,
 	periodeRepo PeriodeBukuRepoIface,
 	auditWriter AuditWriterIface,
 ) *OverrideService {
+	if auditWriter == nil {
+		panic("lps: auditWriter must not be nil — audit trail is mandatory (DEC-018)")
+	}
+	logger := slog.Default()
 	return &OverrideService{
 		db:           db,
 		overrideRepo: overrideRepo,
 		periodeRepo:  periodeRepo,
 		auditWriter:  auditWriter,
-		logger:       slog.Default(),
+		logger:       logger,
 	}
 }
 
 // Submit proposes a new LPS exclusion override.
-// Enforces: reason ≥ 30 chars, periode ordering, no duplicate active/pending override.
+// Enforces: instrumen existence + DEPOSITO type, reason ≥ 30 chars, periode ordering,
+// no duplicate active/pending override.
 // Inserts in PENDING_APPROVAL state. Audits in same transaction (DEC-018).
 func (s *OverrideService) Submit(ctx context.Context, req SubmitOverrideRequest, makerID uuid.UUID, actorRole, tenantID string) (*LPSExclusionOverride, error) {
+	// F1+F3: Verify instrumen exists and is DEPOSITO BEFORE opening a transaction.
+	// This prevents opaque FK-violation 500s (F3) and silently orphaned non-DEPOSITO
+	// overrides (F1). Per FSD-APP-C §3.3 and AC-LPS-019.
+	tipe, err := s.overrideRepo.GetInstrumenTipe(ctx, req.InstrumenID)
+	if err != nil {
+		if de, ok := err.(*domainerrors.DomainError); ok && de.Code() == domainerrors.CodeNotFound {
+			return nil, ErrLPSOverrideInstrumenNotFound(req.InstrumenID.String())
+		}
+		return nil, fmt.Errorf("lps: submit lookup instrumen: %w", err)
+	}
+	if tipe != "DEPOSITO" {
+		return nil, ErrLPSAggregateInstrumenNotDeposito(tipe)
+	}
+
 	// Validate reason length (AC-LPS-019).
 	if len(req.ExclusionReason) < overrideReasonMinLen {
 		return nil, ErrLPSOverrideReasonTooShort(len(req.ExclusionReason))
@@ -703,19 +725,17 @@ func (s *OverrideService) Submit(ctx context.Context, req SubmitOverrideRequest,
 		return nil, fmt.Errorf("lps: create override: %w", err)
 	}
 
-	if s.auditWriter != nil {
-		if auditErr := s.auditWriter.Write(ctx, tx, AuditEvent{
-			ActorUserID: makerID,
-			ActorRole:   actorRole,
-			Action:      "LPS_EXCLUSION_OVERRIDE.SUBMIT",
-			EntityType:  "ecl.lps_exclusion_override",
-			EntityID:    override.ID,
-			BeforeJSON:  nil,
-			AfterJSON:   override,
-			TenantID:    tenantID,
-		}); auditErr != nil {
-			return nil, fmt.Errorf("lps: audit submit: %w", auditErr)
-		}
+	if auditErr := s.auditWriter.Write(ctx, tx, AuditEvent{
+		ActorUserID: makerID,
+		ActorRole:   actorRole,
+		Action:      "LPS_EXCLUSION_OVERRIDE.SUBMIT",
+		EntityType:  "ecl.lps_exclusion_override",
+		EntityID:    override.ID,
+		BeforeJSON:  nil,
+		AfterJSON:   override,
+		TenantID:    tenantID,
+	}); auditErr != nil {
+		return nil, fmt.Errorf("lps: audit submit: %w", auditErr)
 	}
 
 	if err = tx.Commit(); err != nil {
@@ -756,19 +776,17 @@ func (s *OverrideService) ApproveOverride(ctx context.Context, overrideID uuid.U
 		return nil, fmt.Errorf("lps: approve override: %w", err)
 	}
 
-	if s.auditWriter != nil {
-		if auditErr := s.auditWriter.Write(ctx, tx, AuditEvent{
-			ActorUserID: approverID,
-			ActorRole:   actorRole,
-			Action:      "LPS_EXCLUSION_OVERRIDE.APPROVE",
-			EntityType:  "ecl.lps_exclusion_override",
-			EntityID:    overrideID,
-			BeforeJSON:  map[string]string{"workflowStatus": string(WorkflowStatusPendingApproval)},
-			AfterJSON:   map[string]string{"workflowStatus": string(WorkflowStatusApprovedActive), "comment": comment},
-			TenantID:    tenantID,
-		}); auditErr != nil {
-			return nil, fmt.Errorf("lps: audit approve: %w", auditErr)
-		}
+	if auditErr := s.auditWriter.Write(ctx, tx, AuditEvent{
+		ActorUserID: approverID,
+		ActorRole:   actorRole,
+		Action:      "LPS_EXCLUSION_OVERRIDE.APPROVE",
+		EntityType:  "ecl.lps_exclusion_override",
+		EntityID:    overrideID,
+		BeforeJSON:  map[string]string{"workflowStatus": string(WorkflowStatusPendingApproval)},
+		AfterJSON:   map[string]string{"workflowStatus": string(WorkflowStatusApprovedActive), "comment": comment},
+		TenantID:    tenantID,
+	}); auditErr != nil {
+		return nil, fmt.Errorf("lps: audit approve: %w", auditErr)
 	}
 
 	if err = tx.Commit(); err != nil {
@@ -802,19 +820,17 @@ func (s *OverrideService) RejectOverride(ctx context.Context, overrideID uuid.UU
 		return nil, fmt.Errorf("lps: reject override: %w", err)
 	}
 
-	if s.auditWriter != nil {
-		if auditErr := s.auditWriter.Write(ctx, tx, AuditEvent{
-			ActorUserID: actorID,
-			ActorRole:   actorRole,
-			Action:      "LPS_EXCLUSION_OVERRIDE.REJECT",
-			EntityType:  "ecl.lps_exclusion_override",
-			EntityID:    overrideID,
-			BeforeJSON:  map[string]string{"workflowStatus": string(WorkflowStatusPendingApproval)},
-			AfterJSON:   map[string]string{"workflowStatus": string(WorkflowStatusRejected), "rejectReason": rejectReason},
-			TenantID:    tenantID,
-		}); auditErr != nil {
-			return nil, fmt.Errorf("lps: audit reject: %w", auditErr)
-		}
+	if auditErr := s.auditWriter.Write(ctx, tx, AuditEvent{
+		ActorUserID: actorID,
+		ActorRole:   actorRole,
+		Action:      "LPS_EXCLUSION_OVERRIDE.REJECT",
+		EntityType:  "ecl.lps_exclusion_override",
+		EntityID:    overrideID,
+		BeforeJSON:  map[string]string{"workflowStatus": string(WorkflowStatusPendingApproval)},
+		AfterJSON:   map[string]string{"workflowStatus": string(WorkflowStatusRejected), "rejectReason": rejectReason},
+		TenantID:    tenantID,
+	}); auditErr != nil {
+		return nil, fmt.Errorf("lps: audit reject: %w", auditErr)
 	}
 
 	if err = tx.Commit(); err != nil {
