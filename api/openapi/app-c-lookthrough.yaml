@@ -1,0 +1,2559 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-C Look-through ECL Reksadana (P4-M4)
+  version: "1.0.0"
+  description: |
+    Look-through ECL untuk Reksadana — dekomposisi underlying per asset class.
+    Fund composition dikelola melalui workflow 6-eyes (DEC-017).
+    ECL dihitung per asset class menggunakan formula 3-skenario × dual FL (DEC-010, DEC-015).
+
+    Story set: APP-C-LKT-001..005
+    FSD: FSD-APP-C-ECL-EIR-v1.0.docx §3 (Look-through ECL), §4 (EAD)
+    Decisions: DEC-010, DEC-015, DEC-016, DEC-017, DEC-018, DEC-021, DEC-022
+
+    ## Scope Rules
+    - tipe_instrumen = 'REKSADANA' only
+    - klasifikasi_psak71 IN ('AC','FVOCI') — FVTPL di-skip (ECL = 0, bukan error)
+    - POCI Reksadana di-defer ke M7 (error LOOKTHROUGH_POCI_DEFERRED, tidak memblok run)
+    - status = 'AKTIF', deleted_at IS NULL, workflow_status = 'APPROVED'
+
+    ## Asset Class Enum
+    - GOVT_BOND — Obligasi Pemerintah (SBN, SPN, ORI, sukuk negara). PD = 0 (sovereign IDR).
+    - CORP_BOND — Obligasi Korporasi. PD dari mst.pd_pefindo (rating underlying average/conservative).
+    - CASH     — Kas, deposito, pasar uang. PD dari bank counterparty.
+    - EQUITY   — Saham. PD dari sektor average.
+    - OTHER    — Aset tidak terkategori; PD/LGD conservative default. Wajib di-flag untuk manual review.
+
+    ## Weight Constraint
+    Σ weight_pct per composition group HARUS = 100% ± 0.01% (toleransi presisi floating-point input UI).
+    Enforced di application layer (tidak bisa di-constraint CHECK multi-row di DB).
+
+    ## Permission model
+    - fund_composition.create  — ROLE-AKUN (submit + amend)
+    - fund_composition.review  — ROLE-RISK (sign review)
+    - fund_composition.approve — ROLE-ALCO (sign approve — MFA wajib DEC-026)
+    - fund_composition.read    — ROLE-AKUN, ROLE-RISK, ROLE-ALCO, ROLE-AKUN-CTL, ROLE-CFO, ROLE-AUDIT
+    - lookthrough.preview      — ROLE-RISK, ROLE-AKUN-CTL, ROLE-CFO, ROLE-AUDIT (read-only preview)
+    - lookthrough.compute      — internal Asynq worker only (tidak di-expose via HTTP ke user)
+
+    ## Workflow — 6-eyes
+    ROLE-AKUN (maker) → ROLE-RISK (reviewer) → ROLE-ALCO (approver)
+    SoD: maker_id ≠ reviewer_id ≠ approver_id (enforced server-side, DEC-017)
+    MFA wajib: ROLE-ALCO (DEC-026)
+    Step-up MFA: TIDAK diperlukan (fund_composition.approve tidak listed di DEC-027 step-up list).
+    Signature hash: SHA-256(userId || action || compositionGroupId || signedAt || comment)
+
+    ## Versioning
+    Amendment pakai pola effective_from/effective_to (immutable, audit-grade).
+    Versi lama di-SUPERSEDED (bukan dihapus). Tidak ada UPDATE/DELETE rows di mst.fund_composition.
+
+    ## Audit policy
+    - fund_composition.submit / review / approve / reject    — AUDITED in-transaction
+    - fund_composition.amend_submit / amend_review / amend_approve — AUDITED in-transaction
+    - lookthrough.preview     — LOOKTHROUGH.PREVIEW per call
+    - lookthrough.export      — LOOKTHROUGH.EXPORT per call (filter + row_count di after_jsonb)
+    - compute / bulk_compute  — tidak langsung; P4-M7/M8 write saat calc run sealed
+
+    ## Performance SLA
+    - Single compute  : ≤ 200ms P95
+    - Bulk compute    : ≤ 2 detik P95 untuk 500 Reksadana aktif
+    - Preview         : ≤ 500ms P95
+
+    ## Schema dependency
+    - mst.fund_composition (TABEL BARU — migration 000024, data-modeler)
+    - ecl.lookthrough_underlying (ALTER precision fix + ADD COLUMN — migration 000024)
+    - mst.instrumen, mst.pd_pefindo, mst.lgd_basel, mst.bobot_skenario, mst.impact_mev_pd (existing)
+
+    ## Open question flags (pending ifrs9-compliance-reviewer — BLOCKING)
+    - OQ-M4-3: FVTPL Reksadana skip confirmed? → Asumsi: ya, ECL=0
+    - OQ-M4-4: PD/LGD per asset class mapping konfirmasi dari FSD-APP-C
+
+servers:
+  - url: /api/v1
+    description: BLIPS REST API v1
+
+tags:
+  - name: fund-composition
+    description: |
+      Manajemen Fund Composition per Reksadana — 6-eyes workflow.
+      POST submit / review / approve / reject + GET list + GET detail + GET active.
+  - name: lookthrough-compute
+    description: |
+      Look-through ECL compute — single dan bulk (Asynq job 202).
+      HTTP facade untuk testing/verifikasi; production flow dipanggil Go-to-Go oleh P4-M7.
+  - name: lookthrough-preview
+    description: |
+      Preview breakdown ECL per Reksadana — on-the-fly tanpa menulis ke ecl.*.
+      DataTable pattern (sort + page + filter + export). Read-only.
+
+paths:
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/lookthrough/fund-composition/submit
+  # Submit komposisi baru atau amend (Story APP-C-LKT-001, LKT-005)
+  # ---------------------------------------------------------------------------
+  /ecl/lookthrough/fund-composition/submit:
+    post:
+      operationId: submitFundComposition
+      summary: Submit fund composition baru atau amend versi lama untuk satu instrumen Reksadana
+      description: |
+        Membuat satu composition group (kumpulan lines per asset class) untuk satu instrumen Reksadana,
+        dan meng-enqueue ke workflow 6-eyes: PENDING_REVIEW.
+
+        Digunakan untuk:
+        1. Komposisi baru (is_amendment = false): instrumen belum punya composition APPROVED,
+           atau composition sebelumnya sudah SUPERSEDED/REJECTED.
+        2. Amend (is_amendment = true): menggantikan versi APPROVED yang masih aktif.
+           Wajib sertakan supersedes_composition_id.
+
+        Permission: fund_composition.create
+        Role: ROLE-AKUN
+
+        Validasi:
+        - instrumenId harus exist di mst.instrumen dengan tipe_instrumen='REKSADANA',
+          status='AKTIF', deleted_at IS NULL, workflow_status='APPROVED'
+        - lines wajib berisi 1..N item dengan asset_class IN (GOVT_BOND, CORP_BOND, CASH, EQUITY, OTHER)
+        - Σ weight_pct semua lines = 100% ± 0.01% (toleransi 0.0001 dalam satuan desimal)
+        - effective_from: DATE format YYYY-MM-DD, tidak boleh lebih dari 30 hari ke depan dari today
+        - Tidak boleh ada composition APPROVED aktif dengan effective_to IS NULL untuk instrumen yang sama
+          (jika ada → 409 CONFLICT, kecuali is_amendment=true dengan supersedes_composition_id yang valid)
+        - is_amendment = true: supersedes_composition_id wajib diisi dan target harus APPROVED
+        - is_amendment = true: effective_from baru harus SETELAH effective_from yang di-supersede
+        - supersedes_composition_id jika diisi: target harus workflow_status=APPROVED (bukan PENDING_*)
+        - source_doc_id jika diisi: harus exist di doc.upload
+        - Setiap asset_class dalam satu group harus UNIK (tidak boleh duplikat dalam satu submit)
+
+        SoD: maker_id = JWT sub. Reviewer dan approver harus user berbeda (enforced saat step berikutnya).
+
+        Atomic: semua lines dibuat dalam satu transaksi DB.
+        Idempotency-Key wajib.
+
+        Audit: FUND_COMPOSITION.SUBMIT atau FUND_COMPOSITION.AMEND_SUBMIT di aud.audit_log in-transaction.
+        Notifikasi: ke semua ROLE-RISK aktif — "Fund composition [instrumen] menunggu review".
+      tags: [fund-composition]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FundCompositionSubmitRequest"
+            examples:
+              newComposition:
+                summary: Submit komposisi baru
+                value:
+                  instrumenId: "550e8400-e29b-41d4-a716-000000000001"
+                  effectiveFrom: "2026-04-01"
+                  sourceDocId: "550e8400-e29b-41d4-a716-000000000090"
+                  catatan: "Fund fact sheet Q1 2026 per tanggal 31 Maret 2026"
+                  isAmendment: false
+                  lines:
+                    - assetClass: "GOVT_BOND"
+                      weightPct: 60.0000
+                    - assetClass: "CORP_BOND"
+                      weightPct: 30.0000
+                    - assetClass: "CASH"
+                      weightPct: 10.0000
+              amendComposition:
+                summary: Amend komposisi existing
+                value:
+                  instrumenId: "550e8400-e29b-41d4-a716-000000000001"
+                  effectiveFrom: "2026-07-01"
+                  sourceDocId: "550e8400-e29b-41d4-a716-000000000091"
+                  catatan: "Update fund fact sheet Q2 2026"
+                  isAmendment: true
+                  supersedesCompositionId: "550e8400-e29b-41d4-a716-000000000100"
+                  lines:
+                    - assetClass: "GOVT_BOND"
+                      weightPct: 55.0000
+                    - assetClass: "CORP_BOND"
+                      weightPct: 35.0000
+                    - assetClass: "CASH"
+                      weightPct: 10.0000
+      responses:
+        "201":
+          description: Composition group berhasil dibuat, status PENDING_REVIEW
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/FundCompositionGroup"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  compositionId: "550e8400-e29b-41d4-a716-000000000100"
+                  instrumenId: "550e8400-e29b-41d4-a716-000000000001"
+                  instrumenNama: "Reksa Dana Pendapatan Tetap XYZ"
+                  effectiveFrom: "2026-04-01"
+                  effectiveTo: null
+                  workflowStatus: "PENDING_REVIEW"
+                  totalWeightPct: 100.0000
+                  isAmendment: false
+                  supersedesCompositionId: null
+                  makerId: "550e8400-e29b-41d4-a716-000000000301"
+                  makerNama: "Siti Rahayu"
+                  reviewerId: null
+                  approverId: null
+                  signedAtReview: null
+                  signedAtApprove: null
+                  lines:
+                    - assetClass: "GOVT_BOND"
+                      weightPct: 60.0000
+                    - assetClass: "CORP_BOND"
+                      weightPct: 30.0000
+                    - assetClass: "CASH"
+                      weightPct: 10.0000
+                  sourceDocId: "550e8400-e29b-41d4-a716-000000000090"
+                  catatan: "Fund fact sheet Q1 2026"
+                  createdAt: "2026-06-11T09:00:00+07:00"
+                  updatedAt: "2026-06-11T09:00:00+07:00"
+                  rowVersion: 1
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: Validasi field gagal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                weightSumInvalid:
+                  summary: Sum weight bukan 100%
+                  value:
+                    error:
+                      code: LOOKTHROUGH_WEIGHT_INVALID
+                      message: "Total weight_pct harus 100% ± 0.01%. Saat ini: 85.0000%"
+                      details:
+                        - field: "body.lines"
+                          rule: "weight_sum_100pct"
+                          message: "Total weight_pct = 85.0000%, expected 100% ± 0.01%"
+                      traceId: "01HXY..."
+                assetClassUnknown:
+                  summary: Asset class tidak valid
+                  value:
+                    error:
+                      code: LOOKTHROUGH_ASSET_CLASS_UNKNOWN
+                      message: "Asset class CRYPTO tidak valid. Nilai yang diterima: GOVT_BOND, CORP_BOND, CASH, EQUITY, OTHER"
+                      details:
+                        - field: "body.lines[0].assetClass"
+                          rule: "enum"
+                          message: "Nilai CRYPTO tidak ada dalam enum asset class yang valid"
+                      traceId: "01HXY..."
+                instrumenNotReksadana:
+                  summary: Instrumen bukan REKSADANA
+                  value:
+                    error:
+                      code: LOOKTHROUGH_INSTRUMEN_NOT_REKSADANA
+                      message: "Fund composition hanya berlaku untuk instrumen tipe REKSADANA. Instrumen DEPOSITO-001 bertipe DEPOSITO."
+                      details:
+                        - field: "body.instrumenId"
+                          rule: "tipe_instrumen_reksadana"
+                          message: "tipe_instrumen harus REKSADANA"
+                      traceId: "01HXY..."
+                amendmentMissingSupersedes:
+                  summary: is_amendment=true tanpa supersedes_composition_id
+                  value:
+                    error:
+                      code: VALIDATION_FAILED
+                      message: "Saat isAmendment = true, supersedesCompositionId wajib diisi."
+                      details:
+                        - field: "body.supersedesCompositionId"
+                          rule: "required_when_amendment"
+                          message: "supersedesCompositionId wajib saat isAmendment = true"
+                      traceId: "01HXY..."
+                effectiveFromBeforeSuperseded:
+                  summary: effectiveFrom amend sebelum superseded
+                  value:
+                    error:
+                      code: VALIDATION_FAILED
+                      message: "Tanggal effective_from versi baru (2026-03-01) harus setelah tanggal effective_from versi yang digantikan FC-001 (2026-04-01)."
+                      details:
+                        - field: "body.effectiveFrom"
+                          rule: "must_be_after_superseded_effective_from"
+                          message: "effectiveFrom baru harus > effectiveFrom yang di-supersede"
+                      traceId: "01HXY..."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: instrumenId atau sourceDocId tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: NOT_FOUND
+                  message: "Instrumen tidak ditemukan atau sudah dihapus"
+                  details:
+                    - field: "body.instrumenId"
+                      rule: "exists"
+                      message: "instrumenId tidak ada di mst.instrumen"
+                  traceId: "01HXY..."
+        "409":
+          description: |
+            Composition aktif sudah ada untuk instrumen + periode overlapping,
+            atau supersedes target masih PENDING_* (belum final)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                activeCompositionExists:
+                  summary: Composition APPROVED aktif sudah ada
+                  value:
+                    error:
+                      code: CONFLICT
+                      message: "Instrumen RKD-001 sudah memiliki fund composition APPROVED yang aktif (ID: FC-001, effective_from 2026-04-01). Gunakan fitur Amend Composition untuk membuat versi baru."
+                      details:
+                        - field: "body.instrumenId"
+                          rule: "no_active_composition_overlap"
+                          message: "Composition aktif FC-001 masih berlaku"
+                      traceId: "01HXY..."
+                supersedesPending:
+                  summary: Target supersede masih dalam proses persetujuan
+                  value:
+                    error:
+                      code: CONFLICT
+                      message: "Tidak dapat membuat amend untuk FC-001 yang masih dalam proses persetujuan (PENDING_REVIEW). Tunggu hingga FC-001 APPROVED atau REJECTED terlebih dahulu."
+                      details:
+                        - field: "body.supersedesCompositionId"
+                          rule: "target_must_be_approved_or_rejected"
+                          message: "Target composition FC-001 belum final"
+                      traceId: "01HXY..."
+        "422":
+          $ref: "#/components/responses/WorkflowInvalidTransition"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/lookthrough/fund-composition/{id}/review
+  # ROLE-RISK sign review (Story LKT-001 Scenario 1)
+  # ---------------------------------------------------------------------------
+  /ecl/lookthrough/fund-composition/{id}/review:
+    post:
+      operationId: reviewFundComposition
+      summary: ROLE-RISK sign review fund composition (6-eyes step 2)
+      description: |
+        Reviewer (ROLE-RISK) memvalidasi komposisi yang disubmit Maker.
+        Transisi: PENDING_REVIEW → PENDING_APPROVAL.
+
+        Permission: fund_composition.review
+        Role: ROLE-RISK
+
+        SoD: reviewer_id ≠ maker_id — SOD_VIOLATION 403 jika sama.
+        Signature: SHA-256(userId || REVIEW || compositionId || signedAt || comment) disimpan di
+                   mst.fund_composition.signature_hash_review.
+
+        Idempotency-Key wajib.
+        Audit: FUND_COMPOSITION.REVIEW (atau FUND_COMPOSITION.AMEND_REVIEW) in-transaction.
+        Notifikasi: ke ROLE-ALCO aktif — "Fund composition [instrumen] menunggu persetujuan".
+      tags: [fund-composition]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/compositionIdPath"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowActionRequest"
+            example:
+              comment: "Sesuai fund fact sheet Maret 2026. Komposisi valid."
+              signatureMethod: "JWT_STANDARD"
+      responses:
+        "200":
+          description: Review berhasil — status PENDING_APPROVAL
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/FundCompositionGroup"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  compositionId: "550e8400-e29b-41d4-a716-000000000100"
+                  workflowStatus: "PENDING_APPROVAL"
+                  reviewerId: "550e8400-e29b-41d4-a716-000000000302"
+                  signedAtReview: "2026-06-11T10:30:00+07:00"
+                  rowVersion: 2
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Permission tidak terpenuhi, SoD violation, atau MFA belum verified
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                sodViolation:
+                  summary: Reviewer = Maker
+                  value:
+                    error:
+                      code: LOOKTHROUGH_COMPOSITION_SOD_VIOLATION
+                      message: "Maker tidak dapat menjadi reviewer. maker_id = reviewer_id untuk composition FC-001."
+                      details:
+                        - field: "reviewer"
+                          rule: "reviewer_not_maker"
+                          message: "SoD: reviewer_id ≠ maker_id"
+                      traceId: "01HXY..."
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: Transisi tidak valid (mis. bukan PENDING_REVIEW)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: LOOKTHROUGH_COMPOSITION_REVIEW_INVALID_TRANSITION
+                  message: "Tidak bisa review dari state PENDING_APPROVAL. Composition harus dalam status PENDING_REVIEW."
+                  details:
+                    - field: "workflowStatus"
+                      rule: "invalid_transition"
+                      message: "Transition PENDING_APPROVAL → PENDING_REVIEW tidak valid"
+                  traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/lookthrough/fund-composition/{id}/approve
+  # ROLE-ALCO sign approve (Story LKT-001 Scenario 1)
+  # ---------------------------------------------------------------------------
+  /ecl/lookthrough/fund-composition/{id}/approve:
+    post:
+      operationId: approveFundComposition
+      summary: ROLE-ALCO approve fund composition (6-eyes step 3)
+      description: |
+        Approver (ROLE-ALCO) menyetujui komposisi yang sudah di-review ROLE-RISK.
+        Transisi: PENDING_APPROVAL → APPROVED_ACTIVE.
+
+        Untuk amendment: pada saat approve, dalam SATU transaksi atomik:
+        1. Versi yang di-supersede (supersedesCompositionId): workflow_status → SUPERSEDED,
+           effective_to di-set ke (new_effective_from - 1 hari).
+        2. Versi baru: workflow_status → APPROVED, effective_from aktif.
+
+        Permission: fund_composition.approve
+        Role: ROLE-ALCO
+        MFA: ROLE-ALCO wajib MFA (mfa_verified = true di JWT, DEC-026).
+             Step-up MFA TIDAK diperlukan untuk approve fund_composition.
+
+        SoD: approver_id ≠ maker_id ≠ reviewer_id — SOD_VIOLATION 403 jika overlap.
+        Signature: SHA-256(userId || APPROVE || compositionId || signedAt || comment) disimpan di
+                   mst.fund_composition.signature_hash_approve.
+
+        Idempotency-Key wajib.
+        Audit: FUND_COMPOSITION.APPROVE (atau FUND_COMPOSITION.AMEND_APPROVE) in-transaction.
+               For amendment: after_jsonb = { supersedes: old_id, effective_from: date }.
+        Notifikasi: ke maker — "Fund composition [instrumen] disetujui ALCO dan aktif".
+      tags: [fund-composition]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/compositionIdPath"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowActionRequest"
+            example:
+              comment: "Disetujui. Komposisi sesuai prospektus fund."
+              signatureMethod: "JWT_STANDARD"
+      responses:
+        "200":
+          description: |
+            Composition disetujui — status APPROVED.
+            Jika amendment: versi lama otomatis SUPERSEDED dalam transaksi yang sama.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/FundCompositionGroup"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  compositionId: "550e8400-e29b-41d4-a716-000000000100"
+                  workflowStatus: "APPROVED"
+                  approverId: "550e8400-e29b-41d4-a716-000000000303"
+                  signedAtApprove: "2026-06-11T14:00:00+07:00"
+                  effectiveFrom: "2026-04-01"
+                  effectiveTo: null
+                  rowVersion: 3
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Permission tidak terpenuhi, SoD, atau MFA belum terverifikasi
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                sodViolation:
+                  summary: SoD violation
+                  value:
+                    error:
+                      code: LOOKTHROUGH_COMPOSITION_SOD_VIOLATION
+                      message: "Approver tidak bisa sama dengan Maker atau Reviewer."
+                      details:
+                        - field: "approver"
+                          rule: "approver_not_maker_or_reviewer"
+                          message: "SoD: approver_id ≠ maker_id AND approver_id ≠ reviewer_id"
+                      traceId: "01HXY..."
+                mfaRequired:
+                  summary: MFA belum verified
+                  value:
+                    error:
+                      code: MFA_REQUIRED
+                      message: "ROLE-ALCO wajib MFA. Pastikan mfa_verified=true di token."
+                      details: []
+                      traceId: "01HXY..."
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: Transisi tidak valid (mis. belum di-review)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: LOOKTHROUGH_COMPOSITION_REVIEW_INVALID_TRANSITION
+                  message: "Tidak bisa approve dari state PENDING_REVIEW. Harus melalui review terlebih dahulu."
+                  details:
+                    - field: "workflowStatus"
+                      rule: "invalid_transition"
+                      message: "Transition PENDING_REVIEW → APPROVED tidak valid"
+                  traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/lookthrough/fund-composition/{id}/reject
+  # ROLE-RISK atau ROLE-ALCO reject (Story LKT-001)
+  # ---------------------------------------------------------------------------
+  /ecl/lookthrough/fund-composition/{id}/reject:
+    post:
+      operationId: rejectFundComposition
+      summary: Reject fund composition (ROLE-RISK atau ROLE-ALCO)
+      description: |
+        Reviewer (ROLE-RISK dari PENDING_REVIEW) atau Approver (ROLE-ALCO dari PENDING_APPROVAL)
+        menolak composition.
+        Transisi: PENDING_REVIEW → REJECTED | PENDING_APPROVAL → REJECTED.
+
+        Setelah REJECTED: komposisi dapat di-submit ulang oleh Maker sebagai entri BARU
+        (bukan re-use ID lama). ID lama tetap ada di history dengan status REJECTED.
+
+        Permission: fund_composition.review (dari PENDING_REVIEW) atau fund_composition.approve (dari PENDING_APPROVAL)
+        Roles: ROLE-RISK, ROLE-ALCO
+
+        Idempotency-Key wajib.
+        Audit: FUND_COMPOSITION.REJECT in-transaction.
+        Notifikasi: ke maker — "Fund composition [instrumen] ditolak" + rejection reason.
+      tags: [fund-composition]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/compositionIdPath"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowActionRequest"
+            example:
+              comment: "Komposisi tidak sesuai dengan prospektus fund terbaru. Mohon perbaiki bobot CORP_BOND."
+              signatureMethod: "JWT_STANDARD"
+      responses:
+        "200":
+          description: Composition ditolak — status REJECTED
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/FundCompositionGroup"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: Transisi tidak valid (mis. sudah APPROVED atau REJECTED)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: LOOKTHROUGH_COMPOSITION_REVIEW_INVALID_TRANSITION
+                  message: "Tidak bisa reject dari state APPROVED. Composition sudah dalam status final."
+                  details:
+                    - field: "workflowStatus"
+                      rule: "invalid_transition"
+                      message: "APPROVED → REJECTED tidak valid"
+                  traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/lookthrough/fund-composition — DataTable list
+  # (Story LKT-001 Scenario 6 + LKT-005 Scenario 6)
+  # ---------------------------------------------------------------------------
+  /ecl/lookthrough/fund-composition:
+    get:
+      operationId: listFundCompositions
+      summary: List fund compositions — DataTable (sort+page+filter+export)
+      description: |
+        List mst.fund_composition dengan cursor pagination, sort multi-kolom, filter, dan export.
+
+        Permission: fund_composition.read
+        Roles: ROLE-AKUN, ROLE-RISK, ROLE-ALCO, ROLE-AKUN-CTL, ROLE-CFO, ROLE-AUDIT
+
+        Allowed sort columns: created_at, effective_from, effective_to, workflow_status,
+                              instrumen_id, total_weight_pct
+        Default sort: created_at DESC
+
+        Allowed filter:
+        - filter[instrumen_id]: UUID instrumen Reksadana
+        - filter[workflow_status]: DRAFT | PENDING_REVIEW | PENDING_APPROVAL | APPROVED | REJECTED | SUPERSEDED
+        - filter[effective_from]: gte:YYYY-MM-DD, lte:YYYY-MM-DD, between:date1,date2
+        - filter[effective_to]: gte/lte/between atau is_null (untuk composition aktif)
+        - filter[maker_id]: UUID
+        - include_superseded: boolean — default false. Jika false, SUPERSEDED di-exclude.
+          ROLE-AUDIT mendapat semua status. Lainnya default exclude SUPERSEDED kecuali set true.
+        - q: text search di instrumen_nama
+
+        Export: CSV, XLSX (inline < 10k rows, async >= 10k).
+        Audit: tidak ada untuk plain list. LOOKTHROUGH.EXPORT jika export.
+      tags: [fund-composition]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/cursor"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/sortParam"
+        - $ref: "#/components/parameters/searchParam"
+        - name: "filter[instrumen_id]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Filter by instrumen UUID
+        - name: "filter[workflow_status]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [DRAFT, PENDING_REVIEW, PENDING_APPROVAL, APPROVED, REJECTED, SUPERSEDED]
+          description: Filter by workflow status
+        - name: "filter[effective_from]"
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Format: gte:2026-04-01 atau between:2026-01-01,2026-12-31"
+        - name: "filter[effective_to]"
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Format: is_null (aktif saat ini), gte:YYYY-MM-DD, lte:YYYY-MM-DD"
+        - name: "filter[maker_id]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Filter by maker user UUID
+        - name: include_superseded
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: "Jika true, tampilkan composition SUPERSEDED. Default false."
+        - name: export
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [csv, xlsx]
+          description: "Jika diset, response adalah file download (inline < 10k rows, async >= 10k)"
+      responses:
+        "200":
+          description: List fund compositions dengan pagination
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FundCompositionListResponse"
+              example:
+                data:
+                  - compositionId: "550e8400-e29b-41d4-a716-000000000100"
+                    instrumenId: "550e8400-e29b-41d4-a716-000000000001"
+                    instrumenNama: "Reksa Dana Pendapatan Tetap XYZ"
+                    effectiveFrom: "2026-04-01"
+                    effectiveTo: null
+                    workflowStatus: "APPROVED"
+                    totalWeightPct: 100.0000
+                    isAmendment: false
+                    supersedesCompositionId: null
+                    makerId: "550e8400-e29b-41d4-a716-000000000301"
+                    makerNama: "Siti Rahayu"
+                    createdAt: "2026-06-11T09:00:00+07:00"
+                pagination:
+                  nextCursor: "eyJjcmVhdGVkQXQiOiIyMDI2LTA2LTExVDA5OjAwOjAwKzA3OjAwIn0="
+                  hasMore: false
+                  totalEstimate: 5
+                  limit: 50
+                appliedSort:
+                  - col: "created_at"
+                    dir: "desc"
+                appliedFilter:
+                  workflow_status: "APPROVED"
+                meta:
+                  traceId: "01HXY..."
+            text/csv:
+              schema:
+                type: string
+                format: binary
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        "202":
+          description: Async export job diterima (dataset >= 10k rows)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/JobAcceptedResponse"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/lookthrough/fund-composition/{id} — detail satu composition group
+  # ---------------------------------------------------------------------------
+  /ecl/lookthrough/fund-composition/{id}:
+    get:
+      operationId: getFundComposition
+      summary: Detail satu fund composition group beserta semua lines
+      description: |
+        Kembalikan detail lengkap satu composition group: header + semua lines per asset class.
+        Termasuk history workflow (reviewer, approver, signature hash, signed timestamps).
+
+        Permission: fund_composition.read
+        Roles: ROLE-AKUN, ROLE-RISK, ROLE-ALCO, ROLE-AKUN-CTL, ROLE-CFO, ROLE-AUDIT
+
+        Audit: tidak ada (pure read).
+      tags: [fund-composition]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/compositionIdPath"
+      responses:
+        "200":
+          description: Detail composition group
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/FundCompositionGroup"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/lookthrough/fund-composition/instrumen/{instrumenId}
+  # Get active composition for an instrument as of a date
+  # ---------------------------------------------------------------------------
+  /ecl/lookthrough/fund-composition/instrumen/{instrumenId}:
+    get:
+      operationId: getActiveFundComposition
+      summary: Ambil fund composition APPROVED aktif untuk satu instrumen per tanggal tertentu
+      description: |
+        Mengembalikan composition group APPROVED yang berlaku pada as_of_date:
+          effective_from ≤ as_of_date AND (effective_to IS NULL OR effective_to >= as_of_date)
+
+        Digunakan oleh:
+        - UI untuk show "komposisi aktif saat ini" pada instrumen detail page
+        - Compute preview sebelum menentukan komposisi mana yang akan dipakai
+        - Internal caller (Go-to-Go) sebelum compute ECL
+
+        Permission: fund_composition.read
+        Roles: ROLE-AKUN, ROLE-RISK, ROLE-ALCO, ROLE-AKUN-CTL, ROLE-CFO, ROLE-AUDIT,
+               internal engine (tidak butuh HTTP call untuk internal usage)
+
+        as_of_date default: today (tanggal server saat request).
+        Jika tidak ada composition APPROVED yang berlaku → 404 NOT_FOUND.
+        Jika instrumen bukan REKSADANA → 422 LOOKTHROUGH_INSTRUMEN_NOT_REKSADANA.
+        Audit: tidak ada (pure read).
+      tags: [fund-composition]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: instrumenId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID instrumen Reksadana dari mst.instrumen
+        - name: as_of_date
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+          description: "Tanggal evaluasi. Format: YYYY-MM-DD. Default: today."
+          example: "2026-06-30"
+      responses:
+        "200":
+          description: Composition APPROVED aktif per tanggal
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/FundCompositionGroup"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Tidak ada composition APPROVED yang berlaku pada as_of_date
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: LOOKTHROUGH_FUND_COMPOSITION_MISSING
+                  message: "Tidak ditemukan fund composition APPROVED untuk instrumen RKD-001 per tanggal 2026-06-30. Input komposisi via menu Fund Composition."
+                  details:
+                    - field: "instrumenId"
+                      rule: "active_approved_composition_required"
+                      message: "Tidak ada composition APPROVED berlaku pada 2026-06-30"
+                  traceId: "01HXY..."
+        "422":
+          description: instrumenId bukan REKSADANA
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: LOOKTHROUGH_INSTRUMEN_NOT_REKSADANA
+                  message: "Fund composition hanya berlaku untuk instrumen tipe REKSADANA."
+                  details:
+                    - field: "instrumenId"
+                      rule: "tipe_instrumen_reksadana"
+                      message: "tipe_instrumen bukan REKSADANA"
+                  traceId: "01HXY..."
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/lookthrough/compute — single Reksadana look-through compute
+  # HTTP facade; production flow Go-to-Go via LookThroughService.Compute()
+  # ---------------------------------------------------------------------------
+  /ecl/lookthrough/compute:
+    post:
+      operationId: computeLookthrough
+      summary: Hitung look-through ECL untuk satu instrumen Reksadana
+      description: |
+        HTTP facade untuk LookThroughService.Compute() — single instrument, synchronous.
+        Produksi dipanggil Go-to-Go oleh P4-M7 ECL engine; endpoint ini tersedia untuk
+        verifikasi manual dan testing oleh ROLE-RISK.
+
+        Untuk Reksadana FVTPL: tidak error — return ECL=0 dengan note "FVTPL_SKIP_ECL".
+        Untuk Reksadana POCI: return 202-style warning LOOKTHROUGH_POCI_DEFERRED (ECL = null).
+        Tidak menulis ke ecl.* (stateless compute); caller M7/M8 yang persists.
+
+        Permission: lookthrough.compute (internal) atau lookthrough.preview (untuk ROLE-RISK manual call)
+        Roles: internal engine, ROLE-RISK (verifikasi)
+
+        Validasi:
+        - instrumenId harus REKSADANA, AKTIF, APPROVED (mis. DEPOSITO → 422)
+        - evaluationDate: DATE format YYYY-MM-DD
+        - scenario: GOOD | NORMAL | BAD (default: semua 3 skenario sekaligus)
+        - Fund composition APPROVED harus tersedia per evaluationDate
+        - NAB_IDR: dari mst.instrumen.nominal_nab_idr (null → 422 LOOKTHROUGH_NAB_MISSING)
+        - PD/LGD parameters di mst.pd_pefindo, mst.lgd_basel harus APPROVED
+        - Bobot skenario dan FL multiplier harus APPROVED untuk periodeId
+
+        Idempotency-Key wajib.
+        Audit: tidak ada direct (compute stateless); preview call → LOOKTHROUGH.PREVIEW.
+        SLA: ≤ 200ms P95.
+      tags: [lookthrough-compute]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LookthroughComputeRequest"
+            example:
+              instrumenId: "550e8400-e29b-41d4-a716-000000000001"
+              evaluationDate: "2026-06-30"
+              periodeId: "550e8400-e29b-41d4-a716-000000001000"
+      responses:
+        "200":
+          description: |
+            Compute berhasil — breakdown per asset class + total ECL.
+            Jika FVTPL: totalEclIdr = 0, warnings berisi FVTPL_SKIP_ECL note.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/LookthroughComputeResult"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  instrumenId: "550e8400-e29b-41d4-a716-000000000001"
+                  instrumenNama: "Reksa Dana Pendapatan Tetap XYZ"
+                  evaluationDate: "2026-06-30"
+                  nabIdr: 5000000000.0000
+                  fundCompositionId: "550e8400-e29b-41d4-a716-000000000100"
+                  fundCompositionVersion: "2026-04-01"
+                  klasifikasiPsak71: "FVOCI"
+                  totalEclIdr: 17962500.0000
+                  breakdown:
+                    - assetClass: "GOVT_BOND"
+                      weightPct: 60.0000
+                      nabPortionIdr: 3000000000.0000
+                      pdGood: 0.00000000
+                      pdNormal: 0.00000000
+                      pdBad: 0.00000000
+                      lgd: 0.45000000
+                      eclSkenariosGoodIdr: 0.0000
+                      eclSkenariosNormalIdr: 0.0000
+                      eclSkenariosBadIdr: 0.0000
+                      eclFlGoodIdr: 0.0000
+                      eclFlNormalIdr: 0.0000
+                      eclFlBadIdr: 0.0000
+                      eclWeightedIdr: 0.0000
+                    - assetClass: "CORP_BOND"
+                      weightPct: 30.0000
+                      nabPortionIdr: 1500000000.0000
+                      pdGood: 0.02000000
+                      pdNormal: 0.02500000
+                      pdBad: 0.03750000
+                      lgd: 0.45000000
+                      eclSkenariosGoodIdr: 13500000.0000
+                      eclSkenariosNormalIdr: 16875000.0000
+                      eclSkenariosBadIdr: 25312500.0000
+                      eclFlGoodIdr: 10800000.0000
+                      eclFlNormalIdr: 16875000.0000
+                      eclFlBadIdr: 37968750.0000
+                      eclWeightedIdr: 20629687.5000
+                    - assetClass: "CASH"
+                      weightPct: 10.0000
+                      nabPortionIdr: 500000000.0000
+                      pdGood: 0.00800000
+                      pdNormal: 0.01000000
+                      pdBad: 0.01500000
+                      lgd: 0.45000000
+                      eclSkenariosGoodIdr: 1800000.0000
+                      eclSkenariosNormalIdr: 2250000.0000
+                      eclSkenariosBadIdr: 3375000.0000
+                      eclFlGoodIdr: 1440000.0000
+                      eclFlNormalIdr: 2250000.0000
+                      eclFlBadIdr: 5062500.0000
+                      eclWeightedIdr: 2750625.0000
+                  warnings: []
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: instrumenId atau periodeId tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: NOT_FOUND
+                  message: "Instrumen tidak ditemukan"
+                  details:
+                    - field: "body.instrumenId"
+                      rule: "exists"
+                      message: "instrumenId tidak ada di mst.instrumen"
+                  traceId: "01HXY..."
+        "422":
+          description: Validasi domain gagal — composition missing, NAB missing, weight invalid, dll
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                compositionMissing:
+                  summary: Fund composition belum ada
+                  value:
+                    error:
+                      code: LOOKTHROUGH_FUND_COMPOSITION_MISSING
+                      message: "Tidak ditemukan fund composition APPROVED untuk instrumen RKD-002 per tanggal 2026-06-30."
+                      details:
+                        - field: "body.instrumenId"
+                          rule: "active_approved_composition_required"
+                          message: "Composition APPROVED tidak ada untuk evaluationDate ini"
+                      traceId: "01HXY..."
+                nabMissing:
+                  summary: NAB tidak tersedia
+                  value:
+                    error:
+                      code: LOOKTHROUGH_NAB_MISSING
+                      message: "NAB untuk instrumen RKD-003 tidak tersedia per 2026-06-30. Pastikan feed NAB harian KSEI/MI telah diupload."
+                      details:
+                        - field: "body.instrumenId"
+                          rule: "nab_idr_required"
+                          message: "mst.instrumen.nominal_nab_idr IS NULL"
+                      traceId: "01HXY..."
+                weightInvalid:
+                  summary: Sum weight komposisi tidak valid (defensive)
+                  value:
+                    error:
+                      code: LOOKTHROUGH_WEIGHT_INVALID
+                      message: "Fund composition FC-001 memiliki total weight 85.0000% (expected 100% ± 0.01%). Data integrity issue — hubungi IT Admin."
+                      details:
+                        - field: "fundCompositionId"
+                          rule: "weight_sum_100pct"
+                          message: "Integrity violation pada FC-001"
+                      traceId: "01HXY..."
+                pdLgdMissing:
+                  summary: PD/LGD untuk asset class tidak tersedia
+                  value:
+                    error:
+                      code: LOOKTHROUGH_PD_LGD_CLASS_MISSING
+                      message: "PD/LGD lookup gagal untuk asset class CORP_BOND — tidak ada parameter APPROVED untuk periodeId JUNI-2026."
+                      details:
+                        - field: "assetClass.CORP_BOND"
+                          rule: "pd_lgd_parameter_required"
+                          message: "mst.pd_pefindo atau mst.lgd_basel tidak tersedia"
+                      traceId: "01HXY..."
+                pociDeferred:
+                  summary: POCI Reksadana deferred
+                  value:
+                    error:
+                      code: LOOKTHROUGH_POCI_DEFERRED
+                      message: "Instrumen RKD-005 adalah POCI. Look-through ECL untuk POCI Reksadana di-defer ke Phase 5. Instrument di-skip dari calc run ini."
+                      details:
+                        - field: "instrumenId"
+                          rule: "poci_reksadana_deferred"
+                          message: "poci_flag = TRUE pada instrumen ini"
+                      traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/lookthrough/compute/bulk — bulk Reksadana (Asynq job 202)
+  # Story APP-C-LKT-004
+  # ---------------------------------------------------------------------------
+  /ecl/lookthrough/compute/bulk:
+    post:
+      operationId: computeLookthroughBulk
+      summary: Bulk look-through ECL untuk semua Reksadana aktif dalam periodeId (Asynq job)
+      description: |
+        Trigger Asynq job yang menjalankan LookThroughService.BulkCompute() untuk semua
+        instrumen REKSADANA aktif dalam periodeId.
+
+        Dipanggil oleh P4-M7 ECL engine sebelum loop per-instrumen.
+        Juga dapat dipanggil manual oleh ROLE-RISK untuk verifikasi.
+
+        Performance SLA: ≤ 2 detik P95 untuk 500 instrumen Reksadana.
+        Implementasi menggunakan batch JOIN (BUKAN N+1 per instrumen):
+        mst.instrumen JOIN mst.fund_composition JOIN mst.pd_pefindo JOIN mst.lgd_basel
+        JOIN mst.bobot_skenario JOIN mst.impact_mev_pd WHERE semua aktif per periodeId.
+
+        Jika ada instrumen REKSADANA tanpa composition APPROVED → fail-fast:
+        LOOKTHROUGH_FUND_COMPOSITION_MISSING 422 dengan daftar instrumen terdampak.
+
+        Jika jumlah instrumen = 0 → return empty result (bukan error).
+
+        Permission: lookthrough.compute (internal) atau lookthrough.preview (ROLE-RISK manual call)
+        Roles: internal engine, ROLE-RISK
+
+        Idempotency-Key wajib.
+        Audit: tidak ada direct (stateless compute). P4-M8 write saat calc run diseal.
+        Metrik Prometheus: ecl_lookthrough_bulk_duration_seconds, ecl_lookthrough_bulk_instrument_count,
+                           ecl_lookthrough_bulk_errors_total.
+        Max instrumen: 10.000 Reksadana aktif per run. Lebih → 413 LOOKTHROUGH_BULK_TOO_LARGE.
+      tags: [lookthrough-compute]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LookthroughBulkComputeRequest"
+            example:
+              periodeId: "550e8400-e29b-41d4-a716-000000001000"
+              evaluationDate: "2026-06-30"
+      responses:
+        "202":
+          description: |
+            Job diterima. Client subscribe SSE di streamUrl untuk progress.
+            Hasil tersedia via GET /api/v1/jobs/{jobId} saat status = completed.
+            Job type: LOOKTHROUGH_BULK_COMPUTE.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/JobAcceptedResponse"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  jobId: "01JXYZ-LKT-BULK-001"
+                  type: "LOOKTHROUGH_BULK_COMPUTE"
+                  statusUrl: "/api/v1/jobs/01JXYZ-LKT-BULK-001"
+                  streamUrl: "/api/v1/jobs/01JXYZ-LKT-BULK-001/stream"
+                  estimatedDurationSeconds: 2
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: periodeId tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: NOT_FOUND
+                  message: "Periode buku tidak ditemukan"
+                  details:
+                    - field: "body.periodeId"
+                      rule: "exists"
+                      message: "periodeId tidak ada di mst.periode_buku"
+                  traceId: "01HXY..."
+        "413":
+          description: Jumlah instrumen Reksadana melebihi batas sistem
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: LOOKTHROUGH_BULK_TOO_LARGE
+                  message: "Jumlah instrumen REKSADANA aktif dalam scope (12.500) melebihi batas 10.000. Hubungi IT Admin untuk mempartisi."
+                  details: []
+                  traceId: "01HXY..."
+        "422":
+          description: Fund composition missing untuk satu atau lebih instrumen
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: LOOKTHROUGH_FUND_COMPOSITION_MISSING
+                  message: "2 instrumen tidak memiliki fund composition APPROVED per 2026-06-30."
+                  details:
+                    - field: "instrumen.missing_composition"
+                      rule: "all_reksadana_must_have_composition"
+                      message: "RKD-MISSING-1, RKD-MISSING-2"
+                  traceId: "01HXY..."
+        "423":
+          $ref: "#/components/responses/PeriodeClosed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/lookthrough/preview — DataTable preview breakdown per instrumen
+  # Story APP-C-LKT-003
+  # ---------------------------------------------------------------------------
+  /ecl/lookthrough/preview:
+    get:
+      operationId: listLookthroughPreview
+      summary: Preview look-through breakdown ECL per Reksadana — DataTable (sort+page+filter+export)
+      description: |
+        Menghitung dan menampilkan estimasi ECL per instrumen Reksadana secara on-the-fly,
+        tanpa menulis ke ecl.*. DataTable pattern (sort + page + filter + export).
+
+        Setiap baris menampilkan summary per instrumen. Drill-down ke breakdown per asset class
+        tersedia via GET /ecl/lookthrough/preview/{instrumenId}?evaluation_date=...
+
+        Permission: lookthrough.preview
+        Roles: ROLE-RISK, ROLE-AKUN-CTL, ROLE-CFO, ROLE-AUDIT
+
+        Allowed sort columns: instrumen_nama, nab_idr, total_ecl_estimate_idr, fund_composition_effective_from
+        Default sort: instrumen_nama ASC
+
+        Allowed filter:
+        - filter[instrumen_id]: UUID
+        - filter[klasifikasi]: AC | FVOCI (FVTPL di-exclude by default)
+        - filter[has_composition]: true|false (false = belum ada composition APPROVED)
+        - filter[nab_idr]: gte/lte/between
+        - q: text search di instrumen_nama
+
+        Export: CSV, XLSX (inline < 10k rows, async >= 10k).
+        Audit: LOOKTHROUGH.PREVIEW per call.
+
+        evaluationDate wajib. Jika fund composition missing untuk suatu instrumen:
+        baris tetap ditampilkan dengan total_ecl_estimate_idr = null dan
+        has_composition = false (tidak di-error, cukup di-flag).
+      tags: [lookthrough-preview]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: evaluation_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          description: "Tanggal evaluasi. Format: YYYY-MM-DD. Wajib."
+          example: "2026-06-30"
+        - name: periode_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: UUID periode buku. Diperlukan untuk load parameter PD/LGD/bobot yang approved. Jika kosong, gunakan parameter APPROVED terbaru.
+        - $ref: "#/components/parameters/cursor"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/sortParam"
+        - $ref: "#/components/parameters/searchParam"
+        - name: "filter[instrumen_id]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: "filter[klasifikasi]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [AC, FVOCI]
+          description: "Filter klasifikasi PSAK 71. FVTPL di-exclude by default."
+        - name: "filter[has_composition]"
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: "true = hanya instrumen yang sudah punya composition APPROVED; false = yang belum"
+        - name: "filter[nab_idr]"
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Format: gte:1000000000 atau between:0,5000000000"
+        - name: export
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [csv, xlsx]
+          description: Jika diset, response adalah file download
+      responses:
+        "200":
+          description: List preview per instrumen Reksadana
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LookthroughPreviewListResponse"
+              example:
+                data:
+                  - instrumenId: "550e8400-e29b-41d4-a716-000000000001"
+                    instrumenNama: "Reksa Dana Pendapatan Tetap XYZ"
+                    klasifikasiPsak71: "FVOCI"
+                    nabIdr: 5000000000.0000
+                    fundCompositionId: "550e8400-e29b-41d4-a716-000000000100"
+                    fundCompositionEffectiveFrom: "2026-04-01"
+                    hasComposition: true
+                    totalEclEstimateIdr: 17962500.0000
+                    isPreview: true
+                    warnings: []
+                  - instrumenId: "550e8400-e29b-41d4-a716-000000000002"
+                    instrumenNama: "Reksa Dana Saham ABC"
+                    klasifikasiPsak71: "AC"
+                    nabIdr: 3000000000.0000
+                    fundCompositionId: null
+                    fundCompositionEffectiveFrom: null
+                    hasComposition: false
+                    totalEclEstimateIdr: null
+                    isPreview: true
+                    warnings:
+                      - code: "LOOKTHROUGH_FUND_COMPOSITION_MISSING"
+                        message: "Belum ada fund composition APPROVED untuk instrumen ini"
+                pagination:
+                  nextCursor: null
+                  hasMore: false
+                  totalEstimate: 2
+                  limit: 50
+                appliedSort:
+                  - col: "instrumen_nama"
+                    dir: "asc"
+                appliedFilter: {}
+                meta:
+                  traceId: "01HXY..."
+            text/csv:
+              schema:
+                type: string
+                format: binary
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        "202":
+          description: Async export job diterima (dataset >= 10k rows)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/JobAcceptedResponse"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: evaluationDate wajib, atau parameter ECL tidak tersedia
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: ECL_PARAM_NOT_READY
+                  message: "Parameter ECL belum semua APPROVED untuk periode yang dipilih. Preview tidak dapat dilakukan."
+                  details:
+                    - field: "periode_id"
+                      rule: "ecl_parameters_all_approved"
+                      message: "mst.bobot_skenario atau mst.impact_mev_pd belum APPROVED"
+                  traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/lookthrough/preview/{instrumenId} — drill-down per instrumen
+  # Story APP-C-LKT-003 Scenario 1 + 2
+  # ---------------------------------------------------------------------------
+  /ecl/lookthrough/preview/{instrumenId}:
+    get:
+      operationId: getLookthroughPreviewDetail
+      summary: Detail preview look-through ECL satu Reksadana — breakdown per asset class + skenario
+      description: |
+        Menghitung dan menampilkan estimasi ECL Reksadana untuk satu instrumen, dengan
+        breakdown lengkap: per asset class × per skenario (GOOD/NORMAL/BAD).
+
+        Digunakan untuk drill-down dari DataTable listLookthroughPreview, atau akses langsung
+        dari halaman detail instrumen.
+
+        Permission: lookthrough.preview
+        Roles: ROLE-RISK, ROLE-AKUN-CTL, ROLE-CFO, ROLE-AUDIT
+
+        evaluation_date wajib.
+        periode_id opsional (default: ambil parameter ECL APPROVED terbaru).
+
+        Breakdown per asset class: setiap baris dapat di-expand ke detail per skenario.
+        DataTable breakdown mendukung sort per kolom, filter per asset_class (sesuai UX §1).
+        Export: GET /ecl/lookthrough/preview/{instrumenId}/export?format=csv&evaluation_date=...
+
+        Audit: LOOKTHROUGH.PREVIEW ditulis per call.
+      tags: [lookthrough-preview]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: instrumenId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID instrumen Reksadana
+        - name: evaluation_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          description: "Tanggal evaluasi. Format: YYYY-MM-DD. Wajib."
+          example: "2026-06-30"
+        - name: periode_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: UUID periode buku. Opsional.
+      responses:
+        "200":
+          description: Preview breakdown per asset class + skenario untuk satu instrumen
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/LookthroughPreviewDetail"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: Fund composition missing, NAB missing, instrumen bukan REKSADANA, dll
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                compositionMissing:
+                  value:
+                    error:
+                      code: LOOKTHROUGH_FUND_COMPOSITION_MISSING
+                      message: "Tidak ditemukan fund composition APPROVED untuk instrumen per tanggal ini."
+                      details: []
+                      traceId: "01HXY..."
+                nabMissing:
+                  value:
+                    error:
+                      code: LOOKTHROUGH_NAB_MISSING
+                      message: "NAB instrumen tidak tersedia. Pastikan feed NAB harian KSEI/MI telah diupload."
+                      details: []
+                      traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/lookthrough/preview/{instrumenId}/export — export breakdown CSV/XLSX
+  # Story APP-C-LKT-003 Scenario 4
+  # ---------------------------------------------------------------------------
+  /ecl/lookthrough/preview/{instrumenId}/export:
+    get:
+      operationId: exportLookthroughPreview
+      summary: Export breakdown look-through ECL satu instrumen ke CSV atau XLSX
+      description: |
+        Export hasil preview breakdown per asset class untuk satu instrumen.
+        Selalu inline (dataset per instrumen < 10k rows).
+
+        Permission: lookthrough.preview
+        Roles: ROLE-RISK, ROLE-AKUN-CTL, ROLE-CFO, ROLE-AUDIT
+
+        CSV: UTF-8 with BOM, delimiter koma, line ending CRLF.
+        XLSX: header bold + freeze, money #,##0.0000, rate #.00000000, date YYYY-MM-DD.
+        Header row Bahasa Indonesia: "Asset Class", "Bobot (%)", "Porsi NAB (IDR)",
+          "PD Normal", "LGD", "ECL Skenario GOOD (IDR)", "ECL Skenario NORMAL (IDR)",
+          "ECL Skenario BAD (IDR)", "ECL FL GOOD (IDR)", "ECL FL NORMAL (IDR)",
+          "ECL FL BAD (IDR)", "ECL Weighted (IDR)".
+        Footer row: timestamp export + filter aktif.
+        Content-Disposition: attachment; filename="lookthrough-{instrumenKode}-{YYYYMMDD}.{ext}"
+
+        Audit: LOOKTHROUGH.EXPORT ditulis ke aud.audit_log,
+               after_jsonb = {format, evaluation_date, instrumen_id, row_count}.
+      tags: [lookthrough-preview]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: instrumenId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: format
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [csv, xlsx]
+          description: Format file output
+        - name: evaluation_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          description: "Tanggal evaluasi. Format: YYYY-MM-DD. Wajib."
+          example: "2026-06-30"
+        - name: periode_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: UUID periode buku. Opsional.
+      responses:
+        "200":
+          description: File CSV atau XLSX (inline)
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              example: 'attachment; filename="lookthrough-RKD-PENDAPATAN-TETAP-XYZ-20260630.xlsx"'
+            X-Total-Rows:
+              schema:
+                type: integer
+              description: Jumlah baris data (tidak termasuk header)
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: Fund composition atau NAB missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+# =============================================================================
+# COMPONENTS
+# =============================================================================
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT RSA-2048 signed oleh Keycloak. Access token TTL 15 menit (DEC-025).
+        Claims wajib: sub, preferred_username, roles[], permissions[], tenant_id,
+        mfa_verified, exp, iat, nbf.
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: UUID v4 unik per request. TTL replay 24 jam (DEC-021).
+
+    compositionIdPath:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: UUID composition group dari mst.fund_composition
+
+    cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+      description: Opaque base64 cursor dari pagination.nextCursor (DEC-022)
+
+    limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+      description: Jumlah item per halaman. Default 50, max 200.
+
+    sortParam:
+      name: sort
+      in: query
+      required: false
+      schema:
+        type: string
+        pattern: "^[a-z_]+(:(asc|desc))?(,[a-z_]+(:(asc|desc))?)*$"
+      description: "Multi-column sort. Format: col1:asc,col2:desc. Max 3 kolom."
+
+    searchParam:
+      name: q
+      in: query
+      required: false
+      schema:
+        type: string
+        maxLength: 200
+      description: Text search global
+
+  schemas:
+
+    # ---- ResponseMeta -------------------------------------------------------
+    ResponseMeta:
+      type: object
+      properties:
+        traceId:
+          type: string
+          example: "01HXY..."
+
+    # ---- Error Envelope -----------------------------------------------------
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details, traceId]
+          properties:
+            code:
+              $ref: "#/components/schemas/LookthroughErrorCode"
+            message:
+              type: string
+              description: Human-readable message Bahasa Indonesia. JANGAN expose stack trace.
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                    description: Dot-notation field path
+                  rule:
+                    type: string
+                    description: Nama rule yang gagal
+                  message:
+                    type: string
+            traceId:
+              type: string
+
+    # ---- Look-through Error Codes -------------------------------------------
+    LookthroughErrorCode:
+      type: string
+      description: |
+        Stable error codes — P4-M4 Look-through Reksadana specific + inherited dari _common.yaml.
+        Tambahkan kode baru ke _common.yaml section "Look-through (APP-C, P4-M4)".
+      enum:
+        # Inherited dari _common.yaml
+        - VALIDATION_FAILED
+        - UNAUTHORIZED
+        - FORBIDDEN
+        - SOD_VIOLATION
+        - MFA_REQUIRED
+        - NOT_FOUND
+        - CONFLICT
+        - IDEMPOTENCY_REPLAY
+        - IDEMPOTENCY_MISMATCH
+        - WORKFLOW_INVALID_TRANSITION
+        - PERIODE_CLOSED
+        - ECL_PARAM_FROZEN
+        - ECL_PARAM_NOT_READY
+        - RATE_LIMITED
+        - INTERNAL
+        - INSTRUMENT_ECL_NOT_APPLICABLE
+        # Look-through specific (P4-M4) — tambah ke _common.yaml
+        - LOOKTHROUGH_FUND_COMPOSITION_MISSING   # 422 — tidak ada composition APPROVED per evaluationDate
+        - LOOKTHROUGH_NAB_MISSING                # 422 — NAB instrumen Reksadana tidak tersedia
+        - LOOKTHROUGH_WEIGHT_INVALID             # 422 — sum weight ≠ 100% ± 0.01% (submit or defensive runtime)
+        - LOOKTHROUGH_INSTRUMEN_NOT_REKSADANA    # 422 — instrumen bukan tipe REKSADANA
+        - LOOKTHROUGH_ASSET_CLASS_UNKNOWN        # 422 — asset_class bukan enum yang valid
+        - LOOKTHROUGH_PD_LGD_CLASS_MISSING       # 422 — PD/LGD parameter untuk asset class tidak tersedia
+        - LOOKTHROUGH_COMPOSITION_REVIEW_INVALID_TRANSITION  # 422 — transisi workflow tidak valid
+        - LOOKTHROUGH_COMPOSITION_SOD_VIOLATION  # 403 — SoD violation pada composition workflow
+        - LOOKTHROUGH_BULK_TOO_LARGE             # 413 — jumlah Reksadana melebihi batas sistem
+        - LOOKTHROUGH_POCI_DEFERRED              # 422 — POCI Reksadana di-skip, defer ke M7
+
+    # ---- Job Accepted Response (202) ----------------------------------------
+    JobAcceptedResponse:
+      type: object
+      required: [jobId, type, statusUrl, streamUrl]
+      properties:
+        jobId:
+          type: string
+          description: Job identifier (ULID). Persistent di sys.job.
+          example: "01JXYZ-LKT-BULK-001"
+        type:
+          type: string
+          description: Job type identifier
+          example: "LOOKTHROUGH_BULK_COMPUTE"
+        statusUrl:
+          type: string
+          example: "/api/v1/jobs/01JXYZ-LKT-BULK-001"
+        streamUrl:
+          type: string
+          description: SSE stream. Gunakan Authorization Bearer header (bukan ?token=).
+          example: "/api/v1/jobs/01JXYZ-LKT-BULK-001/stream"
+        estimatedDurationSeconds:
+          type: integer
+          nullable: true
+          description: Estimasi durasi berdasarkan history run sebelumnya
+
+    # ---- Fund Composition Line ----------------------------------------------
+    FundCompositionLine:
+      type: object
+      required: [assetClass, weightPct]
+      properties:
+        assetClass:
+          type: string
+          enum: [GOVT_BOND, CORP_BOND, CASH, EQUITY, OTHER]
+          description: |
+            Kategori aset underlying.
+            GOVT_BOND: Obligasi Pemerintah (sovereign, PD=0 IDR-denominated)
+            CORP_BOND: Obligasi Korporasi (PD dari mst.pd_pefindo)
+            CASH: Kas/deposito/pasar uang (PD dari bank counterparty)
+            EQUITY: Saham (PD dari sektor average)
+            OTHER: Aset lain — flag manual review (PD/LGD conservative default)
+          example: "GOVT_BOND"
+        weightPct:
+          type: number
+          format: decimal
+          description: "Bobot persentase asset class ini dalam portfolio fund (NUMERIC(7,4)). Contoh: 60.0000 = 60%"
+          minimum: 0.0001
+          example: 60.0000
+
+    # ---- Fund Composition Group (header + lines) ----------------------------
+    FundCompositionGroup:
+      type: object
+      description: |
+        Satu composition group = satu set lines per asset class untuk satu instrumen + effective period.
+        Satu group bisa berisi 1..N lines (satu per asset class unik).
+        Σ weightPct semua lines = 100% ± 0.01%.
+      required:
+        - compositionId
+        - instrumenId
+        - effectiveFrom
+        - workflowStatus
+        - totalWeightPct
+        - isAmendment
+        - lines
+      properties:
+        compositionId:
+          type: string
+          format: uuid
+          description: "UUID composition group. Digunakan sebagai FK dari ecl.lookthrough_underlying.fund_composition_id."
+          example: "550e8400-e29b-41d4-a716-000000000100"
+        instrumenId:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-000000000001"
+        instrumenNama:
+          type: string
+          nullable: true
+          example: "Reksa Dana Pendapatan Tetap XYZ"
+        effectiveFrom:
+          type: string
+          format: date
+          description: "Tanggal mulai berlaku composition ini. Format: YYYY-MM-DD."
+          example: "2026-04-01"
+        effectiveTo:
+          type: string
+          format: date
+          nullable: true
+          description: |
+            Tanggal akhir berlaku. NULL = masih aktif.
+            Di-set saat versi baru di-approve (SUPERSEDED): effectiveTo = new_effective_from - 1 hari.
+          example: null
+        workflowStatus:
+          type: string
+          enum: [DRAFT, PENDING_REVIEW, PENDING_APPROVAL, APPROVED, REJECTED, SUPERSEDED]
+          example: "PENDING_REVIEW"
+        totalWeightPct:
+          type: number
+          format: decimal
+          description: "Sum semua weightPct lines (NUMERIC(7,4)). Harus = 100% ± 0.01% untuk submit."
+          example: 100.0000
+        isAmendment:
+          type: boolean
+          description: "true = composition ini menggantikan versi sebelumnya (amend flow)."
+          example: false
+        supersedesCompositionId:
+          type: string
+          format: uuid
+          nullable: true
+          description: UUID composition yang di-supersede. Null jika bukan amendment.
+          example: null
+        lines:
+          type: array
+          minItems: 1
+          description: Lines per asset class. Setiap asset_class harus unik dalam satu group.
+          items:
+            $ref: "#/components/schemas/FundCompositionLine"
+        sourceDocId:
+          type: string
+          format: uuid
+          nullable: true
+          description: UUID referensi dokumen fund fact sheet (doc.upload)
+          example: "550e8400-e29b-41d4-a716-000000000090"
+        catatan:
+          type: string
+          nullable: true
+          maxLength: 2000
+          example: "Fund fact sheet Q1 2026 per tanggal 31 Maret 2026"
+        makerId:
+          type: string
+          format: uuid
+          nullable: true
+          description: UUID user ROLE-AKUN yang submit
+        makerNama:
+          type: string
+          nullable: true
+          example: "Siti Rahayu"
+        reviewerId:
+          type: string
+          format: uuid
+          nullable: true
+          description: UUID user ROLE-RISK yang review. Null sebelum review.
+        reviewerNama:
+          type: string
+          nullable: true
+        signedAtReview:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Timestamp saat reviewer sign. ISO 8601 dengan TZ."
+        approverId:
+          type: string
+          format: uuid
+          nullable: true
+          description: UUID user ROLE-ALCO yang approve. Null sebelum approve.
+        approverNama:
+          type: string
+          nullable: true
+        signedAtApprove:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Timestamp saat approver sign. ISO 8601 dengan TZ."
+        rejectionReason:
+          type: string
+          nullable: true
+          description: Comment dari reviewer/approver saat reject.
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-06-11T09:00:00+07:00"
+        updatedAt:
+          type: string
+          format: date-time
+          example: "2026-06-11T14:00:00+07:00"
+        rowVersion:
+          type: integer
+          description: Optimistic lock counter. Increment setiap UPDATE.
+          example: 1
+
+    # ---- Fund Composition Submit Request -----------------------------------
+    FundCompositionSubmitRequest:
+      type: object
+      required: [instrumenId, effectiveFrom, lines]
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+          description: "UUID instrumen Reksadana dari mst.instrumen. tipe_instrumen harus REKSADANA."
+        effectiveFrom:
+          type: string
+          format: date
+          description: "Tanggal mulai berlaku composition baru. Format: YYYY-MM-DD."
+          example: "2026-04-01"
+        sourceDocId:
+          type: string
+          format: uuid
+          nullable: true
+          description: UUID dokumen fund fact sheet (doc.upload). Opsional.
+        catatan:
+          type: string
+          nullable: true
+          maxLength: 2000
+          description: Catatan bebas (max 2000 karakter)
+        isAmendment:
+          type: boolean
+          default: false
+          description: |
+            false (default): komposisi baru untuk instrumen yang belum punya APPROVED composition.
+            true: amend/update dari versi sebelumnya. Wajib sertakan supersedesCompositionId.
+        supersedesCompositionId:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            UUID composition group yang akan digantikan.
+            Wajib jika isAmendment=true. Target harus workflow_status=APPROVED.
+        lines:
+          type: array
+          minItems: 1
+          maxItems: 5
+          description: |
+            Lines per asset class. Minimal 1, maksimal 5 (satu per enum value).
+            Setiap asset_class harus unik dalam satu submit.
+            Σ weightPct = 100% ± 0.01%.
+          items:
+            $ref: "#/components/schemas/FundCompositionLine"
+
+    # ---- Workflow Action Request (review/approve/reject) -------------------
+    WorkflowActionRequest:
+      type: object
+      required: [signatureMethod]
+      properties:
+        comment:
+          type: string
+          nullable: true
+          maxLength: 1000
+          description: Komentar review/approve/reject. Opsional untuk approve, disarankan untuk reject.
+          example: "Sesuai fund fact sheet Maret 2026. Komposisi valid."
+        signatureMethod:
+          type: string
+          enum: [JWT_STEP_UP, JWT_STANDARD]
+          description: |
+            JWT_STANDARD: untuk review dan approve fund_composition (MFA standard, bukan step-up).
+            JWT_STEP_UP: tidak diperlukan untuk fund_composition.approve (bukan dalam DEC-027 step-up list).
+          example: "JWT_STANDARD"
+
+    # ---- Fund Composition List Response ------------------------------------
+    FundCompositionListResponse:
+      type: object
+      required: [data, pagination, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/FundCompositionGroup"
+        pagination:
+          $ref: "#/components/schemas/PaginationResponse"
+        appliedSort:
+          type: array
+          items:
+            type: object
+            properties:
+              col:
+                type: string
+              dir:
+                type: string
+                enum: [asc, desc]
+        appliedFilter:
+          type: object
+          additionalProperties: true
+        meta:
+          $ref: "#/components/schemas/ResponseMeta"
+
+    # ---- Pagination Response -----------------------------------------------
+    PaginationResponse:
+      type: object
+      required: [nextCursor, hasMore]
+      properties:
+        nextCursor:
+          type: string
+          nullable: true
+          example: "eyJjcmVhdGVkQXQiOiIyMDI2LTA2LTExIn0="
+        hasMore:
+          type: boolean
+        totalEstimate:
+          type: integer
+          nullable: true
+          description: Estimasi total row (dari EXPLAIN, bukan COUNT pasti)
+        limit:
+          type: integer
+
+    # ---- Look-through Compute Request --------------------------------------
+    LookthroughComputeRequest:
+      type: object
+      required: [instrumenId, evaluationDate]
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+          description: UUID instrumen Reksadana dari mst.instrumen
+        evaluationDate:
+          type: string
+          format: date
+          description: "Tanggal evaluasi ECL. Format: YYYY-MM-DD."
+          example: "2026-06-30"
+        periodeId:
+          type: string
+          format: uuid
+          nullable: true
+          description: UUID periode buku. Opsional — jika kosong, gunakan parameter APPROVED terbaru.
+
+    # ---- Look-through Bulk Compute Request ---------------------------------
+    LookthroughBulkComputeRequest:
+      type: object
+      required: [periodeId, evaluationDate]
+      properties:
+        periodeId:
+          type: string
+          format: uuid
+          description: UUID periode buku dari mst.periode_buku
+        evaluationDate:
+          type: string
+          format: date
+          description: "Tanggal evaluasi (biasanya tanggal akhir periode). Format: YYYY-MM-DD."
+          example: "2026-06-30"
+
+    # ---- Look-through Compute Result (single instrumen) -------------------
+    LookthroughComputeResult:
+      type: object
+      required:
+        - instrumenId
+        - evaluationDate
+        - nabIdr
+        - fundCompositionId
+        - totalEclIdr
+        - breakdown
+      description: |
+        Hasil compute look-through ECL satu instrumen Reksadana.
+        Semua angka presisi: IDR = NUMERIC(20,4), PD/LGD = NUMERIC(10,8).
+        Kalkulasi menggunakan shopspring/decimal (no float64).
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+        instrumenNama:
+          type: string
+          nullable: true
+        evaluationDate:
+          type: string
+          format: date
+        nabIdr:
+          type: number
+          format: decimal
+          description: "NAB total instrumen Reksadana (IDR, NUMERIC(20,4)). Sumber: mst.instrumen.nominal_nab_idr."
+          example: 5000000000.0000
+        fundCompositionId:
+          type: string
+          format: uuid
+          description: UUID composition group yang dipakai untuk compute ini
+        fundCompositionVersion:
+          type: string
+          format: date
+          description: "effectiveFrom dari composition yang dipakai (untuk referensi). Format: YYYY-MM-DD."
+          example: "2026-04-01"
+        klasifikasiPsak71:
+          type: string
+          enum: [AC, FVOCI, FVTPL]
+          description: "Klasifikasi PSAK 71 instrumen. Jika FVTPL: totalEclIdr = 0."
+          example: "FVOCI"
+        totalEclIdr:
+          type: number
+          format: decimal
+          description: "Σ ECL_weighted dari semua asset class (IDR, NUMERIC(20,4)). 0 jika FVTPL."
+          example: 17962500.0000
+        breakdown:
+          type: array
+          description: Breakdown ECL per asset class. Satu item per asset class dalam composition.
+          items:
+            $ref: "#/components/schemas/LookthroughBreakdownLine"
+        warnings:
+          type: array
+          description: Warning non-blocking (mis. asset class OTHER ditandai untuk review, FVTPL skip note)
+          items:
+            type: object
+            properties:
+              code:
+                type: string
+              message:
+                type: string
+              assetClass:
+                type: string
+                nullable: true
+
+    # ---- Look-through Breakdown Line (per asset class) --------------------
+    LookthroughBreakdownLine:
+      type: object
+      required:
+        - assetClass
+        - weightPct
+        - nabPortionIdr
+        - lgd
+        - eclWeightedIdr
+      description: |
+        ECL breakdown untuk satu asset class dalam fund composition.
+        Formula per skenario S:
+          ECL_S = nabPortionIdr × PD_S × lgd
+          ECL_FL_S = ECL_S × flMultiplier_S
+          ECL_weighted = Σ(ECL_FL_S × bobot_S) untuk S in {GOOD, NORMAL, BAD}
+        Presisi: IDR NUMERIC(20,4), PD/LGD NUMERIC(10,8).
+      properties:
+        assetClass:
+          type: string
+          enum: [GOVT_BOND, CORP_BOND, CASH, EQUITY, OTHER]
+          example: "CORP_BOND"
+        weightPct:
+          type: number
+          format: decimal
+          description: "Bobot dari fund composition (NUMERIC(7,4)). Mis. 30.0000 = 30%."
+          example: 30.0000
+        nabPortionIdr:
+          type: number
+          format: decimal
+          description: "nabIdr × weightPct/100 (IDR, NUMERIC(20,4))."
+          example: 1500000000.0000
+        pdGood:
+          type: number
+          format: decimal
+          description: "PD skenario GOOD untuk asset class ini (NUMERIC(10,8))."
+          example: 0.02000000
+          nullable: true
+        pdNormal:
+          type: number
+          format: decimal
+          description: "PD skenario NORMAL (NUMERIC(10,8)). 0.00000000 untuk GOVT_BOND sovereign."
+          example: 0.02500000
+        pdBad:
+          type: number
+          format: decimal
+          description: "PD skenario BAD (NUMERIC(10,8))."
+          example: 0.03750000
+          nullable: true
+        lgd:
+          type: number
+          format: decimal
+          description: "LGD pool untuk asset class ini (NUMERIC(10,8))."
+          example: 0.45000000
+        flMultiplierGood:
+          type: number
+          format: decimal
+          description: "Forward-looking multiplier skenario GOOD (NUMERIC(10,8))."
+          example: 0.80000000
+          nullable: true
+        flMultiplierNormal:
+          type: number
+          format: decimal
+          description: "Forward-looking multiplier skenario NORMAL (NUMERIC(10,8))."
+          example: 1.00000000
+          nullable: true
+        flMultiplierBad:
+          type: number
+          format: decimal
+          description: "Forward-looking multiplier skenario BAD (NUMERIC(10,8))."
+          example: 1.50000000
+          nullable: true
+        eclSkenariosGoodIdr:
+          type: number
+          format: decimal
+          description: "ECL skenario GOOD sebelum FL: nabPortionIdr × PD_Good × LGD (IDR, NUMERIC(20,4))."
+          example: 13500000.0000
+          nullable: true
+        eclSkenariosNormalIdr:
+          type: number
+          format: decimal
+          description: "ECL skenario NORMAL sebelum FL (IDR, NUMERIC(20,4))."
+          example: 16875000.0000
+        eclSkenariosBadIdr:
+          type: number
+          format: decimal
+          description: "ECL skenario BAD sebelum FL (IDR, NUMERIC(20,4))."
+          example: 25312500.0000
+          nullable: true
+        eclFlGoodIdr:
+          type: number
+          format: decimal
+          description: "ECL skenario GOOD setelah FL multiplier (IDR, NUMERIC(20,4))."
+          example: 10800000.0000
+          nullable: true
+        eclFlNormalIdr:
+          type: number
+          format: decimal
+          description: "ECL skenario NORMAL setelah FL multiplier (IDR, NUMERIC(20,4))."
+          example: 16875000.0000
+        eclFlBadIdr:
+          type: number
+          format: decimal
+          description: "ECL skenario BAD setelah FL multiplier (IDR, NUMERIC(20,4))."
+          example: 37968750.0000
+          nullable: true
+        bobotGood:
+          type: number
+          format: decimal
+          description: "Bobot skenario GOOD (NUMERIC(10,8)). Default: 0.25000000."
+          example: 0.25000000
+          nullable: true
+        bobotNormal:
+          type: number
+          format: decimal
+          description: "Bobot skenario NORMAL (NUMERIC(10,8)). Default: 0.50000000."
+          example: 0.50000000
+          nullable: true
+        bobotBad:
+          type: number
+          format: decimal
+          description: "Bobot skenario BAD (NUMERIC(10,8)). Default: 0.25000000."
+          example: 0.25000000
+          nullable: true
+        eclWeightedIdr:
+          type: number
+          format: decimal
+          description: "Σ(ECL_FL_S × bobot_S) — ECL weighted aggregate untuk asset class ini (IDR, NUMERIC(20,4))."
+          example: 20629687.5000
+
+    # ---- Look-through Preview Detail (single instrumen + all scenarios) ----
+    LookthroughPreviewDetail:
+      type: object
+      required: [instrumenId, evaluationDate, nabIdr, fundCompositionId, totalEclEstimateIdr, breakdown, isPreview]
+      description: |
+        Preview detail look-through ECL satu instrumen. Identik dengan LookthroughComputeResult
+        tapi dengan isPreview=true dan tidak menulis ke ecl.*.
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+        instrumenNama:
+          type: string
+          nullable: true
+        evaluationDate:
+          type: string
+          format: date
+        nabIdr:
+          type: number
+          format: decimal
+          example: 5000000000.0000
+        fundCompositionId:
+          type: string
+          format: uuid
+        fundCompositionEffectiveFrom:
+          type: string
+          format: date
+          example: "2026-04-01"
+        klasifikasiPsak71:
+          type: string
+          enum: [AC, FVOCI, FVTPL]
+          example: "FVOCI"
+        totalEclEstimateIdr:
+          type: number
+          format: decimal
+          description: "Total ECL estimasi (IDR, NUMERIC(20,4)). Gunakan parameter ECL aktif."
+          example: 17962500.0000
+        breakdown:
+          type: array
+          items:
+            $ref: "#/components/schemas/LookthroughBreakdownLine"
+        isPreview:
+          type: boolean
+          description: Selalu true. Bukan hasil calc run resmi.
+          example: true
+        note:
+          type: string
+          example: "Estimasi menggunakan parameter ECL aktif. Bukan hasil calc run resmi."
+        warnings:
+          type: array
+          items:
+            type: object
+            properties:
+              code:
+                type: string
+              message:
+                type: string
+              assetClass:
+                type: string
+                nullable: true
+
+    # ---- Look-through Preview List Row (per instrumen summary) -------------
+    LookthroughPreviewRow:
+      type: object
+      required: [instrumenId, instrumenNama, evaluationDate, hasComposition, isPreview]
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+        instrumenNama:
+          type: string
+          example: "Reksa Dana Pendapatan Tetap XYZ"
+        klasifikasiPsak71:
+          type: string
+          nullable: true
+          enum: [AC, FVOCI, FVTPL]
+          example: "FVOCI"
+        nabIdr:
+          type: number
+          format: decimal
+          nullable: true
+          description: "NAB instrumen (IDR, NUMERIC(20,4)). Null jika belum tersedia."
+          example: 5000000000.0000
+        fundCompositionId:
+          type: string
+          format: uuid
+          nullable: true
+          description: UUID composition APPROVED yang berlaku. Null jika belum ada composition.
+        fundCompositionEffectiveFrom:
+          type: string
+          format: date
+          nullable: true
+          example: "2026-04-01"
+        hasComposition:
+          type: boolean
+          description: "true = ada composition APPROVED berlaku pada evaluationDate."
+          example: true
+        totalEclEstimateIdr:
+          type: number
+          format: decimal
+          nullable: true
+          description: "Total ECL estimasi (IDR, NUMERIC(20,4)). Null jika composition atau NAB belum tersedia."
+          example: 17962500.0000
+        isPreview:
+          type: boolean
+          description: Selalu true.
+          example: true
+        warnings:
+          type: array
+          items:
+            type: object
+            properties:
+              code:
+                type: string
+              message:
+                type: string
+
+    # ---- Look-through Preview List Response --------------------------------
+    LookthroughPreviewListResponse:
+      type: object
+      required: [data, pagination, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/LookthroughPreviewRow"
+        pagination:
+          $ref: "#/components/schemas/PaginationResponse"
+        appliedSort:
+          type: array
+          items:
+            type: object
+            properties:
+              col:
+                type: string
+              dir:
+                type: string
+                enum: [asc, desc]
+        appliedFilter:
+          type: object
+          additionalProperties: true
+        meta:
+          $ref: "#/components/schemas/ResponseMeta"
+
+  # -------------------------------------------------------------------------
+  # Reusable Responses
+  # -------------------------------------------------------------------------
+  responses:
+    ValidationFailed:
+      description: Validasi field atau cross-field gagal
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: VALIDATION_FAILED
+              message: "Validasi gagal — 1 field bermasalah"
+              details:
+                - field: "body.lines"
+                  rule: "weight_sum_100pct"
+                  message: "Total weight_pct = 85%, expected 100% ± 0.01%"
+              traceId: "01HXY..."
+
+    Unauthorized:
+      description: JWT tidak valid, missing, atau expired
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: UNAUTHORIZED
+              message: "Token JWT tidak valid atau sudah expired"
+              details: []
+              traceId: "01HXY..."
+
+    Forbidden:
+      description: Permission tidak terpenuhi
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: FORBIDDEN
+              message: "Anda tidak memiliki permission 'fund_composition.review'"
+              details: []
+              traceId: "01HXY..."
+
+    NotFound:
+      description: Entity tidak ditemukan
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: NOT_FOUND
+              message: "Entity tidak ditemukan"
+              details: []
+              traceId: "01HXY..."
+
+    WorkflowInvalidTransition:
+      description: State machine menolak transisi ini
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: LOOKTHROUGH_COMPOSITION_REVIEW_INVALID_TRANSITION
+              message: "Transisi workflow tidak valid untuk state saat ini."
+              details:
+                - field: "workflowStatus"
+                  rule: "invalid_transition"
+                  message: "Transition tidak diizinkan"
+              traceId: "01HXY..."
+
+    PeriodeClosed:
+      description: Periode buku sudah hard-closed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: PERIODE_CLOSED
+              message: "Periode buku sudah hard-closed. Tidak bisa mutasi."
+              details: []
+              traceId: "01HXY..."
+
+    RateLimited:
+      description: Too many requests
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Detik sampai rate limit reset
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: RATE_LIMITED
+              message: "Terlalu banyak request. Coba lagi dalam 60 detik."
+              details: []
+              traceId: "01HXY..."
+
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: INTERNAL
+              message: "Terjadi kesalahan internal. Hubungi admin dengan traceId."
+              details: []
+              traceId: "01HXY..."

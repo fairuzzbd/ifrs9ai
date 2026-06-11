@@ -297,6 +297,17 @@ components:
         - LPS_OVERRIDE_PERIODE_INVALID       # 422 — effectiveFrom > effectiveTo pada proposal override
         - LPS_AGGREGATE_INSTRUMEN_NOT_DEPOSITO # 422 — instrumen bukan tipe DEPOSITO (scope Phase 4 = DEPOSITO only)
         - LPS_AGGREGATE_BULK_TOO_LARGE       # 413 — instrumen dalam scope bulk aggregate > 50.000
+        # Look-through Reksadana (APP-C, P4-M4)
+        - LOOKTHROUGH_FUND_COMPOSITION_MISSING  # 422 — tidak ada composition APPROVED berlaku per evaluationDate untuk instrumen
+        - LOOKTHROUGH_NAB_MISSING               # 422 — NAB instrumen Reksadana IS NULL (feed belum diupload)
+        - LOOKTHROUGH_WEIGHT_INVALID            # 422 — sum weight_pct fund composition ≠ 100% ± 0.01% (submit atau defensive runtime)
+        - LOOKTHROUGH_INSTRUMEN_NOT_REKSADANA   # 422 — instrumen bukan tipe REKSADANA
+        - LOOKTHROUGH_ASSET_CLASS_UNKNOWN       # 422 — asset_class bukan enum valid (GOVT_BOND/CORP_BOND/CASH/EQUITY/OTHER)
+        - LOOKTHROUGH_PD_LGD_CLASS_MISSING      # 422 — PD atau LGD tidak tersedia per asset class + periodeId
+        - LOOKTHROUGH_COMPOSITION_REVIEW_INVALID_TRANSITION  # 422 — transisi workflow fund composition tidak valid
+        - LOOKTHROUGH_COMPOSITION_SOD_VIOLATION # 403 — SoD: reviewer=maker atau approver=maker/reviewer pada composition
+        - LOOKTHROUGH_BULK_TOO_LARGE            # 413 — jumlah Reksadana aktif dalam scope > 10.000
+        - LOOKTHROUGH_POCI_DEFERRED             # 422 — POCI Reksadana di-skip dari look-through compute (defer ke M7)
 
     # ---- Timestamps -------------------------------------------------------
     TimestampISO:
