@@ -768,6 +768,29 @@ func TestGetPDFromBatchParams_POCI_Returns_DeferredToM7(t *testing.T) {
 	}
 }
 
+func TestGetPDFromBatchParams_POCI_Stage3_Returns_DeferredToM7(t *testing.T) {
+	// Ordering lock: POCI guard MUST precede Stage 3 check so POCI takes
+	// precedence in all stages (mirrors GetPD ordering). Per FSD-APP-C §3.5.
+	inst := InstrumenRow{
+		ID: testInstrID, CounterpartyID: testCPID,
+		KlasifikasiPsak71: "POCI",
+	}
+	params := &BatchParams{
+		PDCurves:    map[string]PDCurveRow{},
+		ImpactPD:    &ImpactPDRow{ImpactMultiplier: d("1.00000000")},
+		ImpactMevPD: map[string]ImpactMevPDRow{},
+		Ratings:     map[uuid.UUID]string{testCPID: "idA"},
+	}
+	_, _, err := GetPDFromBatchParams(testInstrID, Stage3, ScenarioNormal, inst, params, testEvalDate)
+	if err == nil {
+		t.Fatal("Expected CodePOCIDeferredToM7 for POCI@Stage3 batch path, got nil")
+	}
+	de, ok := domainerrors.IsDomainError(err)
+	if !ok || de.Code() != domainerrors.CodePOCIDeferredToM7 {
+		t.Errorf("Want CodePOCIDeferredToM7, got %v", err)
+	}
+}
+
 func TestTraceIDFromCtx_WithValue(t *testing.T) {
 	// F5: traceIDFromCtx extracts trace ID from context using typed key.
 	ctx := context.WithValue(context.Background(), TraceIDCtxKey, "test-trace-123")

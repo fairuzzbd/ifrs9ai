@@ -316,19 +316,22 @@ func GetPDFromBatchParams(
 	detail.Scenario = scenario
 	detail.Warnings = []HelperWarning{}
 
+	// F3: POCI guard — deferred to P4-M7 (credit-adjusted EIR required).
+	// Must precede Stage 3 check so POCI takes precedence in all stages, mirroring
+	// GetPD ordering. POCI instruments at Stage 3 still require credit-adjusted EIR,
+	// not the standard PD=1.0 path. See FSD-APP-C §3.5 + IFRS9 §5.5.13.
+	if isPOCI(inst.KlasifikasiPsak71) {
+		return decimal.Zero, detail, domainerrors.New(domainerrors.CodePOCIDeferredToM7,
+			fmt.Sprintf("Instrumen %s adalah POCI — memerlukan credit-adjusted EIR dari P4-M7. "+
+				"Deferred ke modul P4-M7.", instrID))
+	}
+
 	// Stage 3 — PD fixed 1.0.
 	if stage == Stage3 {
 		pd3 := decimal.NewFromInt(1)
 		detail.PD = pd3
 		detail.PDBase = pd3
 		return pd3, detail, nil
-	}
-
-	// F3: POCI guard — deferred to P4-M7 (credit-adjusted EIR required).
-	if isPOCI(inst.KlasifikasiPsak71) {
-		return decimal.Zero, detail, domainerrors.New(domainerrors.CodePOCIDeferredToM7,
-			fmt.Sprintf("Instrumen %s adalah POCI — memerlukan credit-adjusted EIR dari P4-M7. "+
-				"Deferred ke modul P4-M7.", instrID))
 	}
 
 	// Active rating.
