@@ -80,11 +80,18 @@ type InstrumenReader interface {
 	GetOriginationDate(ctx context.Context, instrumenID uuid.UUID) (time.Time, error)
 }
 
-// PeriodeBukuReader fetches closed BULANAN periods for cure assessment.
+// PeriodeBukuReader fetches closed BULANAN periods for cure assessment and
+// periode metadata for override submission.
 type PeriodeBukuReader interface {
-	// ListClosedBulananSince returns closed BULANAN periode_buku with tanggal_mulai >= from,
-	// ordered ascending. Used by cure assessment (§5.3 step 2).
+	// ListClosedBulananSince returns HARD_CLOSED BULANAN periode_buku with
+	// tanggal_mulai >= from, ordered ascending. Used by cure assessment (§5.3 step 2).
+	// Per DEC-012 + FSD-APP-C §3.3: only HARD_CLOSED periods count toward cure.
 	ListClosedBulananSince(ctx context.Context, from time.Time, tenantID string) ([]time.Time, error)
+
+	// GetTanggalAkhirByID returns mst.periode_buku.tanggal_akhir for a given periode ID.
+	// Used by SubmitOverride to set periodeAkhir from the real periode record.
+	// Returns ErrNotFound if the periode does not exist.
+	GetTanggalAkhirByID(ctx context.Context, periodeID uuid.UUID) (time.Time, error)
 }
 
 // InstrumenSnapshot is a minimal read-only view from mst.instrumen.
@@ -219,8 +226,13 @@ func (s *Service) EvaluateSingleInstrumen(ctx context.Context, instrumenID uuid.
 	currentRating = r2
 
 	// Run SICR evaluation (DEC-011).
-	// ratingPrevious is empty here (batch mode); IG→non-IG relies on notch delta as proxy.
-	sicrResult := EvaluateSICR(originRating, currentRating, "", currentDPD)
+	// Pass originRating as ratingPrevious so the IG→non-IG trigger is checked
+	// independently of the notch-delta trigger (F3 fix).
+	// A 1-notch downgrade from idBBB- (last IG) to idBB+ (first non-IG) has
+	// delta=1 which would miss the "≥2 notch" check; passing originRating as
+	// the previous-rating argument lets EvaluateSICR detect the boundary crossing
+	// directly, regardless of delta magnitude.
+	sicrResult := EvaluateSICR(originRating, currentRating, originRating, currentDPD)
 
 	// Compute target stage.
 	newStage, needsDoubleRow := ComputeNewStage(currentStage, sicrResult, currentDPD)
@@ -615,9 +627,20 @@ func (s *Service) SubmitOverride(ctx context.Context, req OverrideSubmitRequest)
 	}
 
 	now := time.Now().UTC()
-	// periodeAkhir defaults to 1 year from now if not provided by request.
-	// In production this would come from mst.periode_buku.
-	periodeAkhir := now.AddDate(1, 0, 0)
+
+	// periodeAkhir is read from mst.periode_buku.tanggal_akhir for the submitted
+	// periodeID per migration 000022 §Section 2 comment (F4 fix).
+	// Returns STAGING_RATING_BASELINE_MISSING if the periode does not exist —
+	// reusing that domain error is intentional: missing context data from the
+	// periode record is analogous to missing rating baseline context.
+	periodeAkhir, err := s.periodeReader.GetTanggalAkhirByID(ctx, req.PeriodeID)
+	if err != nil {
+		if err == ErrNotFound {
+			return nil, domainerrors.New(domainerrors.Code(CodeStagingRatingBaselineMissing),
+				"Periode buku tidak ditemukan: "+req.PeriodeID.String())
+		}
+		return nil, fmt.Errorf("staging SubmitOverride: GetTanggalAkhirByID: %w", err)
+	}
 
 	prop := &OverrideProposal{
 		ID:                   uuid.New(),
