@@ -28,7 +28,11 @@ const decimalPositiveString = z
     "Format tidak valid. Gunakan angka, contoh: 2000000000.0000",
   )
   .refine(
-    (val) => parseFloat(val) > 0,
+    // String-based positivity check — never parse as float64 (DEC-016).
+    // Regex guarantees the string is all-digits (+ optional decimal), so the
+    // only way val is non-positive is if every digit is "0".
+    // Leading "0" with no fractional part → "0"; "0.0000" → false.
+    (val) => /^[1-9]/.test(val) || (/^0\./.test(val) && !/^0\.0+$/.test(val)),
     "Jumlah coverage harus lebih dari 0",
   );
 
@@ -176,19 +180,22 @@ export interface LPSCoverageDetail extends LPSCoverageItem {
 
 /**
  * Format a decimal string to IDR display: "Rp 2.000.000.000,00"
- * Uses Intl.NumberFormat id-ID with currency IDR.
- * Input: string like "2000000000.0000"
+ * Pure string manipulation — never uses parseFloat to avoid float64 precision
+ * loss for large IDR values (DEC-016).
+ * Input: string like "2000000000.0000" or "2000000000"
  */
 export function formatIDR(amountStr: string): string {
-  // Parse as float for display only (display precision, not computation)
-  const parsed = parseFloat(amountStr);
-  if (isNaN(parsed)) return amountStr;
-  return new Intl.NumberFormat("id-ID", {
-    style: "currency",
-    currency: "IDR",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(parsed);
+  if (!amountStr || !/^\d+(\.\d+)?$/.test(amountStr.trim())) return amountStr;
+
+  const [intPart, fracPart] = amountStr.trim().split(".");
+
+  // Thousands separator: insert "." every 3 digits from the right (id-ID style)
+  const intFormatted = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+
+  // Display exactly 2 decimal places (IDR convention for display)
+  const centPart = fracPart ? fracPart.slice(0, 2).padEnd(2, "0") : "00";
+
+  return `Rp ${intFormatted},${centPart}`;
 }
 
 /**
