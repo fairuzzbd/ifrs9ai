@@ -321,9 +321,9 @@ func (m *mockInstrumenReader) GetOriginationDate(_ context.Context, _ uuid.UUID)
 // ─── mockPeriodeReader ────────────────────────────────────────────────────────
 
 type mockPeriodeReader struct {
-	periods        []time.Time
-	err            error
-	tanggalAkhir   time.Time
+	periods         []time.Time
+	err             error
+	tanggalAkhir    time.Time
 	tanggalAkhirErr error
 }
 

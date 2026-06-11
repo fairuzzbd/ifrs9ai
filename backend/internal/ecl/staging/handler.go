@@ -52,7 +52,7 @@ type Handler struct {
 
 // NewHandler creates a Handler.
 // Pass a non-nil asynq.Client for production use; pass nil for dev/test to fall back to
-// the synchronous evaluate path (EvaluateSyncHandler behaviour).
+// the synchronous evaluate path (EvaluateSyncHandler behavior).
 func NewHandler(svc *Service, opts ...TaskEnqueuer) *Handler {
 	h := &Handler{svc: svc}
 	if len(opts) > 0 {
