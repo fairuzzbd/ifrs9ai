@@ -490,6 +490,29 @@ func DefaultConfigs() map[string]*Config {
 				Approver2NotAnyPrevious:    true,
 			},
 		},
+		// LOOKTHROUGH_COMPOSITION — P4-M4 fund composition 6-eyes workflow
+		// (ROLE-AKUN maker → ROLE-RISK reviewer → ROLE-ALCO approver).
+		// MFA: ROLE-ALCO wajib MFA (DEC-026). No step-up (state-machine p4-m4-lookthrough.md §5.2).
+		"LOOKTHROUGH_COMPOSITION": {
+			EntityType:  "LOOKTHROUGH_COMPOSITION",
+			Eyes:        6,
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":   "fund_composition.create",
+				"review":   "fund_composition.review",
+				"approve":  "fund_composition.approve",
+				"approve2": "fund_composition.approve",
+				"reject":   "fund_composition.review",
+			},
+			// No step-up MFA for fund_composition.approve per state-machine §5.2;
+			// DEC-027 does not list fund_composition.approve as step-up action.
+			StepUpRequired: map[string]bool{"approve": false, "approve2": false},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    true,
+			},
+		},
 		// STAGING_OVERRIDE — Phase 4 M1 manual override (APP-C-STG-004/005).
 		// Stage 2→3 = 4-eyes (RISK maker + RISK reviewer + ALCO approve).
 		// Stage 3→2 = 6-eyes (adds KOMITE approve2). Both paths: step-up MFA on approve(2).

@@ -120,6 +120,18 @@ const (
 	CodeLPSOverridePeriodeInvalid        Code = "LPS_OVERRIDE_PERIODE_INVALID"         // effectiveFrom > effectiveTo (HTTP 422)
 	CodeLPSAggregateInstrumenNotDeposito Code = "LPS_AGGREGATE_INSTRUMEN_NOT_DEPOSITO" // instrument not DEPOSITO type (HTTP 422)
 	CodeLPSAggregateBulkTooLarge         Code = "LPS_AGGREGATE_BULK_TOO_LARGE"         // instrument scope > 50000 (HTTP 413)
+
+	// P4-M4 Look-through ECL codes (APP-C-LKT-001..005) — docs/state-machines/p4-m4-lookthrough.md §4.
+	CodeLookthroughFundCompositionMissing             Code = "LOOKTHROUGH_FUND_COMPOSITION_MISSING"              // no APPROVED_ACTIVE composition for instrumenID on evalDate (HTTP 422)
+	CodeLookthroughNABMissing                         Code = "LOOKTHROUGH_NAB_MISSING"                          // mst.instrumen.nominal_nab_idr IS NULL (HTTP 422)
+	CodeLookthroughWeightInvalid                      Code = "LOOKTHROUGH_WEIGHT_INVALID"                       // Σ weight_pct ≠ 100% ± 0.01% (HTTP 422)
+	CodeLookthroughInstrumenNotReksadana              Code = "LOOKTHROUGH_INSTRUMEN_NOT_REKSADANA"               // tipe_instrumen ≠ REKSADANA (HTTP 422)
+	CodeLookthroughAssetClassUnknown                  Code = "LOOKTHROUGH_ASSET_CLASS_UNKNOWN"                  // unknown asset_class enum value (HTTP 422)
+	CodeLookthroughPDLGDClassMissing                  Code = "LOOKTHROUGH_PD_LGD_CLASS_MISSING"                 // PD/LGD lookup failed for asset class (HTTP 422)
+	CodeLookthroughCompositionReviewInvalidTransition Code = "LOOKTHROUGH_COMPOSITION_REVIEW_INVALID_TRANSITION" // invalid workflow state transition (HTTP 422)
+	CodeLookthroughCompositionSoDViolation            Code = "LOOKTHROUGH_COMPOSITION_SOD_VIOLATION"            // SoD violation in composition workflow (HTTP 403)
+	CodeLookthroughBulkTooLarge                       Code = "LOOKTHROUGH_BULK_TOO_LARGE"                       // REKSADANA scope > 10000 instruments (HTTP 413)
+	CodeLookthroughPOCIDeferred                       Code = "LOOKTHROUGH_POCI_DEFERRED"                        // POCI Reksadana deferred to Phase 5 (HTTP 422)
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
@@ -189,6 +201,16 @@ func (c Code) HTTPStatus() int {
 		CodeLPSOverrideInvalidTransition, CodeLPSOverridePeriodeInvalid,
 		CodeLPSAggregateInstrumenNotDeposito:
 		return http.StatusUnprocessableEntity
+	// P4-M4 Look-through ECL error codes.
+	case CodeLookthroughFundCompositionMissing, CodeLookthroughNABMissing,
+		CodeLookthroughWeightInvalid, CodeLookthroughInstrumenNotReksadana,
+		CodeLookthroughAssetClassUnknown, CodeLookthroughPDLGDClassMissing,
+		CodeLookthroughCompositionReviewInvalidTransition, CodeLookthroughPOCIDeferred:
+		return http.StatusUnprocessableEntity
+	case CodeLookthroughCompositionSoDViolation:
+		return http.StatusForbidden
+	case CodeLookthroughBulkTooLarge:
+		return http.StatusRequestEntityTooLarge
 	case CodePeriodeClosed, CodeECLParamFrozen:
 		return 423 // Locked
 	case CodeRateLimited:

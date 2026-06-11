@@ -53,6 +53,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/workflow"
 
 	"blips-ifrs9.tugu-re.com/internal/ecl/helpers"
+	"blips-ifrs9.tugu-re.com/internal/ecl/lookthrough"
 	"blips-ifrs9.tugu-re.com/internal/ecl/lps"
 	"blips-ifrs9.tugu-re.com/internal/ecl/staging"
 )
@@ -584,6 +585,43 @@ func main() {
 	// Register workflow hook for LPS_EXCLUSION_OVERRIDE entity type.
 	lpsOverrideHook := lps.NewOverrideWorkflowHook(lpsOverrideRepo)
 	wfService.RegisterEntityHook(lpsOverrideHook.EntityType(), lpsOverrideHook)
+
+	// -----------------------------------------------------------------------
+	// Look-through ECL (APP-C-LKT-001..005, Phase 4 Module 4)
+	// Endpoints (all under /api/v1/ecl/lookthrough/):
+	//   POST  composition/submit           — ROLE-AKUN submit fund composition
+	//   POST  composition/:id/review       — ROLE-RISK review (SoD: reviewer ≠ maker)
+	//   POST  composition/:id/approve      — ROLE-ALCO approve (MFA wajib DEC-026)
+	//   POST  composition/:id/reject       — reject with reason
+	//   POST  composition/:id/amend        — amend (supersedes old APPROVED_ACTIVE)
+	//   GET   compositions                 — DataTable list by instrumen
+	//   GET   compositions/:id             — detail + lines
+	//   POST  compute                      — single instrument ECL
+	//   POST  compute/bulk                 — bulk all REKSADANA (202 + jobId)
+	//   GET   preview                      — DataTable preview with ECL estimate
+	//   GET   preview/export               — CSV/async XLSX export
+	//   GET   result/:instrumenId/:runId   — stored result detail
+	//
+	// Decisions: DEC-010, DEC-015, DEC-016, DEC-017, DEC-018, DEC-021, DEC-022.
+	// Formula: SoW §4.4, FSD-APP-C §3.4. 3-skenario × dual FL multiplier.
+	// -----------------------------------------------------------------------
+	ltAuditWriter := lookthrough.NewAuditWriterAdapter(audit.NewWriter(db))
+	ltCompRepo := lookthrough.NewDBFundCompositionRepo(db)
+	ltInstRepo := lookthrough.NewDBReksadanaInstrumenRepo(db)
+	ltPDLGDRepo := lookthrough.NewDBPDLGDClassRepo(db)
+	ltParamRepo := lookthrough.NewDBScenarioParamRepo(db)
+	ltResultRepo := lookthrough.NewDBLookthroughResultRepo(db)
+
+	ltCompositionSvc := lookthrough.NewCompositionService(db, ltCompRepo, ltAuditWriter, logger)
+	ltLookthroughSvc := lookthrough.NewLookthroughService(
+		db, ltInstRepo, ltCompRepo, ltPDLGDRepo, ltParamRepo, ltResultRepo,
+		ltAuditWriter, lookthrough.NoopMetrics(), logger,
+	)
+	ltHandler := lookthrough.NewHandler(ltCompositionSvc, ltLookthroughSvc, ltResultRepo)
+	lookthrough.RegisterRoutes(v1, ltHandler, jwtVerifier, db)
+
+	ltCompositionHook := lookthrough.NewCompositionWorkflowHook(ltCompRepo)
+	wfService.RegisterEntityHook(ltCompositionHook.EntityType(), ltCompositionHook)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,
