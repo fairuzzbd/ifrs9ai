@@ -36,6 +36,10 @@ import (
 	domainerrors "blips-ifrs9.tugu-re.com/internal/common/errors"
 )
 
+// daysPerYear is 365.25 as a decimal constant — avoids float64 in tenor conversion.
+// Using integer arithmetic: 36525 / 100 = 365.25 exactly (DEC-016).
+var daysPerYear = decimal.NewFromInt(36525).Div(decimal.NewFromInt(100))
+
 // one is the decimal constant 1.0 — used for NORMAL FL multiplier (OQ-A).
 var one = decimal.NewFromInt(1)
 
@@ -76,6 +80,13 @@ func (s *pdService) GetPD(ctx context.Context, instrumenID uuid.UUID, stage EclS
 		return decimal.Zero, detail, domainerrors.New(domainerrors.CodeInstrumentECLNotApplicable,
 			fmt.Sprintf("Instrumen %s klasifikasi %s tidak memerlukan ECL (IFRS9 §5.5.1).",
 				instrumenID, inst.KlasifikasiPsak71))
+	}
+
+	// 2b. Guard POCI — requires credit-adjusted EIR from P4-M7 (F3, FSD-APP-C §3.5).
+	if isPOCI(inst.KlasifikasiPsak71) {
+		return decimal.Zero, detail, domainerrors.New(domainerrors.CodePOCIDeferredToM7,
+			fmt.Sprintf("Instrumen %s adalah POCI — memerlukan credit-adjusted EIR dari P4-M7. "+
+				"Deferred ke modul P4-M7.", instrumenID))
 	}
 
 	// 3. Stage 3 → PD = 1.0, no FL.
@@ -129,19 +140,22 @@ func (s *pdService) GetPD(ctx context.Context, instrumenID uuid.UUID, stage EclS
 			return decimal.Zero, detail, domainerrors.New(domainerrors.CodePDLookupTenorOutOfRange,
 				fmt.Sprintf("Instrumen %s tidak memiliki tanggal_jatuh_tempo.", instrumenID))
 		}
-		tenorDays := inst.TanggalJatuhTempo.Sub(evaluationDate)
-		if tenorDays < 0 {
+		remainingDuration := inst.TanggalJatuhTempo.Sub(evaluationDate)
+		if remainingDuration < 0 {
 			return decimal.Zero, detail, domainerrors.New(domainerrors.CodePDLookupTenorOutOfRange,
 				fmt.Sprintf("Instrumen %s memiliki tanggal_jatuh_tempo di masa lalu (%s). "+
 					"Anomali — verifikasi status instrumen.",
 					instrumenID, inst.TanggalJatuhTempo.Format("2006-01-02")))
 		}
-		tenorYears := float64(tenorDays) / float64(365.25*24*time.Hour)
-		tenorMonths := int(tenorYears * 12)
+		// F1 (DEC-016): compute tenor in integer days then convert to decimal years.
+		// Avoids float64 arithmetic: int(hours/24) gives exact integer day count.
+		tenorDaysInt := int64(remainingDuration.Hours() / 24)
+		tenorYearsDec := decimal.NewFromInt(tenorDaysInt).Div(daysPerYear)
+		tenorMonths := int(decimal.NewFromInt(tenorDaysInt).Div(daysPerYear).Mul(decimal.NewFromInt(12)).IntPart())
 		detail.TenorMonthsUsed = &tenorMonths
 
 		var warn *HelperWarning
-		pdBase, warn = interpolateLifetimePD(*curve, tenorYears)
+		pdBase, warn = interpolateLifetimePD(*curve, tenorYearsDec)
 		if warn != nil {
 			detail.Warnings = append(detail.Warnings, *warn)
 		}
@@ -212,18 +226,23 @@ func (s *pdService) GetPD(ctx context.Context, instrumenID uuid.UUID, stage EclS
 // Returns (pdLifetime, warning|nil).
 // Non-monotone check per OQ-PAR-1a: warning emitted, interpolation proceeds.
 //
+// F1 (DEC-016): tenorYears is decimal.Decimal — no float64 in formula path.
+// Interpolation ratio t = (tenor - lo) / (hi - lo) computed entirely in decimal:
+//
+//	pd = lo.pd + t × (hi.pd - lo.pd)  — all decimal arithmetic, RoundBank(8)
+//
 // Ref: FSD-APP-C §3, formulas.md §"EAD (Exposure at Default)", OQ-M2-1.
-func interpolateLifetimePD(curve PDCurveRow, tenorYears float64) (decimal.Decimal, *HelperWarning) {
-	// Tenor buckets as (years, pd) pairs — all decimal, no float64 for PD values.
+func interpolateLifetimePD(curve PDCurveRow, tenorYears decimal.Decimal) (decimal.Decimal, *HelperWarning) {
+	// Tenor buckets as (years, pd) pairs — all decimal, no float64.
 	type bucket struct {
-		years float64
+		years decimal.Decimal
 		pd    decimal.Decimal
 	}
 	buckets := []bucket{
-		{3.0, curve.PDLifetime3Y},
-		{5.0, curve.PDLifetime5Y},
-		{7.0, curve.PDLifetime7Y},
-		{10.0, curve.PDLifetime10Y},
+		{decimal.NewFromInt(3), curve.PDLifetime3Y},
+		{decimal.NewFromInt(5), curve.PDLifetime5Y},
+		{decimal.NewFromInt(7), curve.PDLifetime7Y},
+		{decimal.NewFromInt(10), curve.PDLifetime10Y},
 	}
 
 	// Non-monotone check (OQ-PAR-1a).
@@ -233,34 +252,31 @@ func interpolateLifetimePD(curve PDCurveRow, tenorYears float64) (decimal.Decima
 			warn = &HelperWarning{
 				Code: WarnPDInterpolationNonMonotone,
 				Message: fmt.Sprintf(
-					"PD lifetime buckets tidak monoton (pd_%dy=%.8s > pd_%dy=%.8s). "+
+					"PD lifetime buckets tidak monoton (pd_%sy=%s > pd_%sy=%s). "+
 						"Interpolasi tetap dilanjutkan (OQ-PAR-1a).",
-					int(buckets[i-1].years), buckets[i-1].pd.String(),
-					int(buckets[i].years), buckets[i].pd.String()),
+					buckets[i-1].years.String(), buckets[i-1].pd.StringFixed(8),
+					buckets[i].years.String(), buckets[i].pd.StringFixed(8)),
 			}
 			break
 		}
 	}
 
 	// Boundary conditions.
-	if tenorYears <= 3.0 {
+	if tenorYears.LessThanOrEqual(buckets[0].years) {
 		return buckets[0].pd, warn
 	}
-	if tenorYears >= 10.0 {
+	if tenorYears.GreaterThanOrEqual(buckets[3].years) {
 		return buckets[3].pd, warn
 	}
 
-	// Find surrounding buckets and interpolate.
+	// Find surrounding buckets and interpolate entirely in decimal.
 	// t = (tenorYears - lo.years) / (hi.years - lo.years)
 	// pd = lo.pd + t × (hi.pd - lo.pd)
 	for i := 0; i < len(buckets)-1; i++ {
 		lo, hi := buckets[i], buckets[i+1]
-		if tenorYears >= lo.years && tenorYears < hi.years {
-			// t is a plain float for the bucket ratio — not money, safe.
-			t := (tenorYears - lo.years) / (hi.years - lo.years)
-			tDec := decimal.NewFromFloat(t)
-			diff := hi.pd.Sub(lo.pd)
-			pd := lo.pd.Add(tDec.Mul(diff)).RoundBank(8)
+		if tenorYears.GreaterThanOrEqual(lo.years) && tenorYears.LessThan(hi.years) {
+			t := tenorYears.Sub(lo.years).Div(hi.years.Sub(lo.years))
+			pd := lo.pd.Add(t.Mul(hi.pd.Sub(lo.pd))).RoundBank(8)
 			return pd, warn
 		}
 	}
@@ -271,8 +287,16 @@ func interpolateLifetimePD(curve PDCurveRow, tenorYears float64) (decimal.Decima
 
 // isECLNotApplicable returns true for classifications that do not require ECL.
 // FVTPL and FVOCI_ELECTION are excluded per IFRS9 §5.5.1.
+// POCI requires credit-adjusted EIR (P4-M7) and is guarded separately via isPOCI.
 func isECLNotApplicable(klasifikasi string) bool {
 	return klasifikasi == "FVTPL" || klasifikasi == "FVOCI_ELECTION"
+}
+
+// isPOCI returns true for Purchased or Originated Credit-Impaired instruments.
+// POCI requires a credit-adjusted EIR from P4-M7; not handled in M2 helpers.
+// F3 (FSD-APP-C §3.5, IFRS9 §5.5.13): POCI is deferred to P4-M7.
+func isPOCI(klasifikasi string) bool {
+	return klasifikasi == "POCI"
 }
 
 // GetPDFromBatchParams resolves PD for one instrument from pre-loaded BatchParams.
@@ -298,6 +322,13 @@ func GetPDFromBatchParams(
 		detail.PD = pd3
 		detail.PDBase = pd3
 		return pd3, detail, nil
+	}
+
+	// F3: POCI guard — deferred to P4-M7 (credit-adjusted EIR required).
+	if isPOCI(inst.KlasifikasiPsak71) {
+		return decimal.Zero, detail, domainerrors.New(domainerrors.CodePOCIDeferredToM7,
+			fmt.Sprintf("Instrumen %s adalah POCI — memerlukan credit-adjusted EIR dari P4-M7. "+
+				"Deferred ke modul P4-M7.", instrID))
 	}
 
 	// Active rating.
@@ -335,17 +366,19 @@ func GetPDFromBatchParams(
 			return decimal.Zero, detail, domainerrors.New(domainerrors.CodePDLookupTenorOutOfRange,
 				fmt.Sprintf("Instrumen %s tidak memiliki tanggal_jatuh_tempo.", instrID))
 		}
-		tenorDays := inst.TanggalJatuhTempo.Sub(evaluationDate)
-		if tenorDays < 0 {
+		remainingDuration := inst.TanggalJatuhTempo.Sub(evaluationDate)
+		if remainingDuration < 0 {
 			return decimal.Zero, detail, domainerrors.New(domainerrors.CodePDLookupTenorOutOfRange,
 				fmt.Sprintf("Instrumen %s: tanggal_jatuh_tempo di masa lalu.", instrID))
 		}
-		tenorYears := float64(tenorDays) / float64(365.25*24*time.Hour)
-		tenorMonths := int(tenorYears * 12)
+		// F1 (DEC-016): integer days → decimal years. No float64 in formula path.
+		tenorDaysInt := int64(remainingDuration.Hours() / 24)
+		tenorYearsDec := decimal.NewFromInt(tenorDaysInt).Div(daysPerYear)
+		tenorMonths := int(decimal.NewFromInt(tenorDaysInt).Div(daysPerYear).Mul(decimal.NewFromInt(12)).IntPart())
 		detail.TenorMonthsUsed = &tenorMonths
 
 		var warn *HelperWarning
-		pdBase, warn = interpolateLifetimePD(curve, tenorYears)
+		pdBase, warn = interpolateLifetimePD(curve, tenorYearsDec)
 		if warn != nil {
 			detail.Warnings = append(detail.Warnings, *warn)
 		}

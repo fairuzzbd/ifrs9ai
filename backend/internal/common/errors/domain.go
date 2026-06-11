@@ -106,6 +106,9 @@ const (
 	CodeHelpersParameterSnapshotMismatch Code = "HELPERS_PARAMETER_SNAPSHOT_MISMATCH" // calc run sealed with old snapshot (HTTP 409)
 	CodeInstrumentECLNotApplicable       Code = "INSTRUMENT_ECL_NOT_APPLICABLE"       // FVTPL / FVOCI_ELECTION (HTTP 422)
 	CodeECLParamNotReady                 Code = "ECL_PARAM_NOT_READY"                 // parameters not all APPROVED for periodeId (HTTP 422)
+
+	// F3: POCI instruments require credit-adjusted EIR from P4-M7 (FSD-APP-C §3.5, IFRS9 §5.5.13).
+	CodePOCIDeferredToM7 Code = "POCI_DEFERRED_TO_M7" // POCI instrument — deferred to P4-M7 (HTTP 422)
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
@@ -158,7 +161,8 @@ func (c Code) HTTPStatus() int {
 		CodeEADFXRateMissing, CodeEADFXRateNotApproved,
 		CodeCCFConfigMissing, CodeCCFInstrumenTypeUnknown,
 		CodeInstrumentECLNotApplicable, CodeECLParamNotReady,
-		CodeHelpersParameterSnapshotMismatch:
+		CodeHelpersParameterSnapshotMismatch,
+		CodePOCIDeferredToM7:
 		return http.StatusUnprocessableEntity
 	case CodeEADInstrumenNotFound:
 		return http.StatusNotFound
