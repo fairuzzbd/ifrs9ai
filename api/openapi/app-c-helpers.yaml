@@ -1,0 +1,1763 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-C ECL Helpers (P4-M2)
+  version: "1.0.0"
+  description: |
+    Read-only helper endpoints untuk PD, LGD, EAD, CCF lookup dan preview
+    yang dikonsumsi oleh ECL Engine (P4-M7) dan UI Preview (ROLE-RISK).
+
+    Story set: APP-C-PAR-001..006
+    FSD: FSD-APP-C-ECL-EIR-v1.0.docx §3 (ECL Parameters), §4 (EAD computation)
+    Decisions:
+      DEC-010 — 3-stage × 3-skenario × dual FL; Stage 3 PD = 1.0
+      DEC-011 — SICR triggers (context saja — staging dari P4-M1)
+      DEC-016 — NUMERIC precision: PD/LGD NUMERIC(10,8), IDR NUMERIC(20,4), FX NUMERIC(20,8)
+      DEC-017 — No workflow di M2 (read-only helpers)
+      DEC-022 — Cursor pagination (preview endpoint)
+
+    ## Scope
+    SEMUA endpoint di file ini adalah READ-ONLY.
+    Tidak ada mutating endpoint. Idempotency-Key TIDAK diperlukan.
+
+    ## Permission model
+    - ecl_helpers.read    — ROLE-RISK, ROLE-AUDIT, ROLE-ALCO (read-only)
+    - ecl_helpers.preview — ROLE-RISK, ROLE-AUDIT, ROLE-ALCO (Story 5)
+    Kedua permission ini TIDAK tersedia untuk ROLE-MAKER-TR.
+
+    ## Audit events
+    Individual lookup (Story 1–4): TIDAK di-audit per call (high-frequency).
+    Bulk combined (Story 6): ECL_PARAM.BULK_LOOKUP_COMPLETE (satu entry per calc run).
+    Preview export (Story 5): ECL_PARAM.PREVIEW_EXPORT (per export action).
+    Parameter snapshot untuk calc run: ditangani oleh M7/M8, BUKAN M2.
+
+    ## OQ flags
+    OQ-A (FL multiplier NORMAL skenario): masih terbuka. Default assumption aktif:
+      PD_FL_NORMAL = PD_base × impact_pd × 1.0 (NORMAL tidak punya impact_mev_pd).
+      Response men-flag ini via `normalMultiplierIsDefault: true`.
+    OQ-M2-2 (sumber tipe_eksposur LGD): derive dari mst.counterparty.tipe_counterparty.
+    OQ-M2-3 (sumber Outstanding Principal): nominal untuk deposito; EIR schedule jika ada.
+    OQ-M2-6 (kurs evaluationDate): kurs BI JISDOR per evaluation_date, bukan tanggal_penempatan.
+
+    ## review-required tag
+    Seluruh file ini memerlukan review `ifrs9-compliance-reviewer` (BLOCKING)
+    sebelum merge ke develop. Verifikasi: PD stage logic, Lifetime PD interpolation,
+    dual FL multiplier, no float64, OQ-A resolution, OQ-M2-6 kurs semantik.
+
+servers:
+  - url: /api/v1
+    description: BLIPS REST API v1
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: ecl-helpers-pd
+    description: PD (Probability of Default) lookup — Story APP-C-PAR-001
+  - name: ecl-helpers-lgd
+    description: LGD (Loss Given Default) lookup — Story APP-C-PAR-002
+  - name: ecl-helpers-ead
+    description: EAD (Exposure at Default) computation — Story APP-C-PAR-003
+  - name: ecl-helpers-ccf
+    description: CCF (Credit Conversion Factor) lookup — Story APP-C-PAR-004
+  - name: ecl-helpers-preview
+    description: PD/LGD/EAD/CCF preview per instrumen untuk UI — Story APP-C-PAR-005
+  - name: ecl-helpers-bulk
+    description: Bulk combined PD+LGD+EAD+CCF lookup — Story APP-C-PAR-006
+
+paths:
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/helpers/pd — Single PD lookup (Story APP-C-PAR-001)
+  # ---------------------------------------------------------------------------
+  /ecl/helpers/pd:
+    get:
+      operationId: getHelperPD
+      summary: Single instrumen PD lookup per stage per skenario
+      description: |
+        Mengembalikan nilai PD untuk satu instrumen, stage tertentu, dan skenario tertentu.
+        Dual forward-looking multiplier diterapkan per OQ-A default assumption.
+
+        Permission: ecl_helpers.read
+        Roles: ROLE-RISK, ROLE-AUDIT, ROLE-ALCO
+        Tidak ada audit log per call (high-frequency read).
+
+        Logika:
+        - Stage 1: PD_base = pd_12month dari mst.pd_pefindo per rating aktif counterparty
+        - Stage 2: PD_base = interpolasi linear pd_lifetime berdasarkan tenor_remaining;
+                   jika tenor > 10y gunakan pd_lifetime_10y; jika tenor ≤ 3y gunakan pd_lifetime_3y
+        - Stage 3: PD = 1.00000000 (fixed, FL multiplier tidak diterapkan)
+        - PD_FL = PD_base × impact_pd × impact_mev_pd(skenario)
+        - Skenario NORMAL: impact_mev_pd = 1.0 (default, tidak ada row di tabel)
+
+        Error jika instrumen FVTPL atau FVOCI_ELECTION: INSTRUMENT_ECL_NOT_APPLICABLE
+      tags: [ecl-helpers-pd]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: instrumenId
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID instrumen dari mst.instrumen
+          example: "01927f6c-0000-7000-8000-000000000100"
+        - name: stage
+          in: query
+          required: true
+          schema:
+            $ref: "#/components/schemas/EclStage"
+          description: Stage ECL yang digunakan untuk lookup PD
+        - name: scenario
+          in: query
+          required: true
+          schema:
+            $ref: "#/components/schemas/EclScenario"
+          description: Skenario forward-looking
+        - name: evaluationDate
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          description: "Tanggal evaluasi (ISO 8601 date). Kurs dan rating diambil per tanggal ini."
+          example: "2026-06-30"
+        - name: periodeId
+          in: query
+          required: true
+          schema:
+            type: string
+          description: ID periode buku aktif, digunakan untuk lookup FL parameter
+          example: "PBUKU-2026-06"
+      responses:
+        "200":
+          description: PD berhasil dihitung
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                additionalProperties: false
+                properties:
+                  data:
+                    $ref: "#/components/schemas/PDLookupResult"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  instrumenId: "01927f6c-0000-7000-8000-000000000100"
+                  stage: "STAGE_1"
+                  scenario: "NORMAL"
+                  pd: "0.00367500"
+                  pdBase: "0.00350000"
+                  ratingUsed: "idAA"
+                  tenorMonthsUsed: null
+                  impactPdMultiplier: "1.05000000"
+                  impactMevPdMultiplier: "1.00000000"
+                  normalMultiplierIsDefault: true
+                  sourcePd12m: "0.00350000"
+                  sourcePdLifetime: null
+                  warnings: []
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "./_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          description: Instrumen tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: EAD_INSTRUMEN_NOT_FOUND
+                  message: "Instrumen 01927f6c-... tidak ditemukan di mst.instrumen"
+                  details: []
+                  traceId: "01HXY..."
+        "422":
+          description: Lookup tidak dapat diselesaikan karena data master tidak lengkap
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                ratingMissing:
+                  value:
+                    error:
+                      code: PD_LOOKUP_RATING_MISSING
+                      message: "Rating aktif untuk counterparty CP-XXX tidak ditemukan per tanggal 2026-06-30."
+                      details: []
+                      traceId: "01HXY..."
+                parameterInactive:
+                  value:
+                    error:
+                      code: PD_LOOKUP_PARAMETER_INACTIVE
+                      message: "Forward-looking multiplier (impact_pd) tidak ditemukan untuk periode PBUKU-2026-06."
+                      details: []
+                      traceId: "01HXY..."
+                eclNotApplicable:
+                  value:
+                    error:
+                      code: INSTRUMENT_ECL_NOT_APPLICABLE
+                      message: "Instrumen klasifikasi FVTPL tidak memerlukan ECL (IFRS9 §5.5.1)"
+                      details: []
+                      traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/helpers/pd/bulk — Batch PD lookup (Story APP-C-PAR-001)
+  # ---------------------------------------------------------------------------
+  /ecl/helpers/pd/bulk:
+    post:
+      operationId: bulkGetHelperPD
+      summary: Batch PD lookup untuk banyak instrumen sekaligus (maks 1000)
+      description: |
+        Mengembalikan PD untuk setiap item dalam request array.
+        Partial failure: instrumen yang gagal di-skip dengan error tercatat di `errors[]`.
+        Hasil instrumen yang sukses tetap dikembalikan.
+
+        Permission: ecl_helpers.read
+        Performance SLA: ≤ 500ms untuk 1000 instrumen (anti-N+1, batch load dari DB).
+        Tidak ada Idempotency-Key (read-only, POST dipakai karena body besar).
+      tags: [ecl-helpers-pd]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BulkPDRequest"
+      responses:
+        "200":
+          description: Batch PD lookup selesai (partial sukses diterima)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                additionalProperties: false
+                properties:
+                  data:
+                    $ref: "#/components/schemas/BulkPDResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "./_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "413":
+          description: Payload terlalu besar (> 1000 instrumen)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: HELPERS_BULK_TOO_LARGE
+                  message: "Request melebihi batas 1000 instrumen per batch. Gunakan beberapa request."
+                  details:
+                    - field: "body"
+                      rule: "max_items"
+                      message: "Maksimum 1000 item per request"
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/helpers/lgd — Single LGD lookup (Story APP-C-PAR-002)
+  # ---------------------------------------------------------------------------
+  /ecl/helpers/lgd:
+    get:
+      operationId: getHelperLGD
+      summary: Single instrumen LGD lookup dari mst.lgd_basel pool
+      description: |
+        Mengembalikan LGD efektif untuk instrumen, dengan collateral haircut jika ada.
+        tipe_eksposur di-derive dari mst.counterparty.tipe_counterparty via sys.config
+        key `LGD_COUNTERPARTY_TYPE_MAPPING`.
+
+        Phase 1: collateral haircut = 0 untuk semua instrumen (deposito/obligasi/saham/reksadana).
+        Instrumen REKSADANA: mengembalikan LGD_LOOKUP_USE_LOOKTHROUGH (look-through via P4-M4).
+
+        Permission: ecl_helpers.read
+        Roles: ROLE-RISK, ROLE-AUDIT, ROLE-ALCO
+      tags: [ecl-helpers-lgd]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: instrumenId
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID instrumen dari mst.instrumen
+          example: "01927f6c-0000-7000-8000-000000000200"
+        - name: periodeId
+          in: query
+          required: true
+          schema:
+            type: string
+          description: ID periode buku untuk lookup LGD APPROVED yang berlaku
+          example: "PBUKU-2026-06"
+      responses:
+        "200":
+          description: LGD berhasil dilookup
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                additionalProperties: false
+                properties:
+                  data:
+                    $ref: "#/components/schemas/LGDLookupResult"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  instrumenId: "01927f6c-0000-7000-8000-000000000200"
+                  lgd: "0.45000000"
+                  poolUsed: "BANK"
+                  baseLgd: "0.45000000"
+                  collateralHaircut: "0.00000000"
+                  lgdEffective: "0.45000000"
+                  tipeCounterparty: "BANK"
+                  warnings: []
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "./_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          description: LGD tidak dapat dihitung
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                poolNotFound:
+                  value:
+                    error:
+                      code: LGD_LOOKUP_POOL_NOT_FOUND
+                      message: "LGD pool untuk tipe_eksposur BANK tidak ditemukan atau belum di-approve ALCO."
+                      details: []
+                      traceId: "01HXY..."
+                lookthrough:
+                  value:
+                    error:
+                      code: LGD_LOOKUP_USE_LOOKTHROUGH
+                      message: "Instrumen REKSADANA menggunakan mekanisme look-through ECL (P4-M4)."
+                      details: []
+                      traceId: "01HXY..."
+                mappingNotFound:
+                  value:
+                    error:
+                      code: LGD_LOOKUP_MAPPING_NOT_FOUND
+                      message: "Tipe counterparty 'MULTILATERAL' tidak memiliki mapping LGD pool di sys.config."
+                      details: []
+                      traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/helpers/lgd/bulk — Batch LGD lookup (Story APP-C-PAR-002)
+  # ---------------------------------------------------------------------------
+  /ecl/helpers/lgd/bulk:
+    post:
+      operationId: bulkGetHelperLGD
+      summary: Batch LGD lookup untuk banyak instrumen (maks 1000)
+      description: |
+        Mengembalikan LGD untuk setiap item dalam request array.
+        Partial failure diizinkan — instrumen gagal masuk `errors[]`, sukses tetap dikembalikan.
+
+        Permission: ecl_helpers.read
+        Performance SLA: ≤ 500ms untuk 1000 instrumen.
+        Tidak ada Idempotency-Key (read-only).
+      tags: [ecl-helpers-lgd]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BulkLGDRequest"
+      responses:
+        "200":
+          description: Batch LGD selesai
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                additionalProperties: false
+                properties:
+                  data:
+                    $ref: "#/components/schemas/BulkLGDResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "./_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "413":
+          description: Payload terlalu besar
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: HELPERS_BULK_TOO_LARGE
+                  message: "Melebihi batas 1000 instrumen per batch."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/helpers/ead — Single EAD computation (Story APP-C-PAR-003)
+  # ---------------------------------------------------------------------------
+  /ecl/helpers/ead:
+    get:
+      operationId: getHelperEAD
+      summary: Single instrumen EAD computation dengan konversi multi-currency
+      description: |
+        Menghitung EAD dalam IDR dan FCY dengan breakdown komponen.
+        Formula (Phase 1, CCF = 0 per OQ-E):
+          EAD_FCY = Outstanding_Principal_FCY + Accrued_Interest_FCY
+          EAD_IDR = EAD_FCY × kurs_BI_JISDOR(evaluationDate, kode_mata_uang)
+        Untuk IDR: EAD_IDR = EAD_FCY (tidak ada konversi).
+
+        Kurs: BI JISDOR per evaluationDate (OQ-M2-6, terverifikasi via FSD-APP-C §4).
+        Accrued Interest: dari ecl.eir_amortization_schedule (P4-M5).
+        Jika schedule belum ada: accrued_interest = 0 dengan warning di `warnings[]`.
+
+        Permission: ecl_helpers.read
+        Roles: ROLE-RISK, ROLE-AUDIT, ROLE-ALCO
+      tags: [ecl-helpers-ead]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: instrumenId
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID instrumen dari mst.instrumen
+          example: "01927f6c-0000-7000-8000-000000000300"
+        - name: evaluationDate
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          description: "Tanggal evaluasi (ISO 8601). Kurs BI JISDOR per tanggal ini."
+          example: "2026-06-30"
+      responses:
+        "200":
+          description: EAD berhasil dihitung
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                additionalProperties: false
+                properties:
+                  data:
+                    $ref: "#/components/schemas/EADComputeResult"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  instrumenId: "01927f6c-0000-7000-8000-000000000300"
+                  currency: "USD"
+                  fxRate: "16425.00000000"
+                  fxSource: "BI_JISDOR"
+                  evaluationDate: "2026-06-30"
+                  outstandingPrincipalFcy: "950000.0000"
+                  accruedInterestFcy: "15000.0000"
+                  committedUndrawnFcy: "0.0000"
+                  ccf: "0.0000"
+                  eadFcy: "965000.0000"
+                  eadIdr: "15850125000.0000"
+                  accruedInterestSource: "EIR_SCHEDULE"
+                  warnings: []
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "./_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          description: Instrumen tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: EAD_INSTRUMEN_NOT_FOUND
+                  message: "Instrumen tidak ditemukan di mst.instrumen"
+                  details: []
+                  traceId: "01HXY..."
+        "422":
+          description: EAD tidak dapat dihitung
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                fxMissing:
+                  value:
+                    error:
+                      code: EAD_FX_RATE_MISSING
+                      message: "Kurs BI JISDOR untuk EUR tidak tersedia per 2026-06-30."
+                      details: []
+                      traceId: "01HXY..."
+                fxNotApproved:
+                  value:
+                    error:
+                      code: EAD_FX_RATE_NOT_APPROVED
+                      message: "Kurs USD per 2026-06-30 belum di-approve (status: DRAFT)."
+                      details: []
+                      traceId: "01HXY..."
+                eclNotApplicable:
+                  value:
+                    error:
+                      code: INSTRUMENT_ECL_NOT_APPLICABLE
+                      message: "Instrumen FVTPL tidak memerlukan ECL/EAD calculation."
+                      details: []
+                      traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/helpers/ead/bulk — Batch EAD computation (Story APP-C-PAR-003)
+  # ---------------------------------------------------------------------------
+  /ecl/helpers/ead/bulk:
+    post:
+      operationId: bulkGetHelperEAD
+      summary: Batch EAD computation untuk banyak instrumen (maks 1000)
+      description: |
+        Partial failure diizinkan. Instrumen gagal masuk `errors[]`.
+
+        Permission: ecl_helpers.read
+        Performance SLA: ≤ 500ms untuk 1000 instrumen.
+        Tidak ada Idempotency-Key (read-only).
+      tags: [ecl-helpers-ead]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BulkEADRequest"
+      responses:
+        "200":
+          description: Batch EAD selesai
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                additionalProperties: false
+                properties:
+                  data:
+                    $ref: "#/components/schemas/BulkEADResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "./_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "413":
+          description: Payload terlalu besar
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: HELPERS_BULK_TOO_LARGE
+                  message: "Melebihi batas 1000 instrumen per batch."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/helpers/ccf — CCF lookup per tipe instrumen (Story APP-C-PAR-004)
+  # ---------------------------------------------------------------------------
+  /ecl/helpers/ccf:
+    get:
+      operationId: getHelperCCF
+      summary: CCF lookup per tipe instrumen dari sys.config CCF_TABLE
+      description: |
+        Mengembalikan CCF percentage untuk tipe instrumen tertentu.
+        Phase 1: semua instrumen BLIPS (DEPOSITO/OBLIGASI/SAHAM/REKSADANA) = 0.0000.
+        Fallback default = 0.0000 jika tipe instrumen tidak ada di CCF_TABLE.
+
+        Source di-flag di field `source`: "PHASE_1_HARDCODED" untuk Phase 1.
+
+        Permission: ecl_helpers.read
+        Tidak ada audit log per call.
+      tags: [ecl-helpers-ccf]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: instrumenType
+          in: query
+          required: true
+          schema:
+            $ref: "#/components/schemas/TipeInstrumen"
+          description: Tipe instrumen dari mst.instrumen.tipe_instrumen
+          example: "DEPOSITO"
+      responses:
+        "200":
+          description: CCF berhasil dilookup
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                additionalProperties: false
+                properties:
+                  data:
+                    $ref: "#/components/schemas/CCFLookupResult"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  instrumenType: "DEPOSITO"
+                  ccf: "0.0000"
+                  source: "PHASE_1_HARDCODED"
+                  warnings: []
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "./_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "422":
+          description: CCF config tidak ditemukan atau tipe instrumen tidak dikenal
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                configMissing:
+                  value:
+                    error:
+                      code: CCF_CONFIG_MISSING
+                      message: "sys.config 'CCF_TABLE' tidak ditemukan. Pastikan seed data config sudah dijalankan."
+                      details: []
+                      traceId: "01HXY..."
+                typeUnknown:
+                  value:
+                    error:
+                      code: CCF_INSTRUMEN_TYPE_UNKNOWN
+                      message: "Tipe instrumen 'UNKNOWN_TYPE' tidak dikenali. Pastikan nilai berasal dari enum TipeInstrumen."
+                      details: []
+                      traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/helpers/preview — UI Preview list (Story APP-C-PAR-005)
+  # ---------------------------------------------------------------------------
+  /ecl/helpers/preview:
+    get:
+      operationId: getHelpersPreview
+      summary: Preview PD/LGD/EAD/CCF per instrumen — DataTable UI (Story 5)
+      description: |
+        Mengembalikan list instrumen dengan breakdown PD/LGD/EAD/CCF untuk ROLE-RISK
+        sebelum menjalankan ECL calc run. Real-time computation (cache TTL 5 menit).
+
+        DataTable pattern (UX rule §1): sort + cursor pagination + filter + export.
+        Sortable columns: kode_instrumen, stage, lgd, ead_idr, pd_fl_normal, ccf.
+        Filterable: stage, tipe_instrumen, klasifikasi_psak71, mata_uang.
+        Text search global (?q): kode_instrumen, nama_instrumen, nama_counterparty.
+
+        Instrumen FVTPL dan FVOCI_ELECTION di-exclude dari list.
+        Instrumen dengan data missing (kurs, rating) tetap muncul dengan warning field.
+
+        Default sort: kode_instrumen ASC.
+        Default limit: 50. Max: 200.
+
+        Permission: ecl_helpers.preview
+        Roles: ROLE-RISK, ROLE-AUDIT, ROLE-ALCO
+        Tidak ada Idempotency-Key (GET, read-only).
+
+        Error jika parameter belum APPROVED untuk periode: ECL_PARAM_NOT_READY (422).
+      tags: [ecl-helpers-preview]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: periodeId
+          in: query
+          required: true
+          schema:
+            type: string
+          description: ID periode buku. Wajib.
+          example: "PBUKU-2026-06"
+        - name: instrumenId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: "Opsional: filter hanya satu instrumen"
+        - $ref: "./_common.yaml#/components/parameters/cursor"
+        - $ref: "./_common.yaml#/components/parameters/limit"
+        - $ref: "./_common.yaml#/components/parameters/sortParam"
+        - $ref: "./_common.yaml#/components/parameters/searchParam"
+        - name: "filter[stage]"
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/EclStage"
+          description: "Filter by ECL stage"
+          example: "STAGE_2"
+        - name: "filter[tipe_instrumen]"
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/TipeInstrumen"
+          description: "Filter by tipe instrumen"
+        - name: "filter[klasifikasi_psak71]"
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/KlasifikasiPsak71"
+          description: "Filter by klasifikasi PSAK 71"
+        - name: "filter[mata_uang]"
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 3
+            pattern: "^[A-Z]{3}$"
+          description: "Filter by kode mata uang (ISO 4217)"
+          example: "USD"
+        - name: "filter[has_warning]"
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: "Filter hanya instrumen dengan warning"
+      responses:
+        "200":
+          description: Preview list berhasil diambil
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination, appliedSort, appliedFilter, meta]
+                additionalProperties: false
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PreviewItem"
+                  pagination:
+                    $ref: "./_common.yaml#/components/schemas/PaginationResponse"
+                  appliedSort:
+                    type: array
+                    items:
+                      type: object
+                      required: [col, dir]
+                      additionalProperties: false
+                      properties:
+                        col:
+                          type: string
+                        dir:
+                          type: string
+                          enum: [asc, desc]
+                  appliedFilter:
+                    type: object
+                    additionalProperties: true
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "./_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "422":
+          description: Parameter belum APPROVED untuk periode yang diminta
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: ECL_PARAM_NOT_READY
+                  message: "Parameter ECL untuk periode Jul-2026 belum lengkap atau belum di-approve ALCO."
+                  details:
+                    - field: "periodeId"
+                      rule: "parameter_approved"
+                      message: "mst.impact_pd belum memiliki row APPROVED untuk periode Jul-2026"
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/helpers/preview/export — Async export (Story APP-C-PAR-005)
+  # ---------------------------------------------------------------------------
+  /ecl/helpers/preview/export:
+    get:
+      operationId: exportHelpersPreview
+      summary: Export preview list ke CSV atau XLSX (respek filter aktif)
+      description: |
+        Export preview list dengan filter/sort yang sama seperti GET /ecl/helpers/preview.
+        Inline export jika ≤ 10.000 instrumen; async job jika > 10.000 (return 202 + jobId).
+
+        Format: CSV (UTF-8 BOM) atau XLSX (excelize, header freeze, money format).
+        Header row (Bahasa Indonesia):
+          Kode Instrumen, Nama Instrumen, Klasifikasi, Stage, Tipe Eksposur,
+          Mata Uang, PD GOOD, PD NORMAL, PD BAD, LGD, EAD (IDR), CCF, Warning
+
+        Audit: ECL_PARAM.PREVIEW_EXPORT dengan filter aktif + row_count.
+
+        Permission: ecl_helpers.preview
+        Roles: ROLE-RISK, ROLE-AUDIT, ROLE-ALCO
+      tags: [ecl-helpers-preview]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: periodeId
+          in: query
+          required: true
+          schema:
+            type: string
+          example: "PBUKU-2026-06"
+        - name: format
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [csv, xlsx]
+          description: "Format file export"
+          example: "csv"
+        - name: "filter[stage]"
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/EclStage"
+        - name: "filter[tipe_instrumen]"
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/TipeInstrumen"
+        - name: "filter[klasifikasi_psak71]"
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/KlasifikasiPsak71"
+        - name: "filter[mata_uang]"
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 3
+            pattern: "^[A-Z]{3}$"
+        - $ref: "./_common.yaml#/components/parameters/sortParam"
+        - $ref: "./_common.yaml#/components/parameters/searchParam"
+      responses:
+        "200":
+          description: "Inline file (≤ 10.000 baris)"
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              example: 'attachment; filename="ecl-preview-PBUKU-2026-06-20260611.csv"'
+            X-Total-Rows:
+              schema:
+                type: integer
+              description: Jumlah baris dalam file (untuk validasi client)
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        "202":
+          description: "Async export job dibuat (> 10.000 baris)"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                additionalProperties: false
+                properties:
+                  data:
+                    type: object
+                    required: [jobId, statusUrl, streamUrl]
+                    additionalProperties: false
+                    properties:
+                      jobId:
+                        type: string
+                        description: ID Asynq job
+                        example: "job_01HXYZ..."
+                      statusUrl:
+                        type: string
+                        example: "/api/v1/jobs/job_01HXYZ..."
+                      streamUrl:
+                        type: string
+                        example: "/api/v1/jobs/job_01HXYZ.../stream"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "./_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "422":
+          description: Parameter belum APPROVED
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: ECL_PARAM_NOT_READY
+                  message: "Parameter ECL belum siap untuk periode yang diminta."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/helpers/bulk-lookup — Combined PD+LGD+EAD+CCF (Story APP-C-PAR-006)
+  # ---------------------------------------------------------------------------
+  /ecl/helpers/bulk-lookup:
+    post:
+      operationId: bulkLookupHelpers
+      summary: Bulk combined PD+LGD+EAD+CCF per instrumen (Story 6)
+      description: |
+        Endpoint utama yang dipanggil ECL Engine (P4-M7) saat memulai calc run.
+        Mengembalikan PD (per skenario), LGD, EAD (breakdown + total IDR), dan CCF
+        untuk seluruh daftar instrumen sekaligus.
+
+        Anti-N+1: semua parameter (PD curve, LGD pool, FL multiplier, kurs) di-load
+        secara batch dalam ≤ 10 DB round-trips sebelum loop instrumen.
+
+        Partial failure: instrumen gagal masuk `errors[]`, sukses tetap dikembalikan.
+        Instrumen FVTPL/FVOCI_ELECTION otomatis di-skip (masuk `skipped[]`).
+
+        Performance SLA: ≤ 500ms untuk 1000 instrumen (cold cache).
+                         ≤ 100ms dengan warm Redis cache.
+
+        Audit: ECL_PARAM.BULK_LOOKUP_COMPLETE — satu entry per panggilan,
+               mencatat: total, success, warning, skipped, periodeId, evaluationDate.
+
+        Cache: Redis key `ecl:params:bulk:{periode_id}:{evaluation_date}`, TTL 2 jam.
+               Invalidate saat parameter master berubah.
+
+        Permission: ecl_helpers.read
+        Roles: ROLE-RISK, ECL service account (Asynq worker)
+        Tidak ada Idempotency-Key (read-only POST).
+      tags: [ecl-helpers-bulk]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BulkLookupRequest"
+      responses:
+        "200":
+          description: Bulk lookup selesai (partial sukses diterima)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                additionalProperties: false
+                properties:
+                  data:
+                    $ref: "#/components/schemas/BulkLookupResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  summary:
+                    total: 1200
+                    success: 1192
+                    warning: 5
+                    skipped: 3
+                    periodeId: "PBUKU-2026-06"
+                    evaluationDate: "2026-06-30"
+                    executionMs: 423
+                  results:
+                    - instrumenId: "01927f6c-0000-7000-8000-000000000100"
+                      pdGood: "0.00312375"
+                      pdNormal: "0.00367500"
+                      pdBad: "0.00441000"
+                      lgd: "0.45000000"
+                      eadIdr: "5000000000.0000"
+                      eadBreakdown:
+                        outstandingPrincipalIdr: "5000000000.0000"
+                        accruedInterestIdr: "0.0000"
+                        committedUndrawnIdr: "0.0000"
+                      ccf: "0.0000"
+                      warnings: []
+                  errors:
+                    - instrumenId: "01927f6c-0000-7000-8000-000000000303"
+                      errorCode: "PD_LOOKUP_RATING_MISSING"
+                      message: "Rating aktif tidak ditemukan per 2026-06-30"
+                  skipped:
+                    - instrumenId: "01927f6c-0000-7000-8000-000000000304"
+                      reason: "INSTRUMENT_ECL_NOT_APPLICABLE"
+                      klasifikasiPsak71: "FVTPL"
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "./_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "413":
+          description: Payload > 1000 instrumen
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: HELPERS_BULK_TOO_LARGE
+                  message: "Request melebihi batas 1000 instrumen per batch."
+                  details:
+                    - field: "body.requests"
+                      rule: "max_items"
+                      message: "Maksimum 1000 item per request"
+                  traceId: "01HXY..."
+        "422":
+          description: Parameter snapshot mismatch (future use M7)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: HELPERS_PARAMETER_SNAPSHOT_MISMATCH
+                  message: "Calc run sealed menggunakan snapshot parameter lama. Gunakan snapshot yang sama."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      $ref: "./_common.yaml#/components/securitySchemes/bearerAuth"
+
+  schemas:
+
+    # ---- Enums ---------------------------------------------------------------
+
+    EclStage:
+      type: string
+      enum: [STAGE_1, STAGE_2, STAGE_3]
+      description: "Stage ECL instrumen per IFRS9 / PSAK 71 §5.5 (DEC-010)"
+
+    EclScenario:
+      type: string
+      enum: [GOOD, NORMAL, BAD]
+      description: "Skenario forward-looking. Default bobot: GOOD=0.25, NORMAL=0.50, BAD=0.25 (DEC-010)"
+
+    TipeInstrumen:
+      type: string
+      enum: [DEPOSITO, OBLIGASI, SAHAM, REKSADANA, SBI, COMMITMENT]
+      description: "Tipe instrumen dari mst.instrumen.tipe_instrumen"
+
+    KlasifikasiPsak71:
+      type: string
+      enum: [AC, FVOCI, FVOCI_ELECTION, FVTPL, POCI]
+      description: "Klasifikasi PSAK 71 / IFRS 9 dari mst.instrumen.klasifikasi_psak71"
+
+    AccruedInterestSource:
+      type: string
+      enum: [EIR_SCHEDULE, ZERO_FALLBACK]
+      description: |
+        EIR_SCHEDULE: dari ecl.eir_amortization_schedule (P4-M5 tersedia).
+        ZERO_FALLBACK: P4-M5 belum selesai, accrued_interest = 0 dengan warning.
+
+    # ---- Warning item --------------------------------------------------------
+
+    HelperWarning:
+      type: object
+      required: [code, message]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          description: Warning code (bukan error — tidak menghentikan computation)
+          enum:
+            - ACCRUED_INTEREST_ZERO_EIR_SCHEDULE_MISSING
+            - CCF_TYPE_NOT_IN_CONFIG_USING_DEFAULT
+            - PD_INTERPOLATION_NON_MONOTONE
+            - OUTSTANDING_FALLBACK_TO_NOMINAL
+        message:
+          type: string
+          description: Pesan warning spesifik
+          example: "Accrued Interest = 0 karena EIR schedule P4-M5 belum tersedia"
+
+    # ---- PD schemas ----------------------------------------------------------
+
+    PDLookupResult:
+      type: object
+      required:
+        - instrumenId
+        - stage
+        - scenario
+        - pd
+        - pdBase
+        - ratingUsed
+        - impactPdMultiplier
+        - impactMevPdMultiplier
+        - normalMultiplierIsDefault
+        - warnings
+      additionalProperties: false
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+        stage:
+          $ref: "#/components/schemas/EclStage"
+        scenario:
+          $ref: "#/components/schemas/EclScenario"
+        pd:
+          type: string
+          description: "PD final setelah FL multiplier. NUMERIC(10,8) encoded as string. Precision 8 desimal."
+          pattern: "^\\d+\\.\\d{8}$"
+          example: "0.00367500"
+        pdBase:
+          type: string
+          description: "PD sebelum FL multiplier diterapkan. NUMERIC(10,8)."
+          pattern: "^\\d+\\.\\d{8}$"
+          example: "0.00350000"
+        ratingUsed:
+          type: string
+          nullable: true
+          description: "Rating Pefindo yang digunakan untuk lookup (null jika Stage 3)"
+          example: "idAA"
+        tenorMonthsUsed:
+          type: number
+          nullable: true
+          description: "Tenor dalam bulan yang digunakan untuk interpolasi lifetime PD (null jika Stage 1 atau 3)"
+          example: 48
+        impactPdMultiplier:
+          type: string
+          description: "impact_pd.impact_multiplier yang diterapkan. NUMERIC(10,8)."
+          pattern: "^\\d+\\.\\d{8}$"
+          example: "1.05000000"
+        impactMevPdMultiplier:
+          type: string
+          description: "impact_mev_pd.impact_multiplier untuk skenario ini. NUMERIC(10,8). 1.0 untuk NORMAL."
+          pattern: "^\\d+\\.\\d{8}$"
+          example: "1.00000000"
+        normalMultiplierIsDefault:
+          type: boolean
+          description: |
+            OQ-A flag: true jika NORMAL multiplier = 1.0 (default assumption karena tidak ada row
+            di mst.impact_mev_pd untuk NORMAL). Harus dikonfirmasi ALCO sebelum P4-M7 merge.
+          example: true
+        sourcePd12m:
+          type: string
+          nullable: true
+          description: "pd_12month dari mst.pd_pefindo sebelum FL (null jika Stage 2 atau 3)"
+          example: "0.00350000"
+        sourcePdLifetime:
+          type: string
+          nullable: true
+          description: "Nilai PD lifetime hasil interpolasi (null jika Stage 1 atau 3)"
+          example: "0.01650000"
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/HelperWarning"
+
+    BulkPDRequest:
+      type: object
+      required: [requests, periodeId, evaluationDate]
+      additionalProperties: false
+      properties:
+        periodeId:
+          type: string
+          example: "PBUKU-2026-06"
+        evaluationDate:
+          type: string
+          format: date
+          example: "2026-06-30"
+        requests:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            type: object
+            required: [instrumenId, stage, scenario]
+            additionalProperties: false
+            properties:
+              instrumenId:
+                type: string
+                format: uuid
+              stage:
+                $ref: "#/components/schemas/EclStage"
+              scenario:
+                $ref: "#/components/schemas/EclScenario"
+
+    BulkPDResponse:
+      type: object
+      required: [summary, results, errors]
+      additionalProperties: false
+      properties:
+        summary:
+          $ref: "#/components/schemas/BulkSummary"
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/PDLookupResult"
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/BulkItemError"
+
+    # ---- LGD schemas ---------------------------------------------------------
+
+    LGDLookupResult:
+      type: object
+      required:
+        - instrumenId
+        - lgd
+        - poolUsed
+        - baseLgd
+        - collateralHaircut
+        - lgdEffective
+        - tipeCounterparty
+        - warnings
+      additionalProperties: false
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+        lgd:
+          type: string
+          description: "LGD efektif final. NUMERIC(10,8) encoded as string."
+          pattern: "^\\d+\\.\\d{8}$"
+          example: "0.45000000"
+        poolUsed:
+          type: string
+          description: "Nama pool LGD dari mst.lgd_basel.tipe_eksposur"
+          example: "BANK"
+        baseLgd:
+          type: string
+          description: "LGD dari pool sebelum collateral haircut. NUMERIC(10,8)."
+          example: "0.45000000"
+        collateralHaircut:
+          type: string
+          description: "Haircut rate yang diterapkan. Phase 1 = 0.00000000. NUMERIC(10,8)."
+          example: "0.00000000"
+        lgdEffective:
+          type: string
+          description: "LGD_pool × (1 − collateral_haircut). NUMERIC(10,8)."
+          example: "0.45000000"
+        tipeCounterparty:
+          type: string
+          description: "mst.counterparty.tipe_counterparty yang digunakan untuk derive pool"
+          example: "BANK"
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/HelperWarning"
+
+    BulkLGDRequest:
+      type: object
+      required: [requests, periodeId]
+      additionalProperties: false
+      properties:
+        periodeId:
+          type: string
+          example: "PBUKU-2026-06"
+        requests:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            type: object
+            required: [instrumenId]
+            additionalProperties: false
+            properties:
+              instrumenId:
+                type: string
+                format: uuid
+
+    BulkLGDResponse:
+      type: object
+      required: [summary, results, errors]
+      additionalProperties: false
+      properties:
+        summary:
+          $ref: "#/components/schemas/BulkSummary"
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/LGDLookupResult"
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/BulkItemError"
+
+    # ---- EAD schemas ---------------------------------------------------------
+
+    EADComputeResult:
+      type: object
+      required:
+        - instrumenId
+        - currency
+        - evaluationDate
+        - outstandingPrincipalFcy
+        - accruedInterestFcy
+        - committedUndrawnFcy
+        - ccf
+        - eadFcy
+        - eadIdr
+        - accruedInterestSource
+        - warnings
+      additionalProperties: false
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+        currency:
+          type: string
+          description: "Kode mata uang instrumen (ISO 4217)"
+          example: "USD"
+        fxRate:
+          type: string
+          nullable: true
+          description: "Kurs BI JISDOR per evaluationDate. null jika IDR (tidak perlu konversi). NUMERIC(20,8)."
+          example: "16425.00000000"
+        fxSource:
+          type: string
+          nullable: true
+          enum: [BI_JISDOR, null]
+          description: "Sumber kurs. Selalu BI_JISDOR per OQ-M2-6. null jika IDR."
+        evaluationDate:
+          type: string
+          format: date
+          example: "2026-06-30"
+        outstandingPrincipalFcy:
+          type: string
+          description: "Outstanding principal dalam mata uang instrumen. NUMERIC(20,4)."
+          example: "950000.0000"
+        accruedInterestFcy:
+          type: string
+          description: "Accrued interest dalam mata uang instrumen. NUMERIC(20,4). 0 jika EIR schedule belum ada."
+          example: "15000.0000"
+        committedUndrawnFcy:
+          type: string
+          description: "Committed undrawn dalam mata uang instrumen. Phase 1 = 0.0000."
+          example: "0.0000"
+        ccf:
+          type: string
+          description: "CCF dari Story 4. Phase 1 = 0.0000. NUMERIC(7,4)."
+          example: "0.0000"
+        eadFcy:
+          type: string
+          description: "EAD dalam mata uang instrumen = outstanding + accrued + (undrawn×ccf). NUMERIC(20,4)."
+          example: "965000.0000"
+        eadIdr:
+          type: string
+          description: "EAD dalam IDR setelah konversi kurs. NUMERIC(20,4)."
+          example: "15850125000.0000"
+        accruedInterestSource:
+          $ref: "#/components/schemas/AccruedInterestSource"
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/HelperWarning"
+
+    BulkEADRequest:
+      type: object
+      required: [requests, evaluationDate]
+      additionalProperties: false
+      properties:
+        evaluationDate:
+          type: string
+          format: date
+          example: "2026-06-30"
+        requests:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            type: object
+            required: [instrumenId]
+            additionalProperties: false
+            properties:
+              instrumenId:
+                type: string
+                format: uuid
+
+    BulkEADResponse:
+      type: object
+      required: [summary, results, errors]
+      additionalProperties: false
+      properties:
+        summary:
+          $ref: "#/components/schemas/BulkSummary"
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/EADComputeResult"
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/BulkItemError"
+
+    # ---- CCF schemas ---------------------------------------------------------
+
+    CCFLookupResult:
+      type: object
+      required: [instrumenType, ccf, source, warnings]
+      additionalProperties: false
+      properties:
+        instrumenType:
+          $ref: "#/components/schemas/TipeInstrumen"
+        ccf:
+          type: string
+          description: "CCF percentage. Phase 1 = 0.0000 untuk semua. NUMERIC(7,4)."
+          pattern: "^\\d+\\.\\d{4}$"
+          example: "0.0000"
+        source:
+          type: string
+          enum: [PHASE_1_HARDCODED, SYS_CONFIG]
+          description: "Asal nilai CCF. PHASE_1_HARDCODED selama Phase 1 (OQ-E resolution)."
+          example: "PHASE_1_HARDCODED"
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/HelperWarning"
+
+    # ---- Preview schemas -----------------------------------------------------
+
+    PreviewItem:
+      type: object
+      required:
+        - instrumenId
+        - kodeInstrumen
+        - namaInstrumen
+        - klasifikasiPsak71
+        - stage
+        - tipeInstrumen
+        - matauang
+        - pdFlGood
+        - pdFlNormal
+        - pdFlBad
+        - lgd
+        - eadIdr
+        - ccf
+        - warnings
+      additionalProperties: false
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+        kodeInstrumen:
+          type: string
+          example: "INST-0100"
+        namaInstrumen:
+          type: string
+          example: "Deposito BCA 3M Jun-2026"
+        namaCounterparty:
+          type: string
+          nullable: true
+          example: "PT Bank Central Asia Tbk"
+        klasifikasiPsak71:
+          $ref: "#/components/schemas/KlasifikasiPsak71"
+        stage:
+          $ref: "#/components/schemas/EclStage"
+        tipeInstrumen:
+          $ref: "#/components/schemas/TipeInstrumen"
+        tipeEksposur:
+          type: string
+          nullable: true
+          description: "Pool LGD yang digunakan, null jika REKSADANA (look-through)"
+          example: "BANK"
+        matauang:
+          type: string
+          example: "IDR"
+        ratingAktif:
+          type: string
+          nullable: true
+          description: "Rating Pefindo aktif per evaluationDate. null jika Stage 3."
+          example: "idAA"
+        pdFlGood:
+          type: string
+          nullable: true
+          description: "PD FL skenario GOOD. null jika lookup gagal. NUMERIC(10,8)."
+          example: "0.00312375"
+        pdFlNormal:
+          type: string
+          nullable: true
+          description: "PD FL skenario NORMAL. null jika lookup gagal. NUMERIC(10,8)."
+          example: "0.00367500"
+        pdFlBad:
+          type: string
+          nullable: true
+          description: "PD FL skenario BAD. null jika lookup gagal. NUMERIC(10,8)."
+          example: "0.00441000"
+        lgd:
+          type: string
+          nullable: true
+          description: "LGD efektif. null jika lookup gagal. NUMERIC(10,8)."
+          example: "0.45000000"
+        eadIdr:
+          type: string
+          nullable: true
+          description: "EAD dalam IDR. null jika kurs missing. NUMERIC(20,4)."
+          example: "5000000000.0000"
+        ccf:
+          type: string
+          nullable: true
+          description: "CCF. Phase 1 = 0.0000. NUMERIC(7,4)."
+          example: "0.0000"
+        normalMultiplierIsDefault:
+          type: boolean
+          description: "OQ-A flag. true jika NORMAL multiplier = 1.0 (unconfirmed assumption)."
+          example: true
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/HelperWarning"
+          description: "List warning per instrumen. Empty array jika tidak ada masalah."
+
+    # ---- Bulk combined schemas -----------------------------------------------
+
+    BulkLookupRequest:
+      type: object
+      required: [requests, periodeId, evaluationDate]
+      additionalProperties: false
+      properties:
+        periodeId:
+          type: string
+          description: "ID periode buku. Wajib untuk parameter snapshot lookup."
+          example: "PBUKU-2026-06"
+        evaluationDate:
+          type: string
+          format: date
+          description: "Tanggal evaluasi. Kurs dan rating diambil per tanggal ini."
+          example: "2026-06-30"
+        requests:
+          type: array
+          minItems: 0
+          maxItems: 1000
+          description: "Daftar instrumen. Array kosong menghasilkan summary total=0 tanpa error."
+          items:
+            type: object
+            required: [instrumenId]
+            additionalProperties: false
+            properties:
+              instrumenId:
+                type: string
+                format: uuid
+                description: "UUID instrumen dari mst.instrumen"
+
+    BulkLookupResponse:
+      type: object
+      required: [summary, results, errors, skipped]
+      additionalProperties: false
+      properties:
+        summary:
+          type: object
+          required: [total, success, warning, skipped, periodeId, evaluationDate, executionMs]
+          additionalProperties: false
+          properties:
+            total:
+              type: integer
+              description: "Total instrumen dalam request"
+            success:
+              type: integer
+              description: "Instrumen berhasil di-lookup penuh"
+            warning:
+              type: integer
+              description: "Instrumen sukses tapi dengan warning (mis. accrued=0)"
+            skipped:
+              type: integer
+              description: "Instrumen di-skip (FVTPL/FVOCI_ELECTION atau error)"
+            periodeId:
+              type: string
+            evaluationDate:
+              type: string
+              format: date
+            executionMs:
+              type: integer
+              description: "Waktu eksekusi dalam milidetik. SLA ≤ 500ms."
+        results:
+          type: array
+          items:
+            type: object
+            required:
+              - instrumenId
+              - pdGood
+              - pdNormal
+              - pdBad
+              - lgd
+              - eadIdr
+              - eadBreakdown
+              - ccf
+              - warnings
+            additionalProperties: false
+            properties:
+              instrumenId:
+                type: string
+                format: uuid
+              pdGood:
+                type: string
+                description: "PD FL GOOD. NUMERIC(10,8)."
+                example: "0.00312375"
+              pdNormal:
+                type: string
+                description: "PD FL NORMAL. NUMERIC(10,8)."
+                example: "0.00367500"
+              pdBad:
+                type: string
+                description: "PD FL BAD. NUMERIC(10,8)."
+                example: "0.00441000"
+              lgd:
+                type: string
+                description: "LGD efektif. NUMERIC(10,8)."
+                example: "0.45000000"
+              eadIdr:
+                type: string
+                description: "EAD dalam IDR. NUMERIC(20,4)."
+                example: "5000000000.0000"
+              eadBreakdown:
+                type: object
+                required: [outstandingPrincipalIdr, accruedInterestIdr, committedUndrawnIdr]
+                additionalProperties: false
+                properties:
+                  outstandingPrincipalIdr:
+                    type: string
+                    example: "5000000000.0000"
+                  accruedInterestIdr:
+                    type: string
+                    example: "0.0000"
+                  committedUndrawnIdr:
+                    type: string
+                    example: "0.0000"
+              ccf:
+                type: string
+                description: "NUMERIC(7,4)."
+                example: "0.0000"
+              warnings:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HelperWarning"
+        errors:
+          type: array
+          description: "Instrumen yang gagal di-lookup (rating missing, kurs missing, dll)"
+          items:
+            $ref: "#/components/schemas/BulkItemError"
+        skipped:
+          type: array
+          description: "Instrumen yang di-skip (FVTPL, FVOCI_ELECTION, dll)"
+          items:
+            type: object
+            required: [instrumenId, reason, klasifikasiPsak71]
+            additionalProperties: false
+            properties:
+              instrumenId:
+                type: string
+                format: uuid
+              reason:
+                type: string
+                description: "Error code yang menyebabkan skip"
+                example: "INSTRUMENT_ECL_NOT_APPLICABLE"
+              klasifikasiPsak71:
+                $ref: "#/components/schemas/KlasifikasiPsak71"
+
+    # ---- Bulk shared schemas -------------------------------------------------
+
+    BulkSummary:
+      type: object
+      required: [total, success, warning, skipped]
+      additionalProperties: false
+      properties:
+        total:
+          type: integer
+        success:
+          type: integer
+        warning:
+          type: integer
+        skipped:
+          type: integer
+
+    BulkItemError:
+      type: object
+      required: [instrumenId, errorCode, message]
+      additionalProperties: false
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+        errorCode:
+          type: string
+          description: "Error code dari catalog (stabil)"
+          example: "PD_LOOKUP_RATING_MISSING"
+        message:
+          type: string
+          description: "Pesan spesifik untuk instrumen ini"
+          example: "Rating aktif untuk counterparty CP-XXX tidak ditemukan per 2026-06-30"
