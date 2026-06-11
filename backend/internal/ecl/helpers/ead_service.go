@@ -99,6 +99,21 @@ func (s *eadService) ComputeEAD(ctx context.Context, instrumenID uuid.UUID, eval
 		fxRate = kr.NilaiKurs
 		bd.FXRate = &fxRate
 		bd.FXSource = "BI_JISDOR"
+
+		// F2 (OQ-M2-6): emit warning when FX rate is stale (> 3 calendar days old).
+		// Business-day calculation deferred to Phase 2; calendar days used here per Phase 1 scope.
+		staleDays := evaluationDate.Sub(kr.TanggalBerlaku).Hours() / 24
+		if staleDays > 3 {
+			bd.Warnings = append(bd.Warnings, HelperWarning{
+				Code: WarnFXRateStale,
+				Message: fmt.Sprintf("Kurs BI JISDOR untuk %s tertanggal %s (%.0f hari sebelum evaluationDate %s). "+
+					"Pertimbangkan update kurs manual.",
+					inst.MatauangKode,
+					kr.TanggalBerlaku.Format("2006-01-02"),
+					staleDays,
+					evaluationDate.Format("2006-01-02")),
+			})
+		}
 	}
 
 	// 4. Outstanding principal.
@@ -198,6 +213,20 @@ func ComputeEADFromBatchParams(
 		fxRate = kr.NilaiKurs
 		bd.FXRate = &fxRate
 		bd.FXSource = "BI_JISDOR"
+
+		// F2 (OQ-M2-6): emit warning when FX rate is stale (> 3 calendar days old).
+		staleDays := evaluationDate.Sub(kr.TanggalBerlaku).Hours() / 24
+		if staleDays > 3 {
+			bd.Warnings = append(bd.Warnings, HelperWarning{
+				Code: WarnFXRateStale,
+				Message: fmt.Sprintf("Kurs BI JISDOR untuk %s tertanggal %s (%.0f hari sebelum evaluationDate %s). "+
+					"Pertimbangkan update kurs manual.",
+					inst.MatauangKode,
+					kr.TanggalBerlaku.Format("2006-01-02"),
+					staleDays,
+					evaluationDate.Format("2006-01-02")),
+			})
+		}
 	}
 
 	// Outstanding.
