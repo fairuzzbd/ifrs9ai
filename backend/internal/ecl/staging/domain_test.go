@@ -1,6 +1,7 @@
 package staging_test
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
@@ -97,8 +98,8 @@ func TestIsInvestmentGrade(t *testing.T) {
 	}{
 		{"idAAA", true},
 		{"idAA+", true},
-		{"idBBB-", true},  // floor of IG
-		{"idBB+", false},  // first non-IG
+		{"idBBB-", true}, // floor of IG
+		{"idBB+", false}, // first non-IG
 		{"idBB", false},
 		{"idD", false},
 		{"", false},
@@ -306,7 +307,7 @@ func TestComputeSignatureHash_Deterministic(t *testing.T) {
 
 	hash1 := staging.ComputeSignatureHash(actorID, "REVIEW", propID, signedAt, *comment)
 	hash2 := staging.ComputeSignatureHash(actorID, "REVIEW", propID, signedAt, *comment)
-	if string(hash1) != string(hash2) {
+	if !bytes.Equal(hash1, hash2) {
 		t.Error("ComputeSignatureHash should be deterministic")
 	}
 }
@@ -318,7 +319,7 @@ func TestComputeSignatureHash_DifferentInputs(t *testing.T) {
 
 	h1 := staging.ComputeSignatureHash(actorID, "REVIEW", propID, t1, "")
 	h2 := staging.ComputeSignatureHash(actorID, "APPROVE_ALCO", propID, t1, "")
-	if string(h1) == string(h2) {
+	if bytes.Equal(h1, h2) {
 		t.Error("different steps should produce different hashes")
 	}
 }
@@ -351,6 +352,167 @@ func TestIs6Eyes_Stage2ToStage1(t *testing.T) {
 	}
 	if prop.Is6Eyes() {
 		t.Error("Stage2→Stage1 should require 4-eyes (not 6)")
+	}
+}
+
+// ─── TriggerType.IsValid ─────────────────────────────────────────────────────
+
+func TestTriggerType_IsValid_Known(t *testing.T) {
+	triggers := []staging.TriggerType{
+		staging.TriggerRatingDowngrade,
+		staging.TriggerIGToNonIG,
+		staging.TriggerRatingDefault,
+		staging.TriggerDPDGte30,
+		staging.TriggerDPDGte90,
+		staging.TriggerCure3PeriodeBulanan,
+		staging.TriggerManualOverride,
+		staging.TriggerOverrideExpired,
+		staging.TriggerInitial,
+	}
+	for _, tr := range triggers {
+		if !tr.IsValid() {
+			t.Errorf("expected %s to be valid", tr)
+		}
+	}
+}
+
+func TestTriggerType_IsValid_Unknown(t *testing.T) {
+	tr := staging.TriggerType("UNKNOWN_TRIGGER")
+	if tr.IsValid() {
+		t.Error("expected unknown trigger to be invalid")
+	}
+}
+
+// ─── OverrideWorkflowStatus.IsTerminal ────────────────────────────────────────
+
+func TestIsTerminal_Active(t *testing.T) {
+	if !staging.OverrideStatusActive.IsTerminal() {
+		t.Error("ACTIVE should be terminal")
+	}
+}
+
+func TestIsTerminal_Expired(t *testing.T) {
+	if !staging.OverrideStatusExpired.IsTerminal() {
+		t.Error("EXPIRED should be terminal")
+	}
+}
+
+func TestIsTerminal_Rejected(t *testing.T) {
+	if !staging.OverrideStatusRejected.IsTerminal() {
+		t.Error("REJECTED should be terminal")
+	}
+}
+
+func TestIsTerminal_PendingReview_NotTerminal(t *testing.T) {
+	if staging.OverrideStatusPendingReview.IsTerminal() {
+		t.Error("PENDING_REVIEW should not be terminal")
+	}
+}
+
+func TestIsTerminal_PendingApproval_NotTerminal(t *testing.T) {
+	if staging.OverrideStatusPendingApproval.IsTerminal() {
+		t.Error("PENDING_APPROVAL should not be terminal")
+	}
+}
+
+func TestIsTerminal_ApprovedALCO_NotTerminal(t *testing.T) {
+	if staging.OverrideStatusApprovedALCO.IsTerminal() {
+		t.Error("APPROVED_ALCO should not be terminal")
+	}
+}
+
+// ─── Error constructors ───────────────────────────────────────────────────────
+
+func TestErrStagingOverrideExpired_HasCode(t *testing.T) {
+	err := staging.ErrStagingOverrideExpired()
+	if err == nil {
+		t.Fatal("expected non-nil error")
+	}
+	if string(err.Code()) != staging.CodeStagingOverrideExpired {
+		t.Errorf("expected code %s, got %s", staging.CodeStagingOverrideExpired, err.Code())
+	}
+}
+
+func TestErrStagingRatingBaselineMissing_HasCode(t *testing.T) {
+	err := staging.ErrStagingRatingBaselineMissing(uuid.New().String(), time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+	if err == nil {
+		t.Fatal("expected non-nil error")
+	}
+	if string(err.Code()) != staging.CodeStagingRatingBaselineMissing {
+		t.Errorf("expected code %s, got %s", staging.CodeStagingRatingBaselineMissing, err.Code())
+	}
+}
+
+func TestErrStagingCalcRunSealed_HasCode(t *testing.T) {
+	err := staging.ErrStagingCalcRunSealed()
+	if err == nil {
+		t.Fatal("expected non-nil error")
+	}
+	if string(err.Code()) != staging.CodeStagingCalcRunSealed {
+		t.Errorf("expected code %s, got %s", staging.CodeStagingCalcRunSealed, err.Code())
+	}
+}
+
+// ─── ComputeNewStage ─────────────────────────────────────────────────────────
+
+// TestComputeNewStage_DefaultRating_FromStage1_NeedsDoubleRow
+// Rating = idD → Stage 3 with double row (Stage1 → Stage2 → Stage3).
+func TestComputeNewStage_DefaultRating_FromStage1_NeedsDoubleRow(t *testing.T) {
+	sicrResult := staging.SICRResult{IsDefault: true}
+	newStage, needsDouble := staging.ComputeNewStage(staging.Stage1, sicrResult, 0)
+	if newStage != staging.Stage3 {
+		t.Errorf("expected Stage3, got %v", newStage)
+	}
+	if !needsDouble {
+		t.Error("expected needsDoubleRow=true when transitioning from Stage1 to Stage3")
+	}
+}
+
+// TestComputeNewStage_DefaultRating_FromStage2_NoDoubleRow.
+func TestComputeNewStage_DefaultRating_FromStage2_NoDoubleRow(t *testing.T) {
+	sicrResult := staging.SICRResult{IsDefault: true}
+	newStage, needsDouble := staging.ComputeNewStage(staging.Stage2, sicrResult, 0)
+	if newStage != staging.Stage3 {
+		t.Errorf("expected Stage3, got %v", newStage)
+	}
+	if needsDouble {
+		t.Error("expected needsDoubleRow=false when transitioning from Stage2 to Stage3")
+	}
+}
+
+// TestComputeNewStage_DPDGte90_FromStage1_NeedsDoubleRow.
+func TestComputeNewStage_DPDGte90_FromStage1_NeedsDoubleRow(t *testing.T) {
+	sicrResult := staging.SICRResult{IsDefault: false}
+	newStage, needsDouble := staging.ComputeNewStage(staging.Stage1, sicrResult, 90)
+	if newStage != staging.Stage3 {
+		t.Errorf("expected Stage3 for DPD≥90, got %v", newStage)
+	}
+	if !needsDouble {
+		t.Error("expected needsDoubleRow=true for DPD≥90 from Stage1")
+	}
+}
+
+// TestComputeNewStage_SICRTriggered_AlreadyStage2_NoTransition.
+func TestComputeNewStage_SICRTriggered_AlreadyStage2_NoTransition(t *testing.T) {
+	sicrResult := staging.SICRResult{Triggered: true, IsDefault: false}
+	newStage, needsDouble := staging.ComputeNewStage(staging.Stage2, sicrResult, 15)
+	if newStage != staging.Stage2 {
+		t.Errorf("expected Stage2 (no change), got %v", newStage)
+	}
+	if needsDouble {
+		t.Error("expected needsDoubleRow=false when already Stage2")
+	}
+}
+
+// TestComputeNewStage_NoTrigger_Stage3_StaysStage3.
+func TestComputeNewStage_NoTrigger_Stage3_StaysStage3(t *testing.T) {
+	sicrResult := staging.SICRResult{Triggered: false, IsDefault: false}
+	newStage, needsDouble := staging.ComputeNewStage(staging.Stage3, sicrResult, 0)
+	if newStage != staging.Stage3 {
+		t.Errorf("expected Stage3 (no change), got %v", newStage)
+	}
+	if needsDouble {
+		t.Error("expected needsDoubleRow=false for no-trigger")
 	}
 }
 
