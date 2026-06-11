@@ -1,5 +1,6 @@
 -- migration: 0012 lps_coverage_schema_fix (DOWN)
 -- author: data-modeler
+-- requires: 0001, 0005 (audit hardening), 0007, 0008
 -- description: Revert all changes made by 0012 up.sql.
 --              Drops indexes, CHECK constraints, audit cols, workflow_status.
 --              Reverts coverage_amount precision NUMERIC(20,4) → NUMERIC(20,2).
@@ -43,9 +44,20 @@ ALTER TABLE mst.lps_coverage
 -- ============================================================
 -- 4. Revert coverage_amount precision NUMERIC(20,4) → NUMERIC(20,2)
 --    Narrowing cast: values with more than 2 decimal places will be
---    rounded. In practice, LPS amounts are always whole IDR so no
---    data loss is expected. Explicit USING clause required by PG.
+--    rounded.  Pre-condition guard aborts down migration if any row
+--    has > 2-decimal precision to prevent silent data truncation.
+--    In practice, LPS amounts are always whole IDR so the guard
+--    should never fire.  Explicit USING clause required by PG.
 -- ============================================================
+
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM mst.lps_coverage
+    WHERE coverage_amount != TRUNC(coverage_amount, 2)
+  ) THEN
+    RAISE EXCEPTION 'down 0012 blocked: rows with > 2-decimal precision exist in mst.lps_coverage.coverage_amount';
+  END IF;
+END $$;
 
 ALTER TABLE mst.lps_coverage
     ALTER COLUMN coverage_amount TYPE NUMERIC(20,2)
