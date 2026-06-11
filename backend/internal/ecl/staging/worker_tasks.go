@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 
+	"blips-ifrs9.tugu-re.com/internal/audit"
 	"blips-ifrs9.tugu-re.com/internal/auth"
 )
 
@@ -98,18 +99,24 @@ type TaskWorker struct {
 	svc          *Service
 	histRepo     StageHistoryRepository
 	overrideRepo OverrideProposalRepository
+	auditWriter  *audit.Writer
 	logger       *slog.Logger
 }
 
 // NewTaskWorker creates a TaskWorker.
-func NewTaskWorker(svc *Service, histRepo StageHistoryRepository, overrideRepo OverrideProposalRepository, logger *slog.Logger) *TaskWorker {
+// auditWriter must be non-nil in production; pass audit.NewWriter(nil) for tests.
+func NewTaskWorker(svc *Service, histRepo StageHistoryRepository, overrideRepo OverrideProposalRepository, auditWriter *audit.Writer, logger *slog.Logger) *TaskWorker {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if auditWriter == nil {
+		auditWriter = audit.NewWriter(nil)
 	}
 	return &TaskWorker{
 		svc:          svc,
 		histRepo:     histRepo,
 		overrideRepo: overrideRepo,
+		auditWriter:  auditWriter,
 		logger:       logger,
 	}
 }
@@ -222,6 +229,7 @@ func (w *TaskWorker) HandleOverrideExpiryCheck(ctx context.Context, t *asynq.Tas
 
 	// Use a system actor UUID for the expiry update.
 	systemActor := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	expiredAt := time.Now().UTC()
 	failed := 0
 	for _, prop := range expired {
 		if ctx.Err() != nil {
@@ -238,6 +246,24 @@ func (w *TaskWorker) HandleOverrideExpiryCheck(ctx context.Context, t *asynq.Tas
 				w.logger.WarnContext(ctx, "staging expiry: rollback failed", "id", prop.ID, "error", rbErr)
 			}
 			w.logger.WarnContext(ctx, "staging expiry: MarkExpired failed", "id", prop.ID, "error", err)
+			failed++
+			continue
+		}
+		// Write audit event IN THE SAME TRANSACTION as MarkExpired (F1 fix).
+		// Per security-baseline: mutation must write aud.audit_log in same tx.
+		if err := w.auditWriter.WithTx(tx).Write(ctx, audit.Event{
+			Action:      "STAGING.OVERRIDE_EXPIRED",
+			EntityType:  "ecl.staging_override_proposal",
+			EntityID:    prop.ID,
+			Before:      map[string]any{"workflow_status": string(prop.WorkflowStatus)},
+			After:       map[string]any{"workflow_status": "EXPIRED", "expired_at": expiredAt},
+			ActorUserID: systemActor.String(),
+			ActorRole:   "SYSTEM",
+		}); err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+				w.logger.WarnContext(ctx, "staging expiry: rollback (post-audit) failed", "id", prop.ID, "error", rbErr)
+			}
+			w.logger.WarnContext(ctx, "staging expiry: audit write failed", "id", prop.ID, "error", err)
 			failed++
 			continue
 		}
