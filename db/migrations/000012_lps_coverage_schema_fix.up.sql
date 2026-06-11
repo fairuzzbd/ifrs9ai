@@ -1,6 +1,6 @@
 -- migration: 0012 lps_coverage_schema_fix
 -- author: data-modeler
--- requires: 0001, 0007, 0008
+-- requires: 0001, 0005 (audit hardening), 0007, 0008
 -- description: Backfill mst.lps_coverage with audit cols + workflow_status.
 --              Fix coverage_amount precision NUMERIC(20,2) → NUMERIC(20,4)
 --              per db-conventions IDR standard. Add CHECK constraints:

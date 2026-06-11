@@ -325,29 +325,29 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 
 // ─── SoftDelete ───────────────────────────────────────────────────────────────
 
-// SoftDelete marks the record as deleted.
+// SoftDelete marks the record as deleted and returns the deleted entity.
 // Guard: referential integrity (no active ECL references).
-func (s *Service) SoftDelete(ctx context.Context, id uuid.UUID) error {
+func (s *Service) SoftDelete(ctx context.Context, id uuid.UUID) (*LPSCoverage, error) {
 	claims := auth.ClaimsFromContext(ctx)
 	actorID, err := requireActor(claims)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	existing, err := s.repo.GetByID(ctx, id, false)
 	if err != nil {
-		return fmt.Errorf("service.SoftDelete load: %w", err)
+		return nil, fmt.Errorf("service.SoftDelete load: %w", err)
 	}
 	if existing == nil {
-		return domainerrors.ErrNotFound("LPS Coverage " + id.String())
+		return nil, domainerrors.ErrNotFound("LPS Coverage " + id.String())
 	}
 
 	refCount, err := s.repo.CountReferences(ctx, id)
 	if err != nil {
-		return fmt.Errorf("service.SoftDelete count refs: %w", err)
+		return nil, fmt.Errorf("service.SoftDelete count refs: %w", err)
 	}
 	if refCount > 0 {
-		return domainerrors.New(
+		return nil, domainerrors.New(
 			domainerrors.CodeEntityInUse,
 			fmt.Sprintf("LPS Coverage %s tidak bisa dihapus karena direferensikan oleh %d entitas aktif.", id, refCount),
 			domainerrors.Detail{Field: "id", Rule: "referenced_by", Message: fmt.Sprintf("Direferensikan oleh %d entitas", refCount)},
@@ -356,13 +356,17 @@ func (s *Service) SoftDelete(ctx context.Context, id uuid.UUID) error {
 
 	tx, err := s.repo.BeginTx(ctx)
 	if err != nil {
-		return fmt.Errorf("service.SoftDelete: begin tx: %w", err)
+		return nil, fmt.Errorf("service.SoftDelete: begin tx: %w", err)
 	}
 
 	deleted, err := s.repo.SoftDelete(ctx, tx, id, actorID)
 	if err != nil {
 		rollbackTx(ctx, tx, s.logger)
-		return fmt.Errorf("service.SoftDelete: %w", err)
+		return nil, fmt.Errorf("service.SoftDelete: %w", err)
+	}
+	if deleted == nil {
+		rollbackTx(ctx, tx, s.logger)
+		return nil, domainerrors.ErrNotFound("LPS Coverage " + id.String())
 	}
 
 	if err := s.auditWriter.WithTx(tx).Write(ctx, audit.Event{
@@ -373,13 +377,13 @@ func (s *Service) SoftDelete(ctx context.Context, id uuid.UUID) error {
 		After:      deleted,
 	}); err != nil {
 		rollbackTx(ctx, tx, s.logger)
-		return fmt.Errorf("service.SoftDelete: audit write: %w", err)
+		return nil, fmt.Errorf("service.SoftDelete: audit write: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("service.SoftDelete: commit: %w", err)
+		return nil, fmt.Errorf("service.SoftDelete: commit: %w", err)
 	}
-	return nil
+	return deleted, nil
 }
 
 // ─── Workflow sync ────────────────────────────────────────────────────────────
@@ -446,7 +450,14 @@ func (s *Service) ListHistory(ctx context.Context, id uuid.UUID, cursor string, 
 
 // ─── Export ───────────────────────────────────────────────────────────────────
 
-// ExportCSV streams all records as CSV, writes audit LPS_COVERAGE.EXPORT.
+// ExportCSV streams all records as CSV, writes audit LPS_COVERAGE.EXPORT in-tx.
+//
+// Design: ExportAll buffers rows into memory (bytes.Buffer) before returning, so
+// the database cursor is already closed when this function receives the reader.
+// We therefore open a single transaction that covers BOTH the SELECT (via ExportAll)
+// and the audit write, satisfying DEC-018 (audit-in-tx) without holding an open
+// cursor during streaming.  The audit event is committed atomically with the
+// SELECT; if audit write fails the entire operation returns an error.
 func (s *Service) ExportCSV(ctx context.Context, q listquery.Query) (interface{ Read([]byte) (int, error) }, int, error) {
 	claims := auth.ClaimsFromContext(ctx)
 	actorID, err := requireActor(claims)
@@ -454,32 +465,37 @@ func (s *Service) ExportCSV(ctx context.Context, q listquery.Query) (interface{ 
 		return nil, 0, err
 	}
 
-	reader, count, err := s.repo.ExportAll(ctx, q)
+	tx, err := s.repo.BeginTx(ctx)
 	if err != nil {
+		return nil, 0, fmt.Errorf("service.ExportCSV: begin tx: %w", err)
+	}
+
+	// ExportAll reads everything into an in-memory buffer inside tx; tx stays open
+	// for the audit write that follows immediately.
+	reader, count, err := s.repo.ExportAll(ctx, tx, q)
+	if err != nil {
+		rollbackTx(ctx, tx, s.logger)
 		return nil, 0, fmt.Errorf("service.ExportCSV: %w", err)
 	}
 
-	// Best-effort audit write.
-	tx, txErr := s.repo.BeginTx(ctx)
-	if txErr == nil && tx != nil {
-		if writeErr := s.auditWriter.WithTx(tx).Write(ctx, audit.Event{
-			Action:      "LPS_COVERAGE.EXPORT",
-			EntityType:  "mst.lps_coverage",
-			EntityID:    uuid.Nil,
-			ActorUserID: actorID.String(),
-			After: map[string]interface{}{
-				"format":    "csv",
-				"row_count": count,
-				"filters":   q.AppliedFilter(),
-			},
-		}); writeErr != nil {
-			s.logger.WarnContext(ctx, "lpscoverage ExportCSV: audit write failed", "error", writeErr)
-			rollbackTx(ctx, tx, s.logger)
-		} else if commitErr := tx.Commit(); commitErr != nil {
-			s.logger.WarnContext(ctx, "lpscoverage ExportCSV: audit commit failed", "error", commitErr)
-		}
+	if err := s.auditWriter.WithTx(tx).Write(ctx, audit.Event{
+		Action:      "LPS_COVERAGE.EXPORT",
+		EntityType:  "mst.lps_coverage",
+		EntityID:    uuid.Nil,
+		ActorUserID: actorID.String(),
+		After: map[string]interface{}{
+			"format":    "csv",
+			"row_count": count,
+			"filters":   q.AppliedFilter(),
+		},
+	}); err != nil {
+		rollbackTx(ctx, tx, s.logger)
+		return nil, 0, fmt.Errorf("service.ExportCSV: audit write: %w", err)
 	}
 
+	if err := tx.Commit(); err != nil {
+		return nil, 0, fmt.Errorf("service.ExportCSV: commit: %w", err)
+	}
 	return reader, count, nil
 }
 

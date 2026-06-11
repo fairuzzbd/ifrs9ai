@@ -297,24 +297,17 @@ export function LPSCoverageForm({ mode, defaultValues }: LPSCoverageFormProps) {
                             setDisplayAmount(e.target.value);
                           }}
                           onBlur={(e) => {
-                            // Strip any IDR formatting back to raw decimal
+                            // Strip any IDR formatting back to raw decimal.
+                            // Never use parseFloat — string manipulation only (DEC-016).
                             const raw = e.target.value
                               .replace(/Rp\s?/g, "")
-                              .replace(/\./g, "")
-                              .replace(/,/g, ".")
+                              .replace(/\./g, "")   // remove thousands dots
+                              .replace(/,/g, ".")   // decimal comma → dot
                               .trim();
                             field.onChange(raw);
-                            // Re-format for display
-                            const asFloat = parseFloat(raw);
-                            if (!isNaN(asFloat) && asFloat > 0) {
-                              setDisplayAmount(
-                                new Intl.NumberFormat("id-ID", {
-                                  style: "currency",
-                                  currency: "IDR",
-                                  minimumFractionDigits: 2,
-                                  maximumFractionDigits: 2,
-                                }).format(asFloat),
-                              );
+                            // Re-format for display using string-based formatIDR
+                            if (/^\d+(\.\d+)?$/.test(raw) && !/^0+(\.0+)?$/.test(raw)) {
+                              setDisplayAmount(formatIDR(raw));
                             } else {
                               // Keep raw for error display
                               field.onChange(raw || "0");

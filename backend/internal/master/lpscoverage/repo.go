@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
+	"blips-ifrs9.tugu-re.com/internal/auth"
 	"blips-ifrs9.tugu-re.com/internal/common/listquery"
 	"blips-ifrs9.tugu-re.com/internal/common/pagination"
 )
@@ -60,7 +61,9 @@ type Repository interface {
 
 	// ExportAll returns all non-deleted records matching the query as a UTF-8 BOM CSV stream.
 	// Caller must not close the returned reader (bytes.Buffer does not need closing).
-	ExportAll(ctx context.Context, q listquery.Query) (io.Reader, int, error)
+	// tx must be the transaction opened by the caller; ExportAll runs its SELECT inside
+	// that transaction so the audit write (also in tx) is committed atomically (DEC-018).
+	ExportAll(ctx context.Context, tx *sql.Tx, q listquery.Query) (io.Reader, int, error)
 }
 
 // UpdateFields captures mutable columns for an update operation.
@@ -336,14 +339,24 @@ func (r *DBRepository) getOneTx(ctx context.Context, tx *sql.Tx, id uuid.UUID, i
 }
 
 // UpdateWorkflowStatusTx updates workflow_status inside an existing transaction.
+// Guards: tenant_id must match (multi-tenant safety) and deleted_at IS NULL (no
+// transitions on soft-deleted records). Returns ErrNotFound if the guard rejects.
 func (r *DBRepository) UpdateWorkflowStatusTx(ctx context.Context, tx *sql.Tx, id uuid.UUID, status WorkflowStatus) error {
-	_, err := tx.ExecContext(ctx, `
+	tenantID := tenantIDFromCtx(ctx)
+	res, err := tx.ExecContext(ctx, `
 		UPDATE mst.lps_coverage
 		SET workflow_status = $1, updated_at = now(), row_version = row_version + 1
-		WHERE id = $2
-	`, string(status), id)
+		WHERE id = $2 AND tenant_id = $3 AND deleted_at IS NULL
+	`, string(status), id, tenantID)
 	if err != nil {
 		return fmt.Errorf("repo.UpdateWorkflowStatusTx lps_coverage: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("repo.UpdateWorkflowStatusTx rows-affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
 	}
 	return nil
 }
@@ -515,8 +528,10 @@ func (r *DBRepository) ListAuditHistory(ctx context.Context, entityID uuid.UUID,
 	return items, hasMore, nil
 }
 
-// ExportAll streams all non-deleted records as UTF-8 BOM CSV.
-func (r *DBRepository) ExportAll(ctx context.Context, q listquery.Query) (io.Reader, int, error) {
+// ExportAll streams all non-deleted records as UTF-8 BOM CSV inside tx.
+// The SELECT runs inside the caller-supplied transaction so that the audit write
+// that follows in the same tx is committed atomically (DEC-018).
+func (r *DBRepository) ExportAll(ctx context.Context, tx *sql.Tx, q listquery.Query) (io.Reader, int, error) {
 	where, args, orderBy := q.WithAllowed(AllAllowedCols).ToSQL("t")
 
 	conditions := []string{"t.deleted_at IS NULL"}
@@ -545,7 +560,7 @@ func (r *DBRepository) ExportAll(ctx context.Context, q listquery.Query) (io.Rea
 		whereClause, orderBy,
 	)
 
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("repo.ExportAll lps_coverage: %w", err)
 	}
@@ -738,3 +753,12 @@ var ErrNotFound = fmt.Errorf("lps_coverage not found")
 
 // ErrConflict is returned on row_version mismatch.
 var ErrConflict = fmt.Errorf("optimistic lock conflict")
+
+// tenantIDFromCtx extracts the tenant_id from context claims, defaulting to TUGURE.
+func tenantIDFromCtx(ctx context.Context) string {
+	claims := auth.ClaimsFromContext(ctx)
+	if claims != nil && claims.TenantID != "" {
+		return claims.TenantID
+	}
+	return "TUGURE"
+}

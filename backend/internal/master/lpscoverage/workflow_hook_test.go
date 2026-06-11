@@ -108,3 +108,16 @@ func TestWorkflowHook_BeforeCommit_RejectedState(t *testing.T) {
 		t.Errorf("expected REJECTED status, got %s", repo.lastStatus)
 	}
 }
+
+// TestWorkflowHook_BeforeCommit_SoftDeletedReturnsError verifies fix #26:
+// when the repo stub simulates "0 rows affected" (soft-deleted or wrong tenant)
+// by returning ErrNotFound, the hook propagates the error.
+func TestWorkflowHook_BeforeCommit_SoftDeletedReturnsError(t *testing.T) {
+	repo := &hookRepoAdapter{updateErr: lpscoverage.ErrNotFound}
+	hook := lpscoverage.NewWorkflowHook(nil, repo)
+
+	err := hook.BeforeCommit(context.Background(), nil, mkEvt(uuid.New(), "APPROVED"))
+	if err == nil {
+		t.Fatal("expected error when UpdateWorkflowStatusTx returns ErrNotFound (soft-deleted or wrong tenant)")
+	}
+}

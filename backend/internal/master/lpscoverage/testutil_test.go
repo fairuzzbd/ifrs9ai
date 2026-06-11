@@ -26,6 +26,9 @@ type repoAdapter struct {
 	overlapErr error
 	refCount   int64
 	refErr     error
+	// beginTxFn overrides the default BeginTx behavior.
+	// If nil, BeginTx returns (nil, errTestNoDB).
+	beginTxFn func() (*sql.Tx, error)
 }
 
 var _ lpscoverage.Repository = (*repoAdapter)(nil)
@@ -84,6 +87,9 @@ func (a *repoAdapter) CountReferences(_ context.Context, _ uuid.UUID) (int64, er
 }
 
 func (a *repoAdapter) BeginTx(_ context.Context) (*sql.Tx, error) {
+	if a.beginTxFn != nil {
+		return a.beginTxFn()
+	}
 	return nil, errTestNoDB
 }
 
@@ -91,7 +97,7 @@ func (a *repoAdapter) ListAuditHistory(_ context.Context, _ uuid.UUID, _ string,
 	return nil, false, nil
 }
 
-func (a *repoAdapter) ExportAll(_ context.Context, _ listquery.Query) (io.Reader, int, error) {
+func (a *repoAdapter) ExportAll(_ context.Context, _ *sql.Tx, _ listquery.Query) (io.Reader, int, error) {
 	if a.exportStub != nil {
 		return a.exportStub.reader, a.exportStub.count, a.exportStub.err
 	}
