@@ -494,6 +494,10 @@ components:
         - REKLASIFIKASI_BULK
         - CKPN_ROLL_FORWARD
         - AUDIT_HASH_VERIFY
+        # APP-C Staging (P4-M1)
+        - ECL_STAGING_EVALUATE       # SICR + DPD evaluation batch
+        - ECL_CURE_ASSESSMENT        # Cure job setelah periode soft-close
+        - ECL_OVERRIDE_EXPIRY_CHECK  # Nightly job untuk expire active overrides
       description: Stable job type identifier
 
     # ---- 202 Accepted response (dipakai resource endpoint lain) ----------

@@ -260,6 +260,14 @@ components:
         - MASTER_APPROVED_NO_EDIT   # 403 — Record APPROVED tidak bisa diedit langsung (ajukan amandemen)
         - WORKFLOW_NOT_RETURNED     # 422 — Re-submit hanya bisa dari state RETURNED
         - ACTIVE_FLAG_REF_CONFLICT  # 422 — aktif_flag tidak bisa diubah false karena ada referensi aktif
+        # Staging engine (APP-C, P4-M1)
+        - STAGING_EVAL_INSTRUMEN_NOT_FOUND   # 404 — instrumen tidak ada di mst.instrumen
+        - STAGING_OVERRIDE_INVALID_TRANSITION # 422 — transisi stage tidak valid (mis. Stage3→Stage1 langsung)
+        - STAGING_DPD_MISSING               # 422 — DPD record belum ada untuk instrumen+periode
+        - STAGING_CURE_PERIODE_INSUFFICIENT  # 422 — belum 3 periode consecutive untuk cure
+        - STAGING_OVERRIDE_EXPIRED          # 410 — override proposal sudah kadaluarsa
+        - STAGING_RATING_BASELINE_MISSING   # 422 — rating_at_origination tidak ditemukan
+        - STAGING_CALC_RUN_SEALED           # 423 — calc run periode sudah sealed, tidak bisa override
 
     # ---- Timestamps -------------------------------------------------------
     TimestampISO:
