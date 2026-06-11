@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
@@ -750,6 +751,298 @@ func newTestLookthroughService(
 	}
 }
 
+// ─── Service tx-path tests using sqlmock ─────────────────────────────────────
+
+// TestCompositionService_Submit_TransactionPath verifies Submit goes through the tx path.
+// Uses sqlmock to allow s.db.BeginTx to succeed; repo is mocked to succeed.
+func TestCompositionService_Submit_TransactionPath(t *testing.T) {
+	t.Parallel()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	// mockFundCompositionRepo + mockAuditWriter do not execute SQL against the DB.
+	// Only sqlmock.ExpectBegin + ExpectCommit needed.
+	mock.ExpectBegin()
+	mock.ExpectCommit()
+
+	compRepo := &mockFundCompositionRepo{tipe: "REKSADANA"}
+	svc := &CompositionService{
+		db:          db,
+		compRepo:    compRepo,
+		auditWriter: &mockAuditWriter{},
+		logger:      nil,
+	}
+
+	result, err := svc.Submit(context.Background(), SubmitCompositionRequest{
+		InstrumenID:   uuid.New(),
+		EffectiveFrom: time.Now(),
+		Lines: []CompositionLineInput{
+			{AssetClass: AssetClassGovtBond, WeightPct: decimal.NewFromFloat(100)},
+		},
+	}, uuid.New(), "ROLE-AKUN")
+	if err != nil {
+		t.Fatalf("Submit error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.Header.WorkflowStatus != WorkflowStatusPendingReview {
+		t.Errorf("WorkflowStatus: got %s", result.Header.WorkflowStatus)
+	}
+}
+
+// TestCompositionService_Review_TransactionPath verifies Review transitions to PENDING_APPROVAL.
+func TestCompositionService_Review_TransactionPath(t *testing.T) {
+	t.Parallel()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	makerID := uuid.New()
+	reviewerID := uuid.New()
+	compositionID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectCommit()
+
+	compRepo := &mockFundCompositionRepo{
+		composition: &FundComposition{
+			ID:             compositionID,
+			MakerID:        makerID,
+			WorkflowStatus: WorkflowStatusPendingReview,
+		},
+	}
+	svc := &CompositionService{
+		db:          db,
+		compRepo:    compRepo,
+		auditWriter: &mockAuditWriter{},
+		logger:      nil,
+	}
+
+	result, err := svc.Review(context.Background(), WorkflowActionRequest{
+		CompositionID: compositionID,
+		ActorID:       reviewerID,
+		ActorRole:     "ROLE-RISK",
+		Comment:       "Looks good",
+	})
+	if err != nil {
+		t.Fatalf("Review error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil composition")
+	}
+	if result.WorkflowStatus != WorkflowStatusPendingApproval {
+		t.Errorf("WorkflowStatus: got %s", result.WorkflowStatus)
+	}
+}
+
+// TestCompositionService_Approve_TransactionPath verifies Approve transitions to APPROVED_ACTIVE.
+func TestCompositionService_Approve_TransactionPath(t *testing.T) {
+	t.Parallel()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	makerID := uuid.New()
+	reviewerID := uuid.New()
+	approverID := uuid.New()
+	compositionID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectCommit()
+
+	compRepo := &mockFundCompositionRepo{
+		composition: &FundComposition{
+			ID:             compositionID,
+			MakerID:        makerID,
+			ReviewerID:     &reviewerID,
+			WorkflowStatus: WorkflowStatusPendingApproval,
+		},
+	}
+	svc := &CompositionService{
+		db:          db,
+		compRepo:    compRepo,
+		auditWriter: &mockAuditWriter{},
+		logger:      nil,
+	}
+
+	result, err := svc.Approve(context.Background(), WorkflowActionRequest{
+		CompositionID: compositionID,
+		ActorID:       approverID,
+		ActorRole:     "ROLE-ALCO",
+		Comment:       "ALCO approves",
+	}, nil)
+	if err != nil {
+		t.Fatalf("Approve error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil composition")
+	}
+	if result.WorkflowStatus != WorkflowStatusApprovedActive {
+		t.Errorf("WorkflowStatus: got %s", result.WorkflowStatus)
+	}
+}
+
+// TestCompositionService_Reject_TransactionPath verifies Reject transitions to REJECTED.
+func TestCompositionService_Reject_TransactionPath(t *testing.T) {
+	t.Parallel()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	makerID := uuid.New()
+	rejectorID := uuid.New()
+	compositionID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectCommit()
+
+	compRepo := &mockFundCompositionRepo{
+		composition: &FundComposition{
+			ID:             compositionID,
+			MakerID:        makerID,
+			WorkflowStatus: WorkflowStatusPendingReview,
+		},
+	}
+	svc := &CompositionService{
+		db:          db,
+		compRepo:    compRepo,
+		auditWriter: &mockAuditWriter{},
+		logger:      nil,
+	}
+
+	result, err := svc.Reject(context.Background(), WorkflowActionRequest{
+		CompositionID: compositionID,
+		ActorID:       rejectorID,
+		ActorRole:     "ROLE-RISK",
+		Comment:       "Needs more data.",
+	})
+	if err != nil {
+		t.Fatalf("Reject error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil composition")
+	}
+	if result.WorkflowStatus != WorkflowStatusRejected {
+		t.Errorf("WorkflowStatus: got %s", result.WorkflowStatus)
+	}
+}
+
+// TestNewCompositionService_Success verifies constructor returns non-nil service.
+func TestNewCompositionService_Success(t *testing.T) {
+	t.Parallel()
+	db, _, _ := sqlmock.New()
+	defer db.Close()
+	svc := NewCompositionService(db, &mockFundCompositionRepo{}, &mockAuditWriter{}, nil)
+	if svc == nil {
+		t.Fatal("expected non-nil service")
+	}
+}
+
+// TestNewLookthroughService_Success verifies constructor returns non-nil service.
+func TestNewLookthroughService_Success(t *testing.T) {
+	t.Parallel()
+	db, _, _ := sqlmock.New()
+	defer db.Close()
+	svc := NewLookthroughService(db, &mockReksadanaRepo{}, &mockFundCompositionRepo{},
+		&mockPDLGDRepo{}, &mockScenarioParamRepo{}, &mockResultRepo{}, &mockAuditWriter{}, nil, nil)
+	if svc == nil {
+		t.Fatal("expected non-nil service")
+	}
+}
+
+// TestNewCompositionService_NilDBPanics verifies nil db panics.
+func TestNewCompositionService_NilDBPanics(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic for nil db")
+		}
+	}()
+	_ = NewCompositionService(nil, &mockFundCompositionRepo{}, &mockAuditWriter{}, nil)
+}
+
+// TestNewCompositionService_NilRepoPanics verifies nil repo panics.
+func TestNewCompositionService_NilRepoPanics(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic for nil repo")
+		}
+	}()
+	db, _, _ := sqlmock.New()
+	defer db.Close()
+	_ = NewCompositionService(db, nil, &mockAuditWriter{}, nil)
+}
+
+// TestNewLookthroughService_NilDBPanics verifies nil db panics.
+func TestNewLookthroughService_NilDBPanics(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic for nil db")
+		}
+	}()
+	_ = NewLookthroughService(nil, &mockReksadanaRepo{}, &mockFundCompositionRepo{},
+		&mockPDLGDRepo{}, &mockScenarioParamRepo{}, &mockResultRepo{}, &mockAuditWriter{}, nil, nil)
+}
+
+// TestCompositionService_Approve_WithSupersedes verifies amendment path calls SupersedeOld.
+func TestCompositionService_Approve_WithSupersedes(t *testing.T) {
+	t.Parallel()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	makerID := uuid.New()
+	reviewerID := uuid.New()
+	approverID := uuid.New()
+	compositionID := uuid.New()
+	oldCompositionID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectCommit()
+
+	compRepo := &mockFundCompositionRepo{
+		composition: &FundComposition{
+			ID:             compositionID,
+			MakerID:        makerID,
+			ReviewerID:     &reviewerID,
+			WorkflowStatus: WorkflowStatusPendingApproval,
+		},
+	}
+	svc := &CompositionService{
+		db:          db,
+		compRepo:    compRepo,
+		auditWriter: &mockAuditWriter{},
+		logger:      nil,
+	}
+
+	result, err := svc.Approve(context.Background(), WorkflowActionRequest{
+		CompositionID: compositionID,
+		ActorID:       approverID,
+		ActorRole:     "ROLE-ALCO",
+		Comment:       "Amendment approved",
+	}, &oldCompositionID) // non-nil supersedesID triggers SupersedeOld
+	if err != nil {
+		t.Fatalf("Approve with supersedes error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil composition")
+	}
+}
+
 // checkDomainCode asserts the error carries the expected domain code.
 // Uses the domainerrors.Code type (underlying string) for comparison.
 func checkDomainCode(t *testing.T, err error, expectedCode string) {
@@ -763,5 +1056,449 @@ func checkDomainCode(t *testing.T, err error, expectedCode string) {
 	}
 	if string(c.Code()) != expectedCode {
 		t.Errorf("expected error code %s, got %s (error: %v)", expectedCode, c.Code(), err)
+	}
+}
+
+// ─── GetCompositionGroup tests ────────────────────────────────────────────────
+
+// TestCompositionService_GetCompositionGroup_NotFound returns error when header not found.
+func TestCompositionService_GetCompositionGroup_NotFound(t *testing.T) {
+	t.Parallel()
+	compRepo := &mockFundCompositionRepo{composition: nil, getByIDErr: nil}
+	svc := newTestCompositionService(compRepo)
+
+	_, err := svc.GetCompositionGroup(context.Background(), uuid.New())
+	if err == nil {
+		t.Fatal("expected not-found error when composition is nil")
+	}
+}
+
+// TestCompositionService_GetCompositionGroup_RepoError propagates repo error.
+func TestCompositionService_GetCompositionGroup_RepoError(t *testing.T) {
+	t.Parallel()
+	sentinel := errors.New("db error")
+	compRepo := &mockFundCompositionRepo{getByIDErr: sentinel}
+	svc := newTestCompositionService(compRepo)
+
+	_, err := svc.GetCompositionGroup(context.Background(), uuid.New())
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected sentinel error, got: %v", err)
+	}
+}
+
+// TestCompositionService_GetCompositionGroup_Success returns group with computed total weight.
+func TestCompositionService_GetCompositionGroup_Success(t *testing.T) {
+	t.Parallel()
+	id := uuid.New()
+	compRepo := &mockFundCompositionRepo{
+		composition: &FundComposition{ID: id, WorkflowStatus: WorkflowStatusApprovedActive},
+		details: []FundCompositionDetail{
+			{AssetClass: AssetClassGovtBond, WeightPct: decimal.NewFromFloat(60)},
+			{AssetClass: AssetClassCorpBond, WeightPct: decimal.NewFromFloat(40)},
+		},
+	}
+	svc := newTestCompositionService(compRepo)
+
+	group, err := svc.GetCompositionGroup(context.Background(), id)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if group.Header.ID != id {
+		t.Errorf("header ID mismatch: %v", group.Header.ID)
+	}
+	if len(group.Details) != 2 {
+		t.Errorf("expected 2 details, got %d", len(group.Details))
+	}
+	expected := decimal.NewFromFloat(100)
+	if !group.TotalWeightPct.Equal(expected) {
+		t.Errorf("TotalWeightPct: expected 100, got %s", group.TotalWeightPct)
+	}
+}
+
+// ─── ListCompositions tests ───────────────────────────────────────────────────
+
+// TestCompositionService_ListCompositions_DelegatesToRepo verifies pass-through to repo.
+func TestCompositionService_ListCompositions_DelegatesToRepo(t *testing.T) {
+	t.Parallel()
+	id := uuid.New()
+	compRepo := &mockFundCompositionRepo{
+		compositions: []FundComposition{
+			{ID: id, WorkflowStatus: WorkflowStatusApprovedActive},
+		},
+	}
+	svc := newTestCompositionService(compRepo)
+
+	comps, _, _, err := svc.ListCompositions(context.Background(), uuid.New(),
+		"APPROVED_ACTIVE", "", 50, "created_at", "desc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(comps) != 1 {
+		t.Errorf("expected 1 composition, got %d", len(comps))
+	}
+}
+
+// ─── Review pre-tx validation tests ──────────────────────────────────────────
+
+// TestCompositionService_Review_NotFound returns error when GetByID returns nil.
+func TestCompositionService_Review_NotFound(t *testing.T) {
+	t.Parallel()
+	compRepo := &mockFundCompositionRepo{composition: nil}
+	svc := newTestCompositionService(compRepo)
+
+	_, err := svc.Review(context.Background(), WorkflowActionRequest{
+		CompositionID: uuid.New(),
+		ActorID:       uuid.New(),
+		ActorRole:     "ROLE-RISK",
+	})
+	if err == nil {
+		t.Fatal("expected not-found error")
+	}
+}
+
+// TestCompositionService_Review_RepoError propagates repo GetByID error.
+func TestCompositionService_Review_RepoError(t *testing.T) {
+	t.Parallel()
+	sentinel := errors.New("db down")
+	compRepo := &mockFundCompositionRepo{getByIDErr: sentinel}
+	svc := newTestCompositionService(compRepo)
+
+	_, err := svc.Review(context.Background(), WorkflowActionRequest{
+		CompositionID: uuid.New(),
+		ActorID:       uuid.New(),
+		ActorRole:     "ROLE-RISK",
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected sentinel error, got: %v", err)
+	}
+}
+
+// ─── Approve pre-tx validation tests ─────────────────────────────────────────
+
+// TestCompositionService_Approve_NotFound returns error when composition is nil.
+func TestCompositionService_Approve_NotFound(t *testing.T) {
+	t.Parallel()
+	compRepo := &mockFundCompositionRepo{composition: nil}
+	svc := newTestCompositionService(compRepo)
+
+	_, err := svc.Approve(context.Background(), WorkflowActionRequest{
+		CompositionID: uuid.New(),
+		ActorID:       uuid.New(),
+		ActorRole:     "ROLE-ALCO",
+	}, nil)
+	if err == nil {
+		t.Fatal("expected not-found error")
+	}
+}
+
+// TestCompositionService_Approve_InvalidTransition rejects wrong source state.
+func TestCompositionService_Approve_InvalidTransition(t *testing.T) {
+	t.Parallel()
+	compRepo := &mockFundCompositionRepo{
+		composition: &FundComposition{
+			ID:             uuid.New(),
+			MakerID:        uuid.New(),
+			WorkflowStatus: WorkflowStatusPendingReview, // must be PENDING_APPROVAL first
+		},
+	}
+	svc := newTestCompositionService(compRepo)
+
+	_, err := svc.Approve(context.Background(), WorkflowActionRequest{
+		CompositionID: compRepo.composition.ID,
+		ActorID:       uuid.New(),
+		ActorRole:     "ROLE-ALCO",
+	}, nil)
+	if err == nil {
+		t.Fatal("expected invalid transition error")
+	}
+	checkDomainCode(t, err, CodeLookthroughCompositionReviewInvalidTransition)
+}
+
+// ─── Reject pre-tx validation tests ──────────────────────────────────────────
+
+// TestCompositionService_Reject_NotFound returns error when composition is nil.
+func TestCompositionService_Reject_NotFound(t *testing.T) {
+	t.Parallel()
+	compRepo := &mockFundCompositionRepo{composition: nil}
+	svc := newTestCompositionService(compRepo)
+
+	_, err := svc.Reject(context.Background(), WorkflowActionRequest{
+		CompositionID: uuid.New(),
+		ActorID:       uuid.New(),
+		ActorRole:     "ROLE-RISK",
+		Comment:       "rejected",
+	})
+	if err == nil {
+		t.Fatal("expected not-found error")
+	}
+}
+
+// TestCompositionService_Reject_InvalidTransition rejects wrong source state.
+func TestCompositionService_Reject_InvalidTransition(t *testing.T) {
+	t.Parallel()
+	compRepo := &mockFundCompositionRepo{
+		composition: &FundComposition{
+			ID:             uuid.New(),
+			MakerID:        uuid.New(),
+			WorkflowStatus: WorkflowStatusApprovedActive, // terminal — cannot reject
+		},
+	}
+	svc := newTestCompositionService(compRepo)
+
+	_, err := svc.Reject(context.Background(), WorkflowActionRequest{
+		CompositionID: compRepo.composition.ID,
+		ActorID:       uuid.New(),
+		ActorRole:     "ROLE-RISK",
+		Comment:       "try to reject",
+	})
+	if err == nil {
+		t.Fatal("expected invalid transition error")
+	}
+	checkDomainCode(t, err, CodeLookthroughCompositionReviewInvalidTransition)
+}
+
+// ─── LookthroughService Compute additional coverage ───────────────────────────
+
+// TestLookthroughService_Compute_InstrumenNotFound verifies error when GetByID returns nil.
+func TestLookthroughService_Compute_InstrumenNotFound(t *testing.T) {
+	t.Parallel()
+	instRepo := &mockReksadanaRepo{inst: nil, getErr: nil}
+	svc := newTestLookthroughService(instRepo, &mockFundCompositionRepo{}, nil, nil, nil)
+
+	_, err := svc.Compute(context.Background(), uuid.New(), uuid.UUID{}, uuid.New(), time.Now())
+	if err == nil {
+		t.Fatal("expected error when instrumen not found")
+	}
+}
+
+// TestLookthroughService_Compute_InstrumenRepoError propagates repo error.
+func TestLookthroughService_Compute_InstrumenRepoError(t *testing.T) {
+	t.Parallel()
+	sentinel := errors.New("db error")
+	instRepo := &mockReksadanaRepo{getErr: sentinel}
+	svc := newTestLookthroughService(instRepo, &mockFundCompositionRepo{}, nil, nil, nil)
+
+	_, err := svc.Compute(context.Background(), uuid.New(), uuid.UUID{}, uuid.New(), time.Now())
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected sentinel error, got: %v", err)
+	}
+}
+
+// TestLookthroughService_Compute_PDLGDMissing verifies error when PD/LGD params missing.
+func TestLookthroughService_Compute_PDLGDMissing(t *testing.T) {
+	t.Parallel()
+	nab := decimal.NewFromFloat(5_000_000)
+	instRepo := &mockReksadanaRepo{
+		inst: &InstrumenReksadanaRow{
+			ID:                uuid.New(),
+			KlasifikasiPsak71: "AC",
+			NominalNABIDR:     &nab,
+			TipeInstrumen:     "REKSADANA",
+		},
+	}
+	compRepo := &mockFundCompositionRepo{
+		activeComp: &FundComposition{
+			ID:             uuid.New(),
+			WorkflowStatus: WorkflowStatusApprovedActive,
+		},
+		details: []FundCompositionDetail{
+			{AssetClass: AssetClassCorpBond, WeightPct: decimal.NewFromFloat(100)},
+		},
+	}
+	// pdlgdRepo has no params — will return ErrPDLGDClassMissing.
+	pdlgdRepo := &mockPDLGDRepo{params: map[AssetClass]PDLGDParams{}}
+
+	svc := newTestLookthroughService(instRepo, compRepo, pdlgdRepo, nil, nil)
+
+	_, err := svc.Compute(context.Background(),
+		instRepo.inst.ID, uuid.UUID{}, uuid.New(), time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC))
+	if err == nil {
+		t.Fatal("expected PDLGD missing error")
+	}
+	checkDomainCode(t, err, CodeLookthroughPDLGDClassMissing)
+}
+
+// ─── Preview coverage tests ───────────────────────────────────────────────────
+
+// TestLookthroughService_Preview_NoInstruments returns empty slice without error.
+func TestLookthroughService_Preview_NoInstruments(t *testing.T) {
+	t.Parallel()
+	instRepo := &mockReksadanaRepo{bulk: []InstrumenReksadanaRow{}}
+	svc := newTestLookthroughService(instRepo, &mockFundCompositionRepo{}, nil, nil, nil)
+
+	rows, cursor, hasMore, err := svc.Preview(context.Background(), uuid.New(), time.Now(), "", 50)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("expected 0 rows, got %d", len(rows))
+	}
+	if cursor != "" {
+		t.Errorf("expected empty cursor, got %q", cursor)
+	}
+	if hasMore {
+		t.Error("expected hasMore=false")
+	}
+}
+
+// TestLookthroughService_Preview_MissingCompositionWarning verifies warning row for missing composition.
+func TestLookthroughService_Preview_MissingCompositionWarning(t *testing.T) {
+	t.Parallel()
+	nab := decimal.NewFromFloat(10_000_000)
+	instRepo := &mockReksadanaRepo{
+		bulk: []InstrumenReksadanaRow{
+			{
+				ID:                uuid.New(),
+				KlasifikasiPsak71: "AC",
+				NominalNABIDR:     &nab,
+				TipeInstrumen:     "REKSADANA",
+			},
+		},
+	}
+	// activeComp = nil → composition missing warning.
+	compRepo := &mockFundCompositionRepo{activeComp: nil}
+	svc := newTestLookthroughService(instRepo, compRepo, nil, nil, nil)
+
+	rows, _, _, err := svc.Preview(context.Background(), uuid.New(), time.Now(), "", 50)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	if rows[0].HasComposition {
+		t.Error("HasComposition should be false when composition missing")
+	}
+	if len(rows[0].Warnings) == 0 {
+		t.Error("expected warning in row for missing composition")
+	}
+}
+
+// TestLookthroughService_Preview_FVTPLSkipInPreview returns ECL=0 row for FVTPL.
+func TestLookthroughService_Preview_FVTPLSkipInPreview(t *testing.T) {
+	t.Parallel()
+	nab := decimal.NewFromFloat(10_000_000)
+	instRepo := &mockReksadanaRepo{
+		bulk: []InstrumenReksadanaRow{
+			{
+				ID:                uuid.New(),
+				KlasifikasiPsak71: "FVTPL",
+				NominalNABIDR:     &nab,
+				TipeInstrumen:     "REKSADANA",
+			},
+		},
+	}
+	compRepo := &mockFundCompositionRepo{
+		activeComp: &FundComposition{
+			ID:             uuid.New(),
+			WorkflowStatus: WorkflowStatusApprovedActive,
+		},
+	}
+	svc := newTestLookthroughService(instRepo, compRepo, nil, nil, nil)
+
+	rows, _, _, err := svc.Preview(context.Background(), uuid.New(), time.Now(), "", 50)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	if rows[0].TotalECLEstimateIDRStr == nil {
+		t.Fatal("expected ECL estimate for FVTPL skip")
+	}
+	if *rows[0].TotalECLEstimateIDRStr != "0.0000" {
+		t.Errorf("expected ECL=0 for FVTPL, got %s", *rows[0].TotalECLEstimateIDRStr)
+	}
+}
+
+// TestLookthroughService_Preview_Cursor verifies cursor-based pagination.
+func TestLookthroughService_Preview_Cursor(t *testing.T) {
+	t.Parallel()
+	// Build 5 instruments, request limit=2 with no cursor.
+	nab := decimal.NewFromFloat(1_000_000)
+	bulk := make([]InstrumenReksadanaRow, 5)
+	for i := range bulk {
+		bulk[i] = InstrumenReksadanaRow{
+			ID:                uuid.New(),
+			KlasifikasiPsak71: "FVTPL",
+			NominalNABIDR:     &nab,
+			TipeInstrumen:     "REKSADANA",
+		}
+	}
+	instRepo := &mockReksadanaRepo{bulk: bulk}
+	compRepo := &mockFundCompositionRepo{
+		activeComp: &FundComposition{ID: uuid.New(), WorkflowStatus: WorkflowStatusApprovedActive},
+	}
+	svc := newTestLookthroughService(instRepo, compRepo, nil, nil, nil)
+
+	rows, cursor, hasMore, err := svc.Preview(context.Background(), uuid.New(), time.Now(), "", 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Errorf("expected 2 rows from page 1, got %d", len(rows))
+	}
+	if !hasMore {
+		t.Error("expected hasMore=true")
+	}
+	if cursor == "" {
+		t.Error("expected non-empty cursor for page 2")
+	}
+
+	// Fetch page 2 using cursor.
+	rows2, _, _, err := svc.Preview(context.Background(), uuid.New(), time.Now(), cursor, 2)
+	if err != nil {
+		t.Fatalf("page 2 error: %v", err)
+	}
+	if len(rows2) != 2 {
+		t.Errorf("expected 2 rows from page 2, got %d", len(rows2))
+	}
+}
+
+// ─── BulkCompute additional tests ────────────────────────────────────────────
+
+// TestLookthroughService_BulkCompute_InstrumenRepoError propagates BulkListReksadanaForECL error.
+func TestLookthroughService_BulkCompute_InstrumenRepoError(t *testing.T) {
+	t.Parallel()
+	sentinel := errors.New("db error")
+	instRepo := &mockReksadanaRepo{bulkErr: sentinel}
+	svc := newTestLookthroughService(instRepo, &mockFundCompositionRepo{}, nil, nil, nil)
+
+	_, err := svc.BulkCompute(context.Background(), uuid.New(), uuid.New(), time.Now())
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected sentinel error, got: %v", err)
+	}
+}
+
+// TestLookthroughService_BulkCompute_AllFVTPL returns results with FVTPLSkipped=true.
+func TestLookthroughService_BulkCompute_AllFVTPL(t *testing.T) {
+	t.Parallel()
+	nab := decimal.NewFromFloat(1_000_000)
+	bulk := []InstrumenReksadanaRow{
+		{
+			ID:                uuid.New(),
+			KlasifikasiPsak71: "FVTPL",
+			NominalNABIDR:     &nab,
+			TipeInstrumen:     "REKSADANA",
+		},
+	}
+	instRepo := &mockReksadanaRepo{bulk: bulk, inst: &bulk[0]}
+	svc := newTestLookthroughService(instRepo, &mockFundCompositionRepo{}, nil, nil, nil)
+
+	results, err := svc.BulkCompute(context.Background(), uuid.New(), uuid.New(), time.Now())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Err != nil {
+		t.Errorf("expected no error for FVTPL skip, got: %v", results[0].Err)
+	}
+	if results[0].Result == nil {
+		t.Fatal("expected non-nil result for FVTPL skip")
+	}
+	if !results[0].Result.FVTPLSkipped {
+		t.Error("expected FVTPLSkipped=true for FVTPL instrument")
 	}
 }

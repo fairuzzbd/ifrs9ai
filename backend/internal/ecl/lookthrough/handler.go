@@ -1022,7 +1022,7 @@ type sortSpec struct {
 
 // parseSortParam parses ?sort=col:asc (first entry). Falls back to defaultCol:defaultDir.
 // Validates col against allowedCols whitelist.
-func parseSortParam(s string, allowedCols []string, defaultCol, defaultDir string) sortSpec {
+func parseSortParam(s string, allowedCols []string, defaultCol, defaultDir string) sortSpec { //nolint:unparam
 	if s == "" {
 		return sortSpec{defaultCol, defaultDir}
 	}
