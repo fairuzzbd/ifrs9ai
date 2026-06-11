@@ -39,10 +39,10 @@ func addBulkRow(rows *sqlmock.Rows, instrID, nasabahID, bankID, coverageParamID 
 		"1000000.0000",
 		"IDR",
 		"AC",
-		nil,           // fx_rate (IDR, no FX)
+		nil, // fx_rate (IDR, no FX)
 		coverageParamID,
 		"2000000000.0000",
-		nil, nil,      // override_id, exclusion_reason
+		nil, nil, // override_id, exclusion_reason
 		"Nasabah Test",
 		"Bank Test",
 		"TUGURE",
@@ -51,7 +51,7 @@ func addBulkRow(rows *sqlmock.Rows, instrID, nasabahID, bankID, coverageParamID 
 
 // TestBulkListDepositoForAggregate_RejectsAtLimitPlusOne verifies that when the DB
 // returns maxBulkInstruments+1 rows (i.e. the LIMIT+1 sentinel), the repo returns
-// ErrLPSAggregateBulkTooLarge immediately without materialising the entire set.
+// ErrLPSAggregateBulkTooLarge immediately without materializing the entire set.
 func TestBulkListDepositoForAggregate_RejectsAtLimitPlusOne(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

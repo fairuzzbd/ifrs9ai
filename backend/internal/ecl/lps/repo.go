@@ -266,13 +266,13 @@ ORDER BY i.counterparty_id ASC, i.bank_counterparty_id ASC,
 // Issue #48 — LIMIT+1 pre-query size check:
 // Appends LIMIT maxBulkInstruments+1 to the query so the DB stops scanning after
 // 50 001 rows. If the result set exceeds maxBulkInstruments, returns
-// ErrLPSAggregateBulkTooLarge immediately — no memory wasted materialising 60k+ rows.
+// ErrLPSAggregateBulkTooLarge immediately — no memory wasted materializing 60k+ rows.
 // This avoids the previous pattern of fetching all rows and checking len() after.
 func (r *DBDepositoInstrumenRepo) BulkListDepositoForAggregate(ctx context.Context, evalDate time.Time) ([]BulkDepositoRow, error) {
 	if r.db == nil {
 		return nil, nil
 	}
-	// LIMIT+1 trick: fetch one extra row to detect oversized result sets before materialising.
+	// LIMIT+1 trick: fetch one extra row to detect oversized result sets before materializing.
 	// If we receive maxBulkInstruments+1 rows, the real count is ≥ that value → reject.
 	limitedQuery := bulkDepositoQuery + fmt.Sprintf("\nLIMIT %d", maxBulkInstruments+1)
 	rows, err := r.db.QueryContext(ctx, limitedQuery, evalDate, "TUGURE")

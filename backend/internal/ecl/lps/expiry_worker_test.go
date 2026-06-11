@@ -45,7 +45,7 @@ import (
 type mockExpiryRepo struct {
 	candidates []ExpiryCandidate
 	listErr    error
-	markErr    error     // returned by MarkExpiredInTx (e.g. sql.ErrNoRows for idempotent)
+	markErr    error // returned by MarkExpiredInTx (e.g. sql.ErrNoRows for idempotent)
 	beginErr   error
 	markedIDs  []uuid.UUID // tracks what was marked
 }

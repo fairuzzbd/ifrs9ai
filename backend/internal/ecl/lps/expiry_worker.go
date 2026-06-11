@@ -76,8 +76,8 @@ type ExpiryRepoIface interface {
 
 // ExpiryCandidate holds the minimal fields needed for the expiry loop.
 type ExpiryCandidate struct {
-	ID              uuid.UUID
-	InstrumenID     uuid.UUID
+	ID               uuid.UUID
+	InstrumenID      uuid.UUID
 	ValidToPeriodeID uuid.UUID
 }
 
@@ -298,10 +298,10 @@ func (w *ExpiryWorker) expireOne(ctx context.Context, cand ExpiryCandidate, tena
 		EntityID:    cand.ID,
 		BeforeJSON:  map[string]any{"workflow_status": string(WorkflowStatusApprovedActive)},
 		AfterJSON: map[string]any{
-			"workflow_status":    string(WorkflowStatusExpired),
+			"workflow_status":     string(WorkflowStatusExpired),
 			"valid_to_periode_id": cand.ValidToPeriodeID.String(),
-			"instrumen_id":       cand.InstrumenID.String(),
-			"expired_auto_at":    time.Now().UTC().Format(time.RFC3339),
+			"instrumen_id":        cand.InstrumenID.String(),
+			"expired_auto_at":     time.Now().UTC().Format(time.RFC3339),
 		},
 		TenantID: tenantID,
 	}); auditErr != nil {
