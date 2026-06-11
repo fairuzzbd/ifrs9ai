@@ -35,6 +35,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -55,10 +56,12 @@ type bulkHelperService struct {
 	ccfRepo     CCFConfigRepo
 	auditWriter *audit.Writer
 	db          *sql.DB // used to open tx for audit writes
+	logger      *slog.Logger
 }
 
 // NewBulkHelperService creates a BulkHelperService.
 // db may be nil in tests (audit write will be skipped).
+// logger may be nil; falls back to slog.Default() (mirrors staging engine pattern).
 func NewBulkHelperService(
 	pdRepo PDRepository,
 	lgdRepo LGDRepository,
@@ -69,6 +72,25 @@ func NewBulkHelperService(
 	auditWriter *audit.Writer,
 	db *sql.DB,
 ) BulkHelperService {
+	return NewBulkHelperServiceWithLogger(pdRepo, lgdRepo, instrRepo, cpRepo, kursRepo, ccfRepo, auditWriter, db, nil)
+}
+
+// NewBulkHelperServiceWithLogger creates a BulkHelperService with an explicit logger.
+// Useful for injecting test loggers. Pass nil to use slog.Default().
+func NewBulkHelperServiceWithLogger(
+	pdRepo PDRepository,
+	lgdRepo LGDRepository,
+	instrRepo InstrumenSnapshotRepo,
+	cpRepo CounterpartyRepo,
+	kursRepo KursRepository,
+	ccfRepo CCFConfigRepo,
+	auditWriter *audit.Writer,
+	db *sql.DB,
+	logger *slog.Logger,
+) BulkHelperService {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &bulkHelperService{
 		pdRepo:      pdRepo,
 		lgdRepo:     lgdRepo,
@@ -78,6 +100,7 @@ func NewBulkHelperService(
 		ccfRepo:     ccfRepo,
 		auditWriter: auditWriter,
 		db:          db,
+		logger:      logger,
 	}
 }
 
@@ -435,10 +458,28 @@ func (s *bulkHelperService) writeAuditBulkComplete(
 	}
 
 	if err := s.auditWriter.WithTx(tx).Write(ctx, ev); err != nil {
+		// F5: log audit write failures instead of silently discarding.
+		s.logger.ErrorContext(ctx, "helpers: bulk audit write failed",
+			"error", err,
+			"traceId", traceIDFromCtx(ctx))
 		return
 	}
 	if err := tx.Commit(); err != nil {
-		// Non-fatal: audit write failed; Rollback will be called via defer.
-		_ = err
+		// F5: log commit failures — non-fatal but must not be invisible.
+		s.logger.ErrorContext(ctx, "helpers: bulk audit commit failed",
+			"error", err,
+			"traceId", traceIDFromCtx(ctx))
+		// Rollback will be called via defer.
 	}
+}
+
+// traceIDFromCtx extracts the trace ID from a context, if set by middleware.
+// Returns empty string when not present (safe to log as-is).
+func traceIDFromCtx(ctx context.Context) string {
+	if v := ctx.Value("X-Trace-Id"); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
 }
