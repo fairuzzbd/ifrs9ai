@@ -547,6 +547,273 @@ func TestBulkLookup_FVTPL_Skipped(t *testing.T) {
 	}
 }
 
+// ─── F1: decimal tenor tests ──────────────────────────────────────────────────
+
+func TestPDService_Stage2_DecimalTenor_NoFloat64(t *testing.T) {
+	// F1 (DEC-016): tenor computation must use decimal.Decimal, not float64.
+	// Tenor exactly 4 years → interpolate between 3y and 5y.
+	// PD_3y = 0.03, PD_5y = 0.05 → t = (4-3)/(5-3) = 0.5 → PD = 0.03 + 0.5×0.02 = 0.04
+	// Verify daysPerYear constant: 36525/100 = 365.25 exactly in decimal.
+	days365_25 := decimal.NewFromInt(36525).Div(decimal.NewFromInt(100))
+	if !days365_25.Equal(daysPerYear) {
+		t.Errorf("daysPerYear mismatch: want 365.25 got %s", daysPerYear)
+	}
+
+	// 4 years × 365.25 days/year = 1461 days
+	tenorDaysInt := int64(4 * 365.25)
+	tenorYearsDec := decimal.NewFromInt(tenorDaysInt).Div(daysPerYear)
+	// Should be approximately 4.0 (1461 / 365.25 = 3.9986...)
+	// For boundary test: use exactly 1461 days
+	curve := PDCurveRow{
+		PDLifetime3Y:  d("0.03000000"),
+		PDLifetime5Y:  d("0.05000000"),
+		PDLifetime7Y:  d("0.07000000"),
+		PDLifetime10Y: d("0.10000000"),
+	}
+	pd, warn := interpolateLifetimePD(curve, tenorYearsDec)
+	if warn != nil {
+		t.Errorf("Unexpected warning: %v", warn)
+	}
+	// 1461/365.25 ≈ 3.9986; t = (3.9986-3)/(5-3) ≈ 0.4993; pd ≈ 0.03 + 0.4993×0.02 ≈ 0.039986
+	// Just verify it's in (0.03, 0.05) and not zero or NaN
+	if pd.LessThan(d("0.03")) || pd.GreaterThan(d("0.05")) {
+		t.Errorf("Interpolated PD out of [3y,5y] range: %s", pd)
+	}
+}
+
+func TestInterpolateLifetimePD_AllDecimal_BoundaryConditions(t *testing.T) {
+	// F1: interpolateLifetimePD now takes decimal.Decimal — verify boundary conditions.
+	curve := PDCurveRow{
+		PDLifetime3Y:  d("0.03000000"),
+		PDLifetime5Y:  d("0.05000000"),
+		PDLifetime7Y:  d("0.07000000"),
+		PDLifetime10Y: d("0.10000000"),
+	}
+
+	// At lower boundary: tenor = 2y → return 3y bucket.
+	pd, _ := interpolateLifetimePD(curve, d("2.0"))
+	if !pd.Equal(d("0.03000000")) {
+		t.Errorf("Lower boundary: want 0.03000000 got %s", pd)
+	}
+
+	// At exactly 3y → return 3y bucket.
+	pd, _ = interpolateLifetimePD(curve, d("3.0"))
+	if !pd.Equal(d("0.03000000")) {
+		t.Errorf("Exactly 3y: want 0.03000000 got %s", pd)
+	}
+
+	// At upper boundary: tenor = 12y → return 10y bucket.
+	pd, _ = interpolateLifetimePD(curve, d("12.0"))
+	if !pd.Equal(d("0.10000000")) {
+		t.Errorf("Upper boundary: want 0.10000000 got %s", pd)
+	}
+
+	// Mid-point 4y: t=(4-3)/(5-3)=0.5, pd=0.03+0.5×0.02=0.04000000.
+	pd, _ = interpolateLifetimePD(curve, d("4.0"))
+	if !pd.Equal(d("0.04000000")) {
+		t.Errorf("4y interpolation: want 0.04000000 got %s", pd)
+	}
+}
+
+// ─── F2: FX rate stale warning tests ─────────────────────────────────────────
+
+func TestEADService_FXRateStale_EmitsWarning(t *testing.T) {
+	// F2 (OQ-M2-6): kurs date 7 days before evaluationDate → WarnFXRateStale emitted.
+	staleDate := testEvalDate.AddDate(0, 0, -7)
+	instrRepo := &stubInstrRepo{
+		inst: &InstrumenRow{
+			ID: testInstrID, CounterpartyID: testCPID,
+			KlasifikasiPsak71: "AC", TipeInstrumen: "OBLIGASI",
+			MatauangKode: "USD", Nominal: d("100000.0000"),
+		},
+	}
+	kursRepo := &stubKursRepo{
+		kurs: &KursRow{
+			KodeMatauang:   "USD",
+			NilaiKurs:      d("15000.00000000"),
+			TanggalBerlaku: staleDate,
+			WorkflowStatus: "APPROVED",
+		},
+	}
+	ccfSvc := NewCCFLookupService(&stubCCFRepo{})
+
+	svc := NewEADService(instrRepo, kursRepo, ccfSvc)
+	_, bd, err := svc.ComputeEAD(context.Background(), testInstrID, testEvalDate)
+	if err != nil {
+		t.Fatalf("ComputeEAD error: %v", err)
+	}
+
+	warnCodes := map[string]bool{}
+	for _, w := range bd.Warnings {
+		warnCodes[w.Code] = true
+	}
+	if !warnCodes[WarnFXRateStale] {
+		t.Errorf("Expected WarnFXRateStale warning for 7-day stale kurs; got warnings: %v", bd.Warnings)
+	}
+}
+
+func TestComputeEADFromBatchParams_FXStale_EmitsWarning(t *testing.T) {
+	// F2: batch path also emits WarnFXRateStale when kurs > 3d stale.
+	staleDate := testEvalDate.AddDate(0, 0, -7)
+	inst := InstrumenRow{
+		ID: testInstrID, CounterpartyID: testCPID,
+		KlasifikasiPsak71: "AC", TipeInstrumen: "OBLIGASI",
+		MatauangKode: "USD", Nominal: d("100000.0000"),
+	}
+	params := &BatchParams{
+		FXRates: map[string]KursRow{
+			"USD": {
+				KodeMatauang:   "USD",
+				NilaiKurs:      d("15000.00000000"),
+				TanggalBerlaku: staleDate,
+				WorkflowStatus: "APPROVED",
+			},
+		},
+		EIRSchedules:      map[uuid.UUID]EIRScheduleRow{},
+		CCFTable:          map[string]decimal.Decimal{},
+		CollateralHaircut: map[string]decimal.Decimal{},
+	}
+
+	_, bd, err := ComputeEADFromBatchParams(testInstrID, inst, params, testEvalDate)
+	if err != nil {
+		t.Fatalf("ComputeEADFromBatchParams error: %v", err)
+	}
+
+	warnCodes := map[string]bool{}
+	for _, w := range bd.Warnings {
+		warnCodes[w.Code] = true
+	}
+	if !warnCodes[WarnFXRateStale] {
+		t.Errorf("Expected WarnFXRateStale in batch path; got warnings: %v", bd.Warnings)
+	}
+}
+
+func TestEADService_FXRateFresh_NoStaleWarning(t *testing.T) {
+	// F2: kurs date same day as evaluationDate → no stale warning.
+	instrRepo := &stubInstrRepo{
+		inst: &InstrumenRow{
+			ID: testInstrID, CounterpartyID: testCPID,
+			KlasifikasiPsak71: "AC", TipeInstrumen: "OBLIGASI",
+			MatauangKode: "USD", Nominal: d("100000.0000"),
+		},
+	}
+	kursRepo := &stubKursRepo{
+		kurs: &KursRow{
+			KodeMatauang:   "USD",
+			NilaiKurs:      d("15000.00000000"),
+			TanggalBerlaku: testEvalDate, // same day
+			WorkflowStatus: "APPROVED",
+		},
+	}
+	ccfSvc := NewCCFLookupService(&stubCCFRepo{})
+
+	svc := NewEADService(instrRepo, kursRepo, ccfSvc)
+	_, bd, err := svc.ComputeEAD(context.Background(), testInstrID, testEvalDate)
+	if err != nil {
+		t.Fatalf("ComputeEAD error: %v", err)
+	}
+
+	for _, w := range bd.Warnings {
+		if w.Code == WarnFXRateStale {
+			t.Errorf("Unexpected WarnFXRateStale for same-day kurs")
+		}
+	}
+}
+
+// ─── F3: POCI guard tests ─────────────────────────────────────────────────────
+
+func TestPDService_POCI_Returns_NotApplicable(t *testing.T) {
+	// F3 (FSD-APP-C §3.5, IFRS9 §5.5.13): POCI instruments deferred to P4-M7.
+	pdRepo := &stubPDRepo{}
+	instrRepo := &stubInstrRepo{
+		inst: &InstrumenRow{
+			ID: testInstrID, CounterpartyID: testCPID, KlasifikasiPsak71: "POCI",
+		},
+	}
+	svc := NewPDLookupService(pdRepo, instrRepo)
+	_, _, err := svc.GetPD(context.Background(), testInstrID, Stage1, ScenarioNormal, testPeriode, testEvalDate)
+	if err == nil {
+		t.Fatal("Expected error for POCI instrument, got nil")
+	}
+	de, ok := domainerrors.IsDomainError(err)
+	if !ok {
+		t.Fatalf("Expected DomainError, got %T: %v", err, err)
+	}
+	if de.Code() != domainerrors.CodePOCIDeferredToM7 {
+		t.Errorf("Want CodePOCIDeferredToM7, got %s", de.Code())
+	}
+}
+
+// ─── F4: batch LGD haircut formula tests ─────────────────────────────────────
+
+func TestGetPDFromBatchParams_POCI_Returns_DeferredToM7(t *testing.T) {
+	// F3: batch path also guards POCI and returns CodePOCIDeferredToM7.
+	inst := InstrumenRow{
+		ID: testInstrID, CounterpartyID: testCPID,
+		KlasifikasiPsak71: "POCI",
+	}
+	params := &BatchParams{
+		PDCurves:    map[string]PDCurveRow{},
+		ImpactPD:    &ImpactPDRow{ImpactMultiplier: d("1.00000000")},
+		ImpactMevPD: map[string]ImpactMevPDRow{},
+		Ratings:     map[uuid.UUID]string{testCPID: "idA"},
+	}
+	_, _, err := GetPDFromBatchParams(testInstrID, Stage1, ScenarioNormal, inst, params, testEvalDate)
+	if err == nil {
+		t.Fatal("Expected CodePOCIDeferredToM7 error for POCI batch path, got nil")
+	}
+	de, ok := domainerrors.IsDomainError(err)
+	if !ok || de.Code() != domainerrors.CodePOCIDeferredToM7 {
+		t.Errorf("Want CodePOCIDeferredToM7, got %v", err)
+	}
+}
+
+func TestTraceIDFromCtx_WithValue(t *testing.T) {
+	// F5: traceIDFromCtx extracts trace ID from context.
+	ctx := context.WithValue(context.Background(), "X-Trace-Id", "test-trace-123")
+	result := traceIDFromCtx(ctx)
+	if result != "test-trace-123" {
+		t.Errorf("traceIDFromCtx want test-trace-123 got %q", result)
+	}
+}
+
+func TestTraceIDFromCtx_NoValue(t *testing.T) {
+	// F5: traceIDFromCtx returns empty string when no trace ID is set.
+	result := traceIDFromCtx(context.Background())
+	if result != "" {
+		t.Errorf("traceIDFromCtx want empty string, got %q", result)
+	}
+}
+
+func TestGetLGDFromBatchParams_AppliesHaircutFormula(t *testing.T) {
+	// F4: even with haircut=0, verify the formula path executes:
+	// LGD_eff = LGD_pool × (1 - 0) = LGD_pool, rounded to 8dp.
+	pool := LGDBaselRow{TipeEksposur: "BANK", LGD: d("0.45000000")}
+	params := &BatchParams{
+		LGDPools:   map[string]LGDBaselRow{"BANK": pool},
+		LGDMapping: map[string]string{"BANK": "BANK"},
+	}
+	inst := InstrumenRow{TipeInstrumen: "DEPOSITO"}
+	cp := CounterpartyRow{TipeCounterparty: "BANK"}
+
+	lgd, detail, err := GetLGDFromBatchParams(testInstrID, inst, cp, params, testPeriode)
+	if err != nil {
+		t.Fatalf("GetLGDFromBatchParams error: %v", err)
+	}
+	expected := d("0.45000000")
+	if !lgd.Equal(expected) {
+		t.Errorf("Batch LGD want %s got %s", expected, lgd)
+	}
+	// Verify haircut is tracked in detail.
+	if !detail.CollateralHaircut.IsZero() {
+		t.Errorf("Phase 1 haircut should be 0, got %s", detail.CollateralHaircut)
+	}
+	// LGDEffective = BaseLGD × (1 - 0) = 0.45
+	if !detail.LGDEffective.Equal(expected) {
+		t.Errorf("LGDEffective want %s got %s", expected, detail.LGDEffective)
+	}
+}
+
 // ─── Decimal precision tests ──────────────────────────────────────────────────
 
 func TestPD_NoPrecisionLoss_8dp(t *testing.T) {
