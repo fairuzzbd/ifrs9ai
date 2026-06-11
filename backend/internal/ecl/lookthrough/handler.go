@@ -53,22 +53,22 @@ type CompositionServiceIface interface {
 	ListCompositions(ctx context.Context, instrumenID uuid.UUID, filterStatus, cursor string, limit int, sortCol, sortDir string) ([]FundComposition, string, bool, error)
 }
 
-// LookthroughServiceIface is the subset of *LookthroughService that Handler uses.
+// ServiceIface is the subset of *LookthroughService that Handler uses.
 // Tests inject mockLookthroughService via this interface.
-type LookthroughServiceIface interface {
-	Compute(ctx context.Context, instrumenID, runID, periodeID uuid.UUID, evaluationDate time.Time) (*LookthroughResult, error)
+type ServiceIface interface {
+	Compute(ctx context.Context, instrumenID, runID, periodeID uuid.UUID, evaluationDate time.Time) (*Result, error)
 	Preview(ctx context.Context, periodeID uuid.UUID, evaluationDate time.Time, cursor string, limit int) ([]PreviewSummaryRow, string, bool, error)
 }
 
 // Handler holds composition + lookthrough services.
 type Handler struct {
-	composition  CompositionServiceIface
-	lookthrough  LookthroughServiceIface
-	resultRepo   LookthroughResultRepo
+	composition CompositionServiceIface
+	lookthrough ServiceIface
+	resultRepo  ResultRepo
 }
 
 // NewHandler creates a Handler.
-func NewHandler(composition CompositionServiceIface, lookthrough LookthroughServiceIface, resultRepo LookthroughResultRepo) *Handler {
+func NewHandler(composition CompositionServiceIface, lookthrough ServiceIface, resultRepo ResultRepo) *Handler {
 	return &Handler{
 		composition: composition,
 		lookthrough: lookthrough,
@@ -240,50 +240,50 @@ func requireUserID(c *gin.Context) (uuid.UUID, bool) {
 // ─── Response DTOs ────────────────────────────────────────────────────────────
 
 type compositionDetailDTO struct {
-	ID                string `json:"id"`
-	AssetClass        string `json:"assetClass"`
-	WeightPct         string `json:"weightPct"`
-	Position          int    `json:"position"`
+	ID         string `json:"id"`
+	AssetClass string `json:"assetClass"`
+	WeightPct  string `json:"weightPct"`
+	Position   int    `json:"position"`
 }
 
 type compositionDTO struct {
-	ID                  string                 `json:"id"`
-	InstrumenID         string                 `json:"instrumenId"`
-	EffectiveFrom       string                 `json:"effectiveFrom"`
-	EffectiveTo         string                 `json:"effectiveTo"`
-	WorkflowStatus      string                 `json:"workflowStatus"`
-	MakerID             string                 `json:"makerId"`
-	ReviewerID          *string                `json:"reviewerId,omitempty"`
-	ApproverID          *string                `json:"approverId,omitempty"`
-	SignedAtReview      *string                `json:"signedAtReview,omitempty"`
-	SignedAtApprove     *string                `json:"signedAtApprove,omitempty"`
-	CommentReview       *string                `json:"commentReview,omitempty"`
-	CommentApprove      *string                `json:"commentApprove,omitempty"`
-	RejectReason        *string                `json:"rejectReason,omitempty"`
-	SourceDocID         *string                `json:"sourceDocId,omitempty"`
-	Details             []compositionDetailDTO `json:"details,omitempty"`
-	TotalWeightPct      string                 `json:"totalWeightPct,omitempty"`
-	CreatedAt           string                 `json:"createdAt"`
-	UpdatedAt           string                 `json:"updatedAt"`
-	RowVersion          int64                  `json:"rowVersion"`
-	TenantID            string                 `json:"tenantId"`
+	ID              string                 `json:"id"`
+	InstrumenID     string                 `json:"instrumenId"`
+	EffectiveFrom   string                 `json:"effectiveFrom"`
+	EffectiveTo     string                 `json:"effectiveTo"`
+	WorkflowStatus  string                 `json:"workflowStatus"`
+	MakerID         string                 `json:"makerId"`
+	ReviewerID      *string                `json:"reviewerId,omitempty"`
+	ApproverID      *string                `json:"approverId,omitempty"`
+	SignedAtReview  *string                `json:"signedAtReview,omitempty"`
+	SignedAtApprove *string                `json:"signedAtApprove,omitempty"`
+	CommentReview   *string                `json:"commentReview,omitempty"`
+	CommentApprove  *string                `json:"commentApprove,omitempty"`
+	RejectReason    *string                `json:"rejectReason,omitempty"`
+	SourceDocID     *string                `json:"sourceDocId,omitempty"`
+	Details         []compositionDetailDTO `json:"details,omitempty"`
+	TotalWeightPct  string                 `json:"totalWeightPct,omitempty"`
+	CreatedAt       string                 `json:"createdAt"`
+	UpdatedAt       string                 `json:"updatedAt"`
+	RowVersion      int64                  `json:"rowVersion"`
+	TenantID        string                 `json:"tenantId"`
 }
 
 type breakdownLineDTO struct {
-	AssetClass            string `json:"assetClass"`
-	WeightPct             string `json:"weightPct"`
-	NabPortionIdr         string `json:"nabPortionIdr"`
-	PdGood                string `json:"pdGood"`
-	PdNormal              string `json:"pdNormal"`
-	PdBad                 string `json:"pdBad"`
-	Lgd                   string `json:"lgd"`
-	EclGoodIdr            string `json:"eclGoodIdr"`
-	EclNormalIdr          string `json:"eclNormalIdr"`
-	EclBadIdr             string `json:"eclBadIdr"`
-	EclFlGoodIdr          string `json:"eclFlGoodIdr"`
-	EclFlNormalIdr        string `json:"eclFlNormalIdr"`
-	EclFlBadIdr           string `json:"eclFlBadIdr"`
-	EclWeightedIdr        string `json:"eclWeightedIdr"`
+	AssetClass     string `json:"assetClass"`
+	WeightPct      string `json:"weightPct"`
+	NabPortionIdr  string `json:"nabPortionIdr"`
+	PdGood         string `json:"pdGood"`
+	PdNormal       string `json:"pdNormal"`
+	PdBad          string `json:"pdBad"`
+	Lgd            string `json:"lgd"`
+	EclGoodIdr     string `json:"eclGoodIdr"`
+	EclNormalIdr   string `json:"eclNormalIdr"`
+	EclBadIdr      string `json:"eclBadIdr"`
+	EclFlGoodIdr   string `json:"eclFlGoodIdr"`
+	EclFlNormalIdr string `json:"eclFlNormalIdr"`
+	EclFlBadIdr    string `json:"eclFlBadIdr"`
+	EclWeightedIdr string `json:"eclWeightedIdr"`
 }
 
 type lookthroughResultDTO struct {
@@ -297,13 +297,6 @@ type lookthroughResultDTO struct {
 	Breakdown                    []breakdownLineDTO `json:"breakdown"`
 	FvtplSkipped                 bool               `json:"fvtplSkipped"`
 	Warning                      string             `json:"warning,omitempty"`
-}
-
-type bulkResultDTO struct {
-	InstrumenID    string `json:"instrumenId"`
-	Status         string `json:"status"` // computed | fvtpl_skipped | poci_deferred | error
-	TotalEclIdr    string `json:"totalEclIdr,omitempty"`
-	Error          string `json:"error,omitempty"`
 }
 
 type previewRowDTO struct {
@@ -363,7 +356,8 @@ func toCompositionDTO(fc *FundComposition, details []FundCompositionDetail) comp
 	if details != nil {
 		dto.Details = make([]compositionDetailDTO, len(details))
 		var total decimal.Decimal
-		for i, d := range details {
+		for i := range details {
+			d := &details[i]
 			dto.Details[i] = compositionDetailDTO{
 				ID:         d.ID.String(),
 				AssetClass: string(d.AssetClass),
@@ -377,7 +371,7 @@ func toCompositionDTO(fc *FundComposition, details []FundCompositionDetail) comp
 	return dto
 }
 
-func toLookthroughResultDTO(r *LookthroughResult) lookthroughResultDTO {
+func toLookthroughResultDTO(r *Result) lookthroughResultDTO {
 	dto := lookthroughResultDTO{
 		InstrumenID:       r.InstrumenID.String(),
 		InstrumenNama:     r.InstrumenNama,
@@ -392,7 +386,8 @@ func toLookthroughResultDTO(r *LookthroughResult) lookthroughResultDTO {
 		dto.FundCompositionEffectiveFrom = r.FundCompositionEffectiveFrom.Format("2006-01-02")
 	}
 	dto.Breakdown = make([]breakdownLineDTO, len(r.Breakdown))
-	for i, b := range r.Breakdown {
+	for i := range r.Breakdown {
+		b := &r.Breakdown[i]
 		dto.Breakdown[i] = breakdownLineDTO{
 			AssetClass:     string(b.AssetClass),
 			WeightPct:      b.WeightPct.StringFixed(4),
@@ -539,12 +534,12 @@ func (h *Handler) ReviewComposition(c *gin.Context) {
 	}
 
 	comp, svcErr := h.composition.Review(c.Request.Context(), WorkflowActionRequest{
-		CompositionID:  compositionID,
-		ActorID:        actorID,
-		ActorRole:      currentUserRole(c),
-		Comment:        body.Comment,
+		CompositionID:   compositionID,
+		ActorID:         actorID,
+		ActorRole:       currentUserRole(c),
+		Comment:         body.Comment,
 		SignatureMethod: body.SignatureMethod,
-		TenantID:       defaultTenantID,
+		TenantID:        defaultTenantID,
 	})
 	if svcErr != nil {
 		handleDomainError(c, svcErr)
@@ -583,7 +578,7 @@ func (h *Handler) ApproveComposition(c *gin.Context) {
 
 	var body struct {
 		Comment                 string `json:"comment"`
-		SignatureMethod          string `json:"signatureMethod"`
+		SignatureMethod         string `json:"signatureMethod"`
 		SupersedesCompositionID string `json:"supersedesCompositionId"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
@@ -604,12 +599,12 @@ func (h *Handler) ApproveComposition(c *gin.Context) {
 	}
 
 	comp, svcErr := h.composition.Approve(c.Request.Context(), WorkflowActionRequest{
-		CompositionID:  compositionID,
-		ActorID:        actorID,
-		ActorRole:      currentUserRole(c),
-		Comment:        body.Comment,
+		CompositionID:   compositionID,
+		ActorID:         actorID,
+		ActorRole:       currentUserRole(c),
+		Comment:         body.Comment,
 		SignatureMethod: body.SignatureMethod,
-		TenantID:       defaultTenantID,
+		TenantID:        defaultTenantID,
 	}, supersedesID)
 	if svcErr != nil {
 		handleDomainError(c, svcErr)
@@ -641,7 +636,7 @@ func (h *Handler) RejectComposition(c *gin.Context) {
 	}
 
 	var body struct {
-		Comment        string `json:"comment" binding:"required"`
+		Comment         string `json:"comment" binding:"required"`
 		SignatureMethod string `json:"signatureMethod"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
@@ -651,12 +646,12 @@ func (h *Handler) RejectComposition(c *gin.Context) {
 	}
 
 	comp, svcErr := h.composition.Reject(c.Request.Context(), WorkflowActionRequest{
-		CompositionID:  compositionID,
-		ActorID:        actorID,
-		ActorRole:      currentUserRole(c),
-		Comment:        body.Comment,
+		CompositionID:   compositionID,
+		ActorID:         actorID,
+		ActorRole:       currentUserRole(c),
+		Comment:         body.Comment,
 		SignatureMethod: body.SignatureMethod,
-		TenantID:       defaultTenantID,
+		TenantID:        defaultTenantID,
 	})
 	if svcErr != nil {
 		handleDomainError(c, svcErr)
@@ -833,10 +828,10 @@ func (h *Handler) BulkComputeLookthrough(c *gin.Context) {
 	// Full async dispatch in Phase 5. For M4: accepts job, logs, returns jobId.
 	jobID := fmt.Sprintf("lt-bulk-%s-%s", body.RunID[:8], body.EvaluationDate)
 	response.Accepted(c, gin.H{
-		"jobId":     jobID,
-		"type":      "LOOKTHROUGH_BULK_COMPUTE",
-		"statusUrl": "/api/v1/jobs/" + jobID,
-		"streamUrl": "/api/v1/jobs/" + jobID + "/stream",
+		"jobId":                    jobID,
+		"type":                     "LOOKTHROUGH_BULK_COMPUTE",
+		"statusUrl":                "/api/v1/jobs/" + jobID,
+		"streamUrl":                "/api/v1/jobs/" + jobID + "/stream",
 		"estimatedDurationSeconds": 10,
 	})
 }
@@ -868,7 +863,8 @@ func (h *Handler) ListLookthroughPreview(c *gin.Context) {
 	}
 
 	dtos := make([]previewRowDTO, 0, len(rows))
-	for _, r := range rows {
+	for i := range rows {
+		r := &rows[i]
 		dto := previewRowDTO{
 			InstrumenID:       r.InstrumenID.String(),
 			InstrumenNama:     r.InstrumenNama,
@@ -952,9 +948,10 @@ func (h *Handler) ExportLookthroughPreview(c *gin.Context) {
 	c.Header("Content-Disposition", "attachment; filename=\""+filename+"\"")
 	c.Header("Content-Type", "text/csv; charset=utf-8")
 	c.Header("X-Total-Rows", itoa(len(rows)))
-	_, _ = c.Writer.WriteString("\xef\xbb\xbf") //nolint:errcheck
+	_, _ = c.Writer.WriteString("\xef\xbb\xbf")                                                                                      //nolint:errcheck
 	fmt.Fprintf(c.Writer, "Instrumen ID,Nama,Klasifikasi,NAB IDR,Fund Composition ID,ECL Estimate IDR,Has Composition,Warnings\r\n") //nolint:errcheck
-	for _, r := range rows {
+	for i := range rows {
+		r := &rows[i]
 		nabStr := r.NABIDRStr
 		compIDStr := ""
 		if r.FundCompositionID != nil {

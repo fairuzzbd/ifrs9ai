@@ -264,9 +264,9 @@ func (s *CompositionService) Submit(ctx context.Context, req SubmitCompositionRe
 	}
 
 	return &CompositionGroup{
-		Header:  *header,
-		Details: details,
-		IsAmendment: req.IsAmendment,
+		Header:                  *header,
+		Details:                 details,
+		IsAmendment:             req.IsAmendment,
 		SupersedesCompositionID: req.SupersedesCompositionID,
 	}, nil
 }
@@ -325,10 +325,10 @@ func (s *CompositionService) Review(ctx context.Context, req WorkflowActionReque
 			"workflow_status": string(comp.WorkflowStatus),
 		},
 		AfterJSON: map[string]interface{}{
-			"workflow_status":    string(WorkflowStatusPendingApproval),
-			"reviewer_id":        req.ActorID.String(),
-			"signed_at_review":   now.Format(time.RFC3339Nano),
-			"signature_method":   req.SignatureMethod,
+			"workflow_status":  string(WorkflowStatusPendingApproval),
+			"reviewer_id":      req.ActorID.String(),
+			"signed_at_review": now.Format(time.RFC3339Nano),
+			"signature_method": req.SignatureMethod,
 		},
 		TenantID: defaultTenantID,
 	}); err != nil {
@@ -404,10 +404,10 @@ func (s *CompositionService) Approve(ctx context.Context, req WorkflowActionRequ
 	}
 
 	afterData := map[string]interface{}{
-		"workflow_status":     string(WorkflowStatusApprovedActive),
-		"approver_id":         req.ActorID.String(),
-		"signed_at_approve":   now.Format(time.RFC3339Nano),
-		"signature_method":    req.SignatureMethod,
+		"workflow_status":   string(WorkflowStatusApprovedActive),
+		"approver_id":       req.ActorID.String(),
+		"signed_at_approve": now.Format(time.RFC3339Nano),
+		"signature_method":  req.SignatureMethod,
 	}
 	if supersedesID != nil {
 		afterData["supersedes_composition_id"] = supersedesID.String()
@@ -522,8 +522,8 @@ func (s *CompositionService) GetCompositionGroup(ctx context.Context, compositio
 		return nil, err
 	}
 	var total decimal.Decimal
-	for _, d := range details {
-		total = total.Add(d.WeightPct)
+	for i := range details {
+		total = total.Add(details[i].WeightPct)
 	}
 	return &CompositionGroup{
 		Header:         *header,
@@ -541,21 +541,21 @@ func (s *CompositionService) ListCompositions(ctx context.Context, instrumenID u
 
 // ─── LookthroughService ───────────────────────────────────────────────────────
 
-// LookthroughService computes look-through ECL for REKSADANA instruments.
+// Service computes look-through ECL for REKSADANA instruments.
 // Safe for concurrent use.
-type LookthroughService struct {
+type Service struct {
 	db          *sql.DB
 	instRepo    ReksadanaInstrumenRepo
 	compRepo    FundCompositionRepo
 	pdlgdRepo   PDLGDClassRepo
 	paramRepo   ScenarioParamRepo
-	resultRepo  LookthroughResultRepo
+	resultRepo  ResultRepo
 	auditWriter AuditWriterIface
 	metrics     MetricsRecorder
 	logger      *slog.Logger
 }
 
-// NewLookthroughService creates a LookthroughService.
+// NewLookthroughService creates a Service.
 // Panics if db, any repo, or auditWriter are nil (DEC-018 enforcement).
 func NewLookthroughService(
 	db *sql.DB,
@@ -563,11 +563,11 @@ func NewLookthroughService(
 	compRepo FundCompositionRepo,
 	pdlgdRepo PDLGDClassRepo,
 	paramRepo ScenarioParamRepo,
-	resultRepo LookthroughResultRepo,
+	resultRepo ResultRepo,
 	auditWriter AuditWriterIface,
 	metrics MetricsRecorder,
 	logger *slog.Logger,
-) *LookthroughService {
+) *Service {
 	if db == nil {
 		panic("lookthrough: LookthroughService requires non-nil db")
 	}
@@ -595,7 +595,7 @@ func NewLookthroughService(
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &LookthroughService{
+	return &Service{
 		db:          db,
 		instRepo:    instRepo,
 		compRepo:    compRepo,
@@ -623,7 +623,7 @@ func NewLookthroughService(
 //  9. Return LookthroughResult.
 //
 // AC: APP-C-LKT-001-AC01..AC10.
-func (s *LookthroughService) Compute(ctx context.Context, instrumenID, runID, periodeID uuid.UUID, evaluationDate time.Time) (*LookthroughResult, error) {
+func (s *Service) Compute(ctx context.Context, instrumenID, runID, periodeID uuid.UUID, evaluationDate time.Time) (*Result, error) {
 	// Step 1: Load instrument.
 	inst, err := s.instRepo.GetByID(ctx, instrumenID)
 	if err != nil {
@@ -640,7 +640,7 @@ func (s *LookthroughService) Compute(ctx context.Context, instrumenID, runID, pe
 
 	// Step 1b: FVTPL skip — ECL = 0, not an error.
 	if inst.IsFVTPL() {
-		result := &LookthroughResult{
+		result := &Result{
 			InstrumenID:       instrumenID,
 			InstrumenNama:     inst.NamaInstrumen,
 			KlasifikasiPsak71: inst.KlasifikasiPsak71,
@@ -677,8 +677,8 @@ func (s *LookthroughService) Compute(ctx context.Context, instrumenID, runID, pe
 
 	// Step 4: Load PD/LGD for all asset classes in batch.
 	assetClasses := make([]AssetClass, len(details))
-	for i, d := range details {
-		assetClasses[i] = d.AssetClass
+	for i := range details {
+		assetClasses[i] = details[i].AssetClass
 	}
 	pdlgdMap, err := s.pdlgdRepo.BulkGetPDLGDForAssetClasses(ctx, assetClasses, evaluationDate, defaultTenantID)
 	if err != nil {
@@ -696,8 +696,9 @@ func (s *LookthroughService) Compute(ctx context.Context, instrumenID, runID, pe
 	}
 
 	// Step 6: Compute breakdown per asset class.
-	breakdown := make([]LookthroughBreakdownLine, 0, len(details))
-	for _, d := range details {
+	breakdown := make([]BreakdownLine, 0, len(details))
+	for i := range details {
+		d := &details[i]
 		pd, ok := pdlgdMap[d.AssetClass]
 		if !ok {
 			return nil, ErrPDLGDClassMissing(string(d.AssetClass), periodeID.String())
@@ -709,12 +710,12 @@ func (s *LookthroughService) Compute(ctx context.Context, instrumenID, runID, pe
 	// Step 7: Sum TotalECLIDR = Σ ECLWeightedIDR.
 	// Each ECLWeightedIDR is already truncated to 4dp; sum truncated again to 4dp.
 	var totalECL decimal.Decimal
-	for _, b := range breakdown {
-		totalECL = totalECL.Add(b.ECLWeightedIDR)
+	for i := range breakdown {
+		totalECL = totalECL.Add(breakdown[i].ECLWeightedIDR)
 	}
 	totalECL = totalECL.Truncate(4)
 
-	result := &LookthroughResult{
+	result := &Result{
 		InstrumenID:                  instrumenID,
 		InstrumenNama:                inst.NamaInstrumen,
 		KlasifikasiPsak71:            inst.KlasifikasiPsak71,
@@ -766,7 +767,7 @@ func (s *LookthroughService) Compute(ctx context.Context, instrumenID, runID, pe
 // BulkComputeResult wraps the outcome for one instrument in BulkCompute.
 type BulkComputeResult struct {
 	InstrumenID uuid.UUID
-	Result      *LookthroughResult
+	Result      *Result
 	Err         error
 	// IsPOCI is true when the error is LOOKTHROUGH_POCI_DEFERRED (non-fatal skip).
 	IsPOCI bool
@@ -781,7 +782,7 @@ type BulkComputeResult struct {
 // SLA target: ≤ 2s for 500 instruments (state-machine doc §6.2).
 //
 // AC: APP-C-LKT-001-AC11..AC16.
-func (s *LookthroughService) BulkCompute(ctx context.Context, runID, periodeID uuid.UUID, evaluationDate time.Time) ([]BulkComputeResult, error) {
+func (s *Service) BulkCompute(ctx context.Context, runID, periodeID uuid.UUID, evaluationDate time.Time) ([]BulkComputeResult, error) {
 	startTime := time.Now()
 
 	instruments, err := s.instRepo.BulkListReksadanaForECL(ctx, defaultTenantID)
@@ -800,10 +801,12 @@ func (s *LookthroughService) BulkCompute(ctx context.Context, runID, periodeID u
 	sem := make(chan struct{}, bulkSemaphoreSize)
 	var wg sync.WaitGroup
 
-	for i, inst := range instruments {
+	for i := range instruments {
+		idx := i
+		instrumen := instruments[i]
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(idx int, instrumen InstrumenReksadanaRow) {
+		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
 
@@ -823,14 +826,14 @@ func (s *LookthroughService) BulkCompute(ctx context.Context, runID, periodeID u
 				}
 			}
 			results[idx] = br
-		}(i, inst)
+		}()
 	}
 	wg.Wait()
 
 	// Count errors (excluding non-fatal POCI).
 	var errorCount int
-	for _, r := range results {
-		if r.Err != nil && !r.IsPOCI {
+	for i := range results {
+		if results[i].Err != nil && !results[i].IsPOCI {
 			errorCount++
 		}
 	}
@@ -845,7 +848,7 @@ func (s *LookthroughService) BulkCompute(ctx context.Context, runID, periodeID u
 // Missing NAB or composition → warning in PreviewSummaryRow.
 //
 // AC: APP-C-LKT-001-AC17..AC20.
-func (s *LookthroughService) Preview(ctx context.Context, periodeID uuid.UUID, evaluationDate time.Time,
+func (s *Service) Preview(ctx context.Context, periodeID uuid.UUID, evaluationDate time.Time,
 	cursor string, limit int,
 ) ([]PreviewSummaryRow, string, bool, error) {
 	instruments, err := s.instRepo.BulkListReksadanaForECL(ctx, defaultTenantID)
@@ -883,7 +886,8 @@ func (s *LookthroughService) Preview(ctx context.Context, periodeID uuid.UUID, e
 	}
 
 	rows := make([]PreviewSummaryRow, 0, len(page))
-	for _, inst := range page {
+	for i := range page {
+		inst := &page[i]
 		row := PreviewSummaryRow{
 			InstrumenID:       inst.ID,
 			InstrumenNama:     inst.NamaInstrumen,

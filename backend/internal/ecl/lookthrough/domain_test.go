@@ -1,6 +1,7 @@
 package lookthrough
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"testing"
 	"time"
@@ -91,8 +92,8 @@ func TestWorkflowStatusTransitions(t *testing.T) {
 		from WorkflowStatus
 		to   WorkflowStatus
 	}{
-		{WorkflowStatusDraft, WorkflowStatusPendingReview},     // DRAFT has no transitions
-		{WorkflowStatusRejected, WorkflowStatusPendingReview},  // terminal → any
+		{WorkflowStatusDraft, WorkflowStatusPendingReview},    // DRAFT has no transitions
+		{WorkflowStatusRejected, WorkflowStatusPendingReview}, // terminal → any
 		{WorkflowStatusSuperseded, WorkflowStatusApprovedActive},
 		{WorkflowStatusApprovedActive, WorkflowStatusPendingReview},
 		{WorkflowStatusPendingReview, WorkflowStatusApprovedActive}, // skip review step
@@ -145,7 +146,7 @@ func TestWorkflowStatusIsActive(t *testing.T) {
 func TestComputeBreakdownLine_GovtBond(t *testing.T) {
 	t.Parallel()
 	nabIDR := decimal.NewFromFloat(1_000_000_000) // IDR 1B
-	weightPct := decimal.NewFromFloat(30)          // 30%
+	weightPct := decimal.NewFromFloat(30)         // 30%
 	pd := PDLGDParams{
 		AssetClass: AssetClassGovtBond,
 		PDGood:     decimal.Zero,
@@ -186,7 +187,7 @@ func TestComputeBreakdownLine_GovtBond(t *testing.T) {
 func TestComputeBreakdownLine_CorpBond(t *testing.T) {
 	t.Parallel()
 	nabIDR := decimal.NewFromFloat(500_000_000) // IDR 500M
-	weightPct := decimal.NewFromFloat(40)        // 40%
+	weightPct := decimal.NewFromFloat(40)       // 40%
 	pd := PDLGDParams{
 		AssetClass: AssetClassCorpBond,
 		PDGood:     decimal.NewFromFloat(0.01), // 1%
@@ -373,13 +374,13 @@ func TestComputeReviewSignatureHash(t *testing.T) {
 		t.Errorf("expected SHA-256 hash length %d, got %d", sha256.Size, len(h1))
 	}
 	// Deterministic.
-	if string(h1) != string(h2) {
+	if !bytes.Equal(h1, h2) {
 		t.Error("hash should be deterministic for same inputs")
 	}
 
 	// Different comment → different hash.
 	h3 := ComputeReviewSignatureHash(reviewerID, compositionID, signedAt, "different comment")
-	if string(h1) == string(h3) {
+	if bytes.Equal(h1, h3) {
 		t.Error("hash should differ for different comment")
 	}
 }
@@ -396,13 +397,13 @@ func TestComputeApproveSignatureHash(t *testing.T) {
 	approveHash := ComputeApproveSignatureHash(approverID, compositionID, signedAt, comment)
 
 	// Review and approve hashes must differ (different action prefix).
-	if string(reviewHash) == string(approveHash) {
+	if bytes.Equal(reviewHash, approveHash) {
 		t.Error("REVIEW and APPROVE hashes should differ for same inputs")
 	}
 
 	// Deterministic.
 	h2 := ComputeApproveSignatureHash(approverID, compositionID, signedAt, comment)
-	if string(approveHash) != string(h2) {
+	if !bytes.Equal(approveHash, h2) {
 		t.Error("approve hash should be deterministic")
 	}
 }

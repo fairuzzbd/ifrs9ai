@@ -52,9 +52,9 @@ func (m *mockCompositionService) ListCompositions(_ context.Context, _ uuid.UUID
 	return nil, "", false, nil
 }
 
-// mockLookthroughService implements LookthroughServiceIface for handler tests.
+// mockLookthroughService implements ServiceIface for handler tests.
 type mockLookthroughService struct {
-	computeResult  *LookthroughResult
+	computeResult  *Result
 	computeErr     error
 	previewRows    []PreviewSummaryRow
 	previewHasMore bool
@@ -62,7 +62,7 @@ type mockLookthroughService struct {
 	previewErr     error
 }
 
-func (m *mockLookthroughService) Compute(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID, _ time.Time) (*LookthroughResult, error) {
+func (m *mockLookthroughService) Compute(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID, _ time.Time) (*Result, error) {
 	return m.computeResult, m.computeErr
 }
 func (m *mockLookthroughService) Preview(_ context.Context, _ uuid.UUID, _ time.Time, _ string, _ int) ([]PreviewSummaryRow, string, bool, error) {
@@ -75,7 +75,7 @@ type mockResultRepoForHandler struct {
 	getErr error
 }
 
-func (m *mockResultRepoForHandler) UpsertResult(_ context.Context, _ *sql.Tx, _ uuid.UUID, _ uuid.UUID, _ LookthroughResult, _ uuid.UUID, _ uuid.UUID, _ time.Time, _ string) error {
+func (m *mockResultRepoForHandler) UpsertResult(_ context.Context, _ *sql.Tx, _ uuid.UUID, _ uuid.UUID, _ Result, _ uuid.UUID, _ uuid.UUID, _ time.Time, _ string) error {
 	return nil
 }
 func (m *mockResultRepoForHandler) GetByInstrumenAndRun(_ context.Context, _ uuid.UUID, _ uuid.UUID) (*StoredLookthroughResult, error) {
@@ -83,23 +83,6 @@ func (m *mockResultRepoForHandler) GetByInstrumenAndRun(_ context.Context, _ uui
 }
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
-
-// buildRouter creates a test Gin engine with the handler registered.
-func buildRouter(h *Handler) *gin.Engine {
-	r := gin.New()
-	v1 := r.Group("/api/v1")
-
-	// Register all routes directly (no JWT middleware in test).
-	v1.POST("/ecl/lookthrough/composition", h.SubmitComposition)
-	v1.POST("/ecl/lookthrough/composition/:id/review", h.ReviewComposition)
-	v1.POST("/ecl/lookthrough/composition/:id/approve", h.ApproveComposition)
-	v1.POST("/ecl/lookthrough/composition/:id/reject", h.RejectComposition)
-	v1.POST("/ecl/lookthrough/compute", h.ComputeLookthrough)
-	v1.POST("/ecl/lookthrough/bulk-compute", h.BulkComputeLookthrough)
-	v1.GET("/ecl/lookthrough/preview", h.ListLookthroughPreview)
-	v1.GET("/ecl/lookthrough/result/:instrumenId/:runId", h.GetLookthroughResult)
-	return r
-}
 
 // withUser adds JWT-like claims into Gin context via middleware, matching the exact
 // keys that handler.go reads: user_id, roles, mfa_verified, permissions.
@@ -316,7 +299,7 @@ func TestHandler_ReviewComposition_SoDViolation_403(t *testing.T) {
 func TestHandler_ComputeLookthrough_FVTPLSkip_200(t *testing.T) {
 	t.Parallel()
 	ltSvc := &mockLookthroughService{
-		computeResult: &LookthroughResult{
+		computeResult: &Result{
 			InstrumenID:  uuid.New(),
 			TotalECLIDR:  decimal.Zero,
 			FVTPLSkipped: true,

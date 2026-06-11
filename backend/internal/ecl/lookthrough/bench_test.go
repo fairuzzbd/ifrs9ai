@@ -27,7 +27,7 @@ func BenchmarkBulkCompute500(b *testing.B) {
 		details: []FundCompositionDetail{
 			{AssetClass: AssetClassGovtBond, WeightPct: decimal.NewFromFloat(50)},
 			{AssetClass: AssetClassCorpBond, WeightPct: decimal.NewFromFloat(30)},
-			{AssetClass: AssetClassCash,     WeightPct: decimal.NewFromFloat(20)},
+			{AssetClass: AssetClassCash, WeightPct: decimal.NewFromFloat(20)},
 		},
 	}
 	pdlgdRepo := &mockPDLGDRepo{

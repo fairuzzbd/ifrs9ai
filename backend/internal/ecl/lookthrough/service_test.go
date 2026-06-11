@@ -35,8 +35,8 @@ type mockFundCompositionRepo struct {
 	composition *FundComposition
 	getByIDErr  error
 	// GetActive response
-	activeComp    *FundComposition
-	getActiveErr  error
+	activeComp   *FundComposition
+	getActiveErr error
 	// GetDetails response
 	details    []FundCompositionDetail
 	detailsErr error
@@ -44,16 +44,16 @@ type mockFundCompositionRepo struct {
 	createCalled bool
 	createErr    error
 	// UpdateWorkflowStatus tracking
-	updateCalled  bool
-	updateErr     error
+	updateCalled bool
+	updateErr    error
 	// SupersedeOld tracking
 	supersedeCalled bool
 	supersedeErr    error
 	// GetInstrumenTipeAndKlasifikasi response
-	tipe       string
+	tipe        string
 	klasifikasi string
-	pociFlag   bool
-	tipeErr    error
+	pociFlag    bool
+	tipeErr     error
 	// ListByInstrumen response
 	compositions []FundComposition
 	listErr      error
@@ -179,7 +179,7 @@ type mockResultRepo struct {
 	getErr    error
 }
 
-func (m *mockResultRepo) UpsertResult(_ context.Context, _ *sql.Tx, _ uuid.UUID, _ uuid.UUID, _ LookthroughResult, _ uuid.UUID, _ uuid.UUID, _ time.Time, _ string) error {
+func (m *mockResultRepo) UpsertResult(_ context.Context, _ *sql.Tx, _ uuid.UUID, _ uuid.UUID, _ Result, _ uuid.UUID, _ uuid.UUID, _ time.Time, _ string) error {
 	return m.upsertErr
 }
 
@@ -726,8 +726,8 @@ func newTestLookthroughService(
 	compRepo FundCompositionRepo,
 	pdlgdRepo PDLGDClassRepo,
 	paramRepo ScenarioParamRepo,
-	resultRepo LookthroughResultRepo,
-) *LookthroughService {
+	resultRepo ResultRepo,
+) *Service {
 	if pdlgdRepo == nil {
 		pdlgdRepo = &mockPDLGDRepo{params: map[AssetClass]PDLGDParams{}}
 	}
@@ -737,7 +737,7 @@ func newTestLookthroughService(
 	if resultRepo == nil {
 		resultRepo = &mockResultRepo{}
 	}
-	return &LookthroughService{
+	return &Service{
 		db:          nil,
 		instRepo:    instRepo,
 		compRepo:    compRepo,

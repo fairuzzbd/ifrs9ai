@@ -156,7 +156,7 @@ func TestDecodeCursor_MissingSeparator(t *testing.T) {
 // DEC-016: no float64 for money/rates.
 func TestMarshalBreakdown_NoFloat64(t *testing.T) {
 	t.Parallel()
-	line := LookthroughBreakdownLine{
+	line := BreakdownLine{
 		AssetClass:            AssetClassCorpBond,
 		WeightPct:             decimal.NewFromFloat(0.5),
 		NABPortionIDR:         decimal.NewFromFloat(5_000_000),
@@ -172,11 +172,8 @@ func TestMarshalBreakdown_NoFloat64(t *testing.T) {
 		ECLFLBadIDR:           decimal.NewFromFloat(135_000),
 		ECLWeightedIDR:        decimal.NewFromFloat(78_750),
 	}
-	breakdown := []LookthroughBreakdownLine{line}
-	jsonBytes, err := marshalBreakdown(breakdown)
-	if err != nil {
-		t.Fatalf("marshalBreakdown error: %v", err)
-	}
+	breakdown := []BreakdownLine{line}
+	jsonBytes := marshalBreakdown(breakdown)
 
 	// Verify the JSON is valid and decimal values are stored as quoted strings.
 	// The key invariant: numbers like 5000000 are wrapped in quotes ("5000000.0000")
@@ -358,10 +355,10 @@ func TestDBLookthroughResultRepo_UpsertResult(t *testing.T) {
 	tx, _ := db.Begin()
 
 	repo := NewDBLookthroughResultRepo(db)
-	result := LookthroughResult{
+	result := Result{
 		InstrumenID:  uuid.New(),
 		TotalECLIDR:  decimal.NewFromFloat(78_750),
-		Breakdown:    []LookthroughBreakdownLine{},
+		Breakdown:    []BreakdownLine{},
 		FVTPLSkipped: false,
 	}
 
@@ -449,4 +446,3 @@ func containsCheck(s, substr string) bool {
 	}
 	return false
 }
-

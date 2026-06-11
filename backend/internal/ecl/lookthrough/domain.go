@@ -338,14 +338,14 @@ func (s WorkflowStatus) CanTransitionTo(next WorkflowStatus) bool {
 type FundComposition struct {
 	ID                   uuid.UUID      `db:"id"`
 	InstrumenID          uuid.UUID      `db:"instrumen_id"`
-	EffectiveFrom        time.Time      `db:"effective_from"`   // DATE — business date
-	EffectiveTo          time.Time      `db:"effective_to"`     // DATE — '9999-12-31' means open-ended
+	EffectiveFrom        time.Time      `db:"effective_from"` // DATE — business date
+	EffectiveTo          time.Time      `db:"effective_to"`   // DATE — '9999-12-31' means open-ended
 	WorkflowStatus       WorkflowStatus `db:"workflow_status"`
 	MakerID              uuid.UUID      `db:"maker_id"`
 	ReviewerID           *uuid.UUID     `db:"reviewer_id"`
 	ApproverID           *uuid.UUID     `db:"approver_id"`
 	SignedAtReview       *time.Time     `db:"signed_at_review"`
-	SignatureHashReview   []byte         `db:"signature_hash_review"`
+	SignatureHashReview  []byte         `db:"signature_hash_review"`
 	CommentReview        *string        `db:"comment_review"`
 	SignedAtApprove      *time.Time     `db:"signed_at_approve"`
 	SignatureHashApprove []byte         `db:"signature_hash_approve"`
@@ -367,11 +367,11 @@ type FundComposition struct {
 // One row per asset class per composition version.
 // Precision: weight_pct NUMERIC(7,4) per DEC-016.
 type FundCompositionDetail struct {
-	ID                uuid.UUID      `db:"id"`
-	FundCompositionID uuid.UUID      `db:"fund_composition_id"`
-	AssetClass        AssetClass     `db:"asset_class"`
+	ID                uuid.UUID       `db:"id"`
+	FundCompositionID uuid.UUID       `db:"fund_composition_id"`
+	AssetClass        AssetClass      `db:"asset_class"`
 	WeightPct         decimal.Decimal `db:"weight_pct"` // NUMERIC(7,4), range [0,100]
-	Position          int            `db:"position"`
+	Position          int             `db:"position"`
 	// Audit columns:
 	CreatedAt  time.Time  `db:"created_at"`
 	CreatedBy  uuid.UUID  `db:"created_by"`
@@ -406,7 +406,7 @@ type InstrumenReksadanaRow struct {
 	KodeInstrumen     string
 	NamaInstrumen     string
 	TipeInstrumen     string
-	KlasifikasiPsak71 string // AC | FVOCI | FVTPL
+	KlasifikasiPsak71 string           // AC | FVOCI | FVTPL
 	NominalNABIDR     *decimal.Decimal // NUMERIC(20,4); NULL if feed not yet received
 	POCIFlag          bool
 	Status            string // AKTIF | TIDAK_AKTIF
@@ -449,7 +449,7 @@ type FLMultipliers struct {
 	Bad    decimal.Decimal // NUMERIC(10,8)
 }
 
-// LookthroughBreakdownLine is the per-asset-class ECL computation result.
+// BreakdownLine is the per-asset-class ECL computation result.
 // Stores ALL intermediate values for audit trail (FSD-APP-C §3, DEC-018).
 //
 // Formula per line (DEC-015):
@@ -465,7 +465,7 @@ type FLMultipliers struct {
 //
 // Precision: IDR fields NUMERIC(20,4) → StringFixed(4).
 // PD/LGD/FL/weight fields NUMERIC(10,8) → StringFixed(8).
-type LookthroughBreakdownLine struct {
+type BreakdownLine struct {
 	AssetClass AssetClass
 	// WeightPct is the portfolio weight (NUMERIC(7,4)).
 	WeightPct decimal.Decimal
@@ -489,7 +489,7 @@ type LookthroughBreakdownLine struct {
 	ECLWeightedIDR decimal.Decimal
 }
 
-// LookthroughResult is the complete output of a look-through ECL computation
+// Result is the complete output of a look-through ECL computation
 // for one Reksadana instrument. Returned by Compute, BulkCompute, and Preview.
 //
 // FundCompositionID is the UUID of the mst.fund_composition version used.
@@ -498,15 +498,15 @@ type LookthroughBreakdownLine struct {
 //
 // For FVTPL instruments: TotalECLIDR = 0, FVTPLSkipped = true.
 // For POCI instruments: error LOOKTHROUGH_POCI_DEFERRED is returned instead.
-type LookthroughResult struct {
-	InstrumenID         uuid.UUID
-	InstrumenNama       string
-	KlasifikasiPsak71   string
-	NABIDR              decimal.Decimal // NUMERIC(20,4)
-	FundCompositionID   uuid.UUID
+type Result struct {
+	InstrumenID                  uuid.UUID
+	InstrumenNama                string
+	KlasifikasiPsak71            string
+	NABIDR                       decimal.Decimal // NUMERIC(20,4)
+	FundCompositionID            uuid.UUID
 	FundCompositionEffectiveFrom time.Time
-	TotalECLIDR         decimal.Decimal // NUMERIC(20,4) = Σ breakdown ECLWeightedIDR
-	Breakdown           []LookthroughBreakdownLine
+	TotalECLIDR                  decimal.Decimal // NUMERIC(20,4) = Σ breakdown ECLWeightedIDR
+	Breakdown                    []BreakdownLine
 	// FVTPLSkipped is true when tipe=REKSADANA but klasifikasi=FVTPL (ECL=0 skip).
 	FVTPLSkipped bool
 	// Warning holds the FVTPL_SKIP_ECL note when FVTPLSkipped=true.
@@ -530,7 +530,7 @@ func ComputeBreakdownLine(
 	pd PDLGDParams,
 	fl FLMultipliers,
 	bobot ScenarioWeights,
-) LookthroughBreakdownLine {
+) BreakdownLine {
 	hundred := decimal.NewFromInt(100)
 
 	// Step 1: NAB portion (NUMERIC(20,4) — truncate to 4dp).
@@ -556,7 +556,7 @@ func ComputeBreakdownLine(
 		Add(eclFLBad.Mul(bobot.Bad)).
 		Truncate(4)
 
-	return LookthroughBreakdownLine{
+	return BreakdownLine{
 		AssetClass:            assetClass,
 		WeightPct:             weightPct,
 		NABPortionIDR:         nabPortion,
@@ -635,23 +635,23 @@ type WorkflowActionRequest struct {
 	ActorID         uuid.UUID
 	ActorRole       string
 	Comment         string
-	SignatureMethod  string // JWT_STANDARD | JWT_STEP_UP
+	SignatureMethod string // JWT_STANDARD | JWT_STEP_UP
 	TenantID        string
 }
 
 // PreviewSummaryRow is one row in the look-through preview DataTable.
 // Returned by LookthroughService.Preview (list view).
 type PreviewSummaryRow struct {
-	InstrumenID                 uuid.UUID
-	InstrumenNama               string
-	KlasifikasiPsak71           string
-	NABIDRStr                   string // StringFixed(4)
-	FundCompositionID           *uuid.UUID
+	InstrumenID                  uuid.UUID
+	InstrumenNama                string
+	KlasifikasiPsak71            string
+	NABIDRStr                    string // StringFixed(4)
+	FundCompositionID            *uuid.UUID
 	FundCompositionEffectiveFrom *time.Time
-	HasComposition              bool
-	TotalECLEstimateIDRStr      *string // StringFixed(4); nil if no composition or NAB missing
-	IsPreview                   bool
-	Warnings                    []PreviewWarning
+	HasComposition               bool
+	TotalECLEstimateIDRStr       *string // StringFixed(4); nil if no composition or NAB missing
+	IsPreview                    bool
+	Warnings                     []PreviewWarning
 }
 
 // PreviewWarning is a non-blocking warning in a preview row.
@@ -797,7 +797,7 @@ type MetricsRecorder interface {
 // noopMetrics is a no-op MetricsRecorder used when no Prometheus registry is available.
 type noopMetrics struct{}
 
-func (noopMetrics) RecordBulkDuration(_ float64)  {}
+func (noopMetrics) RecordBulkDuration(_ float64)    {}
 func (noopMetrics) RecordBulkInstrumentCount(_ int) {}
 func (noopMetrics) RecordBulkErrors(_ int)          {}
 

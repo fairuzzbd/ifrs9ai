@@ -125,7 +125,8 @@ func (r *DBFundCompositionRepo) Create(ctx context.Context, tx *sql.Tx, header *
 	if err != nil {
 		return fmt.Errorf("fund_composition insert: %w", err)
 	}
-	for _, d := range details {
+	for i := range details {
+		d := &details[i]
 		_, err := tx.ExecContext(ctx, createFundCompositionDetailSQL,
 			d.ID, d.FundCompositionID,
 			string(d.AssetClass), d.WeightPct.StringFixed(4), d.Position,
@@ -340,7 +341,10 @@ func (r *DBFundCompositionRepo) SupersedeOld(ctx context.Context, tx *sql.Tx, ol
 	if err != nil {
 		return fmt.Errorf("supersede fund_composition id=%s: %w", oldCompositionID, err)
 	}
-	n, _ := res.RowsAffected()
+	n, raErr := res.RowsAffected()
+	if raErr != nil {
+		return fmt.Errorf("supersede fund_composition id=%s rows affected: %w", oldCompositionID, raErr)
+	}
 	if n == 0 {
 		return fmt.Errorf("supersede fund_composition id=%s: 0 rows affected — composition may not be APPROVED_ACTIVE", oldCompositionID)
 	}
@@ -583,7 +587,7 @@ func (r *DBPDLGDClassRepo) BulkGetPDLGDForAssetClasses(ctx context.Context, asse
 
 	// lib/pq supports string arrays as $1::text[].
 	rows, err := r.db.QueryContext(ctx, pdLGDBulkSQL,
-		"{"+ strings.Join(nonSovereign, ",") +"}",
+		"{"+strings.Join(nonSovereign, ",")+"}",
 		evaluationDate, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("pd_lgd bulk query: %w", err)
@@ -744,13 +748,13 @@ func (r *DBScenarioParamRepo) GetFLMultipliers(ctx context.Context, periodeID uu
 
 // ─── LookthroughResultRepo ────────────────────────────────────────────────────
 
-// LookthroughResultRepo persists look-through ECL results to ecl.lookthrough_underlying.
+// ResultRepo persists look-through ECL results to ecl.lookthrough_underlying.
 // No hard delete (ecl schema rule DEC-018).
-type LookthroughResultRepo interface {
+type ResultRepo interface {
 	// UpsertResult inserts or updates the ecl.lookthrough_underlying row for (instrumen_id, run_id).
 	// tx must be an open transaction (audit-in-tx DEC-018).
 	UpsertResult(ctx context.Context, tx *sql.Tx, instrumenID, runID uuid.UUID,
-		result LookthroughResult, compositionID uuid.UUID, periodeID uuid.UUID,
+		result Result, compositionID uuid.UUID, periodeID uuid.UUID,
 		evaluationDate time.Time, tenantID string) error
 
 	// GetByInstrumenAndRun fetches the stored result for (instrumen_id, run_id).
@@ -759,19 +763,19 @@ type LookthroughResultRepo interface {
 
 // StoredLookthroughResult is the projection of ecl.lookthrough_underlying for read endpoints.
 type StoredLookthroughResult struct {
-	ID                  uuid.UUID
-	InstrumenID         uuid.UUID
-	RunID               uuid.UUID
-	CompositionID       uuid.UUID
-	PeriodeID           uuid.UUID
-	EvaluationDate      time.Time
-	NABIDR              decimal.Decimal
-	TotalECLIDR         decimal.Decimal
-	BreakdownJSONB      []byte // raw JSONB from DB — decoded by caller if needed
-	FVTPLSkipped        bool
-	Warning             string
-	CreatedAt           time.Time
-	TenantID            string
+	ID             uuid.UUID
+	InstrumenID    uuid.UUID
+	RunID          uuid.UUID
+	CompositionID  uuid.UUID
+	PeriodeID      uuid.UUID
+	EvaluationDate time.Time
+	NABIDR         decimal.Decimal
+	TotalECLIDR    decimal.Decimal
+	BreakdownJSONB []byte // raw JSONB from DB — decoded by caller if needed
+	FVTPLSkipped   bool
+	Warning        string
+	CreatedAt      time.Time
+	TenantID       string
 }
 
 // DBLookthroughResultRepo implements LookthroughResultRepo.
@@ -812,15 +816,12 @@ SET fund_composition_id = EXCLUDED.fund_composition_id,
 // UpsertResult inserts or updates the look-through result row.
 func (r *DBLookthroughResultRepo) UpsertResult(ctx context.Context, tx *sql.Tx,
 	instrumenID, runID uuid.UUID,
-	result LookthroughResult, compositionID uuid.UUID, periodeID uuid.UUID,
+	result Result, compositionID uuid.UUID, periodeID uuid.UUID,
 	evaluationDate time.Time, tenantID string,
 ) error {
 	id := uuid.New()
-	breakdownJSON, err := marshalBreakdown(result.Breakdown)
-	if err != nil {
-		return fmt.Errorf("breakdown marshal: %w", err)
-	}
-	_, err = tx.ExecContext(ctx, upsertLookthroughResultSQL,
+	breakdownJSON := marshalBreakdown(result.Breakdown)
+	_, err := tx.ExecContext(ctx, upsertLookthroughResultSQL,
 		id, instrumenID, runID, compositionID, periodeID,
 		evaluationDate,
 		result.NABIDR.StringFixed(4),
@@ -973,15 +974,16 @@ func isAllowedSortCol(col string, allowed []string) bool {
 
 // ─── JSON helpers ─────────────────────────────────────────────────────────────
 
-// marshalBreakdown serializes []LookthroughBreakdownLine to JSON for JSONB storage.
+// marshalBreakdown serializes []BreakdownLine to JSON for JSONB storage.
 // Uses string representation of Decimal to preserve precision (not float64).
-func marshalBreakdown(lines []LookthroughBreakdownLine) ([]byte, error) {
+func marshalBreakdown(lines []BreakdownLine) []byte {
 	if len(lines) == 0 {
-		return []byte("[]"), nil
+		return []byte("[]")
 	}
 	var sb strings.Builder
 	sb.WriteString("[")
-	for i, l := range lines {
+	for i := range lines {
+		l := &lines[i]
 		if i > 0 {
 			sb.WriteString(",")
 		}
@@ -1008,5 +1010,5 @@ func marshalBreakdown(lines []LookthroughBreakdownLine) ([]byte, error) {
 		))
 	}
 	sb.WriteString("]")
-	return []byte(sb.String()), nil
+	return []byte(sb.String())
 }
