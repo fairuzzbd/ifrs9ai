@@ -56,7 +56,7 @@ type CompositionServiceIface interface {
 // ServiceIface is the subset of *LookthroughService that Handler uses.
 // Tests inject mockLookthroughService via this interface.
 type ServiceIface interface {
-	Compute(ctx context.Context, instrumenID, runID, periodeID uuid.UUID, evaluationDate time.Time) (*Result, error)
+	Compute(ctx context.Context, instrumenID, runID, periodeID uuid.UUID, evaluationDate time.Time, actorID uuid.UUID) (*Result, error)
 	Preview(ctx context.Context, periodeID uuid.UUID, evaluationDate time.Time, cursor string, limit int) ([]PreviewSummaryRow, string, bool, error)
 }
 
@@ -78,13 +78,12 @@ func NewHandler(composition CompositionServiceIface, lookthrough ServiceIface, r
 
 // ─── Auth helpers ─────────────────────────────────────────────────────────────
 
-// hasPermission checks JWT permissions claim; writes 403 if missing.
-func hasPermission(c *gin.Context, perm string) bool {
+// checkPermission returns true if the request JWT holds the given permission.
+// It does NOT write any HTTP response — callers handle the 403 themselves.
+// Use this when combining multiple permissions with OR logic (e.g. RejectComposition).
+func checkPermission(c *gin.Context, perm string) bool {
 	permsRaw, exists := c.Get("permissions")
 	if !exists {
-		response.ErrorWithStatus(c, http.StatusForbidden,
-			domainerrors.CodeForbidden,
-			fmt.Sprintf("Permission '%s' diperlukan.", perm), nil)
 		return false
 	}
 	switch v := permsRaw.(type) {
@@ -100,6 +99,15 @@ func hasPermission(c *gin.Context, perm string) bool {
 				return true
 			}
 		}
+	}
+	return false
+}
+
+// hasPermission checks JWT permissions claim; writes 403 if the permission is absent.
+// Use for single-permission gates. For OR-of-multiple use checkPermission.
+func hasPermission(c *gin.Context, perm string) bool {
+	if checkPermission(c, perm) {
+		return true
 	}
 	response.ErrorWithStatus(c, http.StatusForbidden,
 		domainerrors.CodeForbidden,
@@ -623,7 +631,16 @@ func (h *Handler) ApproveComposition(c *gin.Context) {
 // AC: APP-C-LKT-002-AC19..22.
 func (h *Handler) RejectComposition(c *gin.Context) {
 	// Either reviewer or approver may reject.
-	if !hasPermission(c, PermFundCompositionReview) && !hasPermission(c, PermFundCompositionApprove) {
+	// Use checkPermission (no response write) to avoid double-403 when both fail.
+	reviewOK := checkPermission(c, PermFundCompositionReview)
+	approveOK := checkPermission(c, PermFundCompositionApprove)
+	if !reviewOK && !approveOK {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"error": gin.H{
+				"code":    domainerrors.CodeForbidden,
+				"message": fmt.Sprintf("Permission '%s' atau '%s' diperlukan. Role Anda tidak memiliki akses.", PermFundCompositionReview, PermFundCompositionApprove),
+			},
+		})
 		return
 	}
 	actorID, ok := requireUserID(c)
@@ -777,7 +794,12 @@ func (h *Handler) ComputeLookthrough(c *gin.Context) {
 		return
 	}
 
-	result, svcErr := h.lookthrough.Compute(c.Request.Context(), instrumenID, runID, periodeID, evalDate)
+	actorID, ok := requireUserID(c)
+	if !ok {
+		return
+	}
+
+	result, svcErr := h.lookthrough.Compute(c.Request.Context(), instrumenID, runID, periodeID, evalDate, actorID)
 	if svcErr != nil {
 		handleDomainError(c, svcErr)
 		return
