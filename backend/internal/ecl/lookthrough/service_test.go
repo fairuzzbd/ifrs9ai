@@ -48,8 +48,8 @@ type mockFundCompositionRepo struct {
 	updateCalled bool
 	updateErr    error
 	// SupersedeOld tracking
-	supersedeCalled    bool
-	supersedeErr       error
+	supersedeCalled     bool
+	supersedeErr        error
 	supersedeDateCalled time.Time // captures the supersedeDate argument for assertion
 	// GetInstrumenTipeAndKlasifikasi response
 	tipe        string
