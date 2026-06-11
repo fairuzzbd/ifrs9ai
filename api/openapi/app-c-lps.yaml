@@ -1,0 +1,1816 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-C LPS Aggregator (P4-M3)
+  version: "1.0.0"
+  description: |
+    LPS (Lembaga Penjamin Simpanan) Aggregator — menghitung covered/excess portion
+    per pasangan (nasabah, bank) berdasarkan cap IDR 2 miliar (DEC-014).
+    Scope Phase 4: DEPOSITO only. CASH defer Phase 5.
+    ECL hanya dihitung atas excess portion; covered portion → ECL = 0 (DEC-010).
+
+    Story set: APP-C-LPS-001..005
+    FSD: FSD-APP-C-ECL-EIR-v1.0.docx §3 (LPS Aggregator), §4 (EAD pre-processing)
+    Decisions: DEC-010, DEC-014, DEC-016, DEC-017, DEC-021, DEC-022
+
+    ## Permission model
+    - lps_aggregator.compute         — System worker (Asynq, internal call Go-to-Go)
+    - lps_aggregator.preview         — ROLE-RISK, ROLE-AUDIT
+    - lps_aggregator.override        — ROLE-RISK (propose exclusion)
+    - lps_aggregator.override.approve — ROLE-ALCO (4-eyes approver)
+    - lps_aggregator.override.reject  — ROLE-RISK, ROLE-ALCO
+
+    ## Scope Rules
+    - tipe_instrumen = 'DEPOSITO' only (Phase 4)
+    - status = 'AKTIF', is_deleted = FALSE, workflow_status = 'APPROVED'
+    - Counterparty bank: eligible_lps_flag = TRUE AND tipe = 'BANK'
+    - Klasifikasi yang masuk: AC, FVOCI_DEBT only (FVTPL skip)
+    - Cap berlaku per pasangan (nasabah, bank) — independen antar bank
+    - Konversi FCY → IDR: kurs BI JISDOR tanggal evaluationDate
+
+    ## Allocation order (FIFO)
+    Covered portion dialokasikan urut tanggal_penempatan ASC (terlama lebih dulu).
+    Tiebreak: instrumen_id ASC (deterministic).
+
+    ## Audit policy
+    - Single Aggregate: NOT audited (pure read, stateless)
+    - Bulk Aggregate: audited ONCE summary saat job complete
+    - Override submit/approve/reject: AUDITED (mutations, in-transaction)
+    - Preview: LPS_AGGREGATOR.PREVIEW per call
+    - Export: LPS_AGGREGATOR.EXPORT per call
+
+    ## Performance SLA
+    - Single Aggregate:  ≤ 100ms P95
+    - Bulk 5000 instrumen: ≤ 1s P95
+
+    ## Workflow override: 4-eyes (lighter than M1 6-eyes)
+    ROLE-RISK (maker) → ROLE-ALCO (approver)
+    SoD: maker_id ≠ approver_id (enforced server-side)
+    MFA: ROLE-ALCO wajib MFA (DEC-026) — NO step-up MFA required (OQ-M3-5 resolved)
+
+servers:
+  - url: /api/v1
+    description: BLIPS REST API v1
+
+tags:
+  - name: lps-aggregate
+    description: |
+      LPS Aggregation — single pair dan bulk compute.
+      Endpoint POST adalah HTTP facade untuk internal service (callable via API untuk testing/preview).
+  - name: lps-preview
+    description: Preview Coverage Utilization — DataTable pattern (sort+page+filter+export)
+  - name: lps-override
+    description: LPS Exclusion Override — 4-eyes workflow (ROLE-RISK → ROLE-ALCO)
+
+paths:
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/lps/aggregate — single nasabah+bank aggregation
+  # ---------------------------------------------------------------------------
+  /ecl/lps/aggregate:
+    post:
+      operationId: aggregateLpsSingle
+      summary: Hitung LPS coverage untuk satu pasangan (nasabah, bank) pada tanggal evaluasi
+      description: |
+        Menghitung total_exposure, covered, excess, dan instrumen breakdown secara stateless
+        (tidak ada data yang dipersist — hasil hanya dikembalikan ke caller).
+
+        Dalam flow ECL penuh (P4-M7), method ini dipanggil Go-to-Go via LPSAggregatorService.
+        Endpoint HTTP ini tersedia untuk verifikasi manual oleh ROLE-RISK.
+
+        Permission: lps_aggregator.compute
+        Roles: System worker, ROLE-RISK (manual check)
+
+        Validasi:
+        - nasabahId harus exist di mst.counterparty
+        - bankId harus exist di mst.counterparty dengan tipe='BANK' AND eligible_lps_flag=TRUE
+        - evaluationDate harus DATE format YYYY-MM-DD
+        - Harus ada mst.lps_coverage APPROVED yang berlaku pada evaluationDate
+        - Instrumen yang masuk scope: tipe_instrumen='DEPOSITO', status='AKTIF', klasifikasi IN (AC, FVOCI_DEBT)
+        - Jika ada instrumen FCY: kurs BI JISDOR harus tersedia untuk evaluationDate
+
+        Alokasi covered: FIFO by tanggal_penempatan ASC, tiebreak instrumen_id ASC.
+        Instrumen dengan override aktif di ecl.lps_exclusion_override: di-exclude dari pool.
+
+        Idempotency-Key wajib (mutation-style endpoint per konvensi POST).
+        Audit: tidak ditulis ke aud.audit_log (pure read — audit ditulis oleh pemanggil M7/M8).
+      tags: [lps-aggregate]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LpsAggregateRequest"
+            example:
+              nasabahId: "550e8400-e29b-41d4-a716-000000000001"
+              bankId: "550e8400-e29b-41d4-a716-000000000010"
+              evaluationDate: "2026-06-30"
+      responses:
+        "200":
+          description: Aggregasi berhasil — breakdown per instrumen tersedia
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/LpsAggregateResult"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  nasabahId: "550e8400-e29b-41d4-a716-000000000001"
+                  nasabahNama: "Asuransi Tugu Reasuransi"
+                  bankId: "550e8400-e29b-41d4-a716-000000000010"
+                  bankNama: "Bank BCA"
+                  evaluationDate: "2026-06-30"
+                  lpsCoverageParamId: "550e8400-e29b-41d4-a716-999999999999"
+                  lpsCapIdr: 2000000000.0000
+                  totalExposureIdr: 2500000000.0000
+                  coveredIdr: 2000000000.0000
+                  excessIdr: 500000000.0000
+                  jumlahInstrumen: 2
+                  instrumenBreakdown:
+                    - instrumenId: "550e8400-e29b-41d4-a716-000000000101"
+                      kodeInstrumen: "DEPOSITO-001"
+                      eadIdr: 1500000000.0000
+                      fifoRank: 1
+                      allocatedToCoveredIdr: 1500000000.0000
+                      allocatedToExcessIdr: 0.0000
+                      lpsExcluded: false
+                      lpsFullCovered: true
+                    - instrumenId: "550e8400-e29b-41d4-a716-000000000102"
+                      kodeInstrumen: "DEPOSITO-002"
+                      eadIdr: 1000000000.0000
+                      fifoRank: 2
+                      allocatedToCoveredIdr: 500000000.0000
+                      allocatedToExcessIdr: 500000000.0000
+                      lpsExcluded: false
+                      lpsFullCovered: false
+                  warnings: []
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: nasabahId atau bankId tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: NOT_FOUND
+                  message: "bankId tidak ditemukan atau bukan bank yang eligible LPS"
+                  details:
+                    - field: "body.bankId"
+                      rule: "exists_and_eligible_lps"
+                      message: "counterparty harus tipe='BANK' AND eligible_lps_flag=TRUE"
+                  traceId: "01HXY..."
+        "422":
+          description: Validasi domain gagal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                noActiveParam:
+                  summary: Tidak ada LPS coverage param APPROVED
+                  value:
+                    error:
+                      code: LPS_COVERAGE_NO_ACTIVE_PARAM
+                      message: "Tidak ditemukan LPS coverage parameter yang APPROVED untuk tanggal 2026-06-30"
+                      details:
+                        - field: "body.evaluationDate"
+                          rule: "lps_coverage_active_required"
+                          message: "mst.lps_coverage tidak punya record APPROVED berlaku pada tanggal ini"
+                      traceId: "01HXY..."
+                fxMissing:
+                  summary: Kurs JISDOR tidak tersedia
+                  value:
+                    error:
+                      code: FX_RATE_NOT_FOUND
+                      message: "Kurs BI JISDOR untuk USD tidak tersedia pada 2026-06-30. Gunakan tanggal hari kerja terakhir yang tersedia."
+                      details:
+                        - field: "body.evaluationDate"
+                          rule: "fx_rate_required_for_fcy_instruments"
+                          message: "Instrumen FCY ditemukan namun kurs tidak tersedia"
+                      traceId: "01HXY..."
+                wrongType:
+                  summary: Instrumen bukan DEPOSITO
+                  value:
+                    error:
+                      code: LPS_AGGREGATE_INSTRUMEN_NOT_DEPOSITO
+                      message: "Instrumen INST-0099 bukan DEPOSITO — LPS Aggregator hanya berlaku untuk tipe DEPOSITO"
+                      details:
+                        - field: "body.nasabahId"
+                          rule: "deposito_scope_only"
+                          message: "tipe_instrumen harus DEPOSITO"
+                      traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/lps/aggregate/bulk — bulk all (nasabah, bank) pairs for a periodeID
+  # ---------------------------------------------------------------------------
+  /ecl/lps/aggregate/bulk:
+    post:
+      operationId: aggregateLpsBulk
+      summary: Bulk LPS aggregation untuk semua pasangan aktif dalam satu periodeID (Asynq job)
+      description: |
+        Trigger Asynq job yang menjalankan BulkAggregate() untuk semua pasangan
+        (nasabah, bank) aktif dalam periodeID — menghindari N+1 query per instrumen.
+
+        Dipanggil oleh P4-M7 ECL engine sebelum loop per-instrumen.
+        Juga dapat dipanggil manual oleh ROLE-RISK untuk preview/verifikasi.
+
+        Performance SLA: ≤ 1 detik P95 untuk 5.000 instrumen DEPOSITO.
+        Implementasi menggunakan batch JOIN query (single atau beberapa query batch),
+        BUKAN N+1 per instrumen.
+
+        Hasil bulk aggregate TIDAK dipersist sebagai tabel terpisah —
+        hasilnya di-feed ke M7 ECL engine secara in-memory.
+
+        Permission: lps_aggregator.compute
+        Roles: System worker, ROLE-RISK (manual trigger)
+
+        Validasi:
+        - periodeId harus exist di mst.periode_buku
+        - Periode buku tidak boleh HARD_CLOSED (kecuali re-run oleh ROLE-IT-ADMIN)
+        - Harus ada mst.lps_coverage APPROVED pada evaluationDate
+        - Semua kurs FCY yang dibutuhkan harus tersedia (fail-fast jika ada yang missing)
+
+        Error handling: fail-fast jika kurs missing (tidak partial-complete).
+        Error detail mencantumkan daftar instrumen_id terdampak (max 10 preview, total count).
+
+        Idempotency-Key wajib.
+        Audit: LPS_AGGREGATOR.BULK_COMPLETE ditulis satu kali saat job selesai.
+      tags: [lps-aggregate]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LpsAggregateBulkRequest"
+            example:
+              periodeId: "550e8400-e29b-41d4-a716-999999999000"
+              evaluationDate: "2026-06-30"
+      responses:
+        "202":
+          description: |
+            Job diterima. Client subscribe SSE di streamUrl untuk progress.
+            Hasil tersedia via GET /api/v1/jobs/{jobId} saat status = completed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/JobAcceptedResponse"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  jobId: "01JXYZ-LPS-BULK-001"
+                  type: "LPS_AGGREGATE_BULK"
+                  statusUrl: "/api/v1/jobs/01JXYZ-LPS-BULK-001"
+                  streamUrl: "/api/v1/jobs/01JXYZ-LPS-BULK-001/stream"
+                  estimatedDurationSeconds: 1
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: periodeId tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: NOT_FOUND
+                  message: "Periode buku tidak ditemukan"
+                  details:
+                    - field: "body.periodeId"
+                      rule: "exists"
+                      message: "periodeId tidak ada di mst.periode_buku"
+                  traceId: "01HXY..."
+        "413":
+          description: Scope terlalu besar (melebihi batas sistem)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: LPS_AGGREGATE_BULK_TOO_LARGE
+                  message: "Jumlah instrumen DEPOSITO dalam scope melebihi 50.000. Hubungi IT-Admin untuk mempartisi."
+                  details: []
+                  traceId: "01HXY..."
+        "422":
+          description: Validasi domain gagal (kurs missing, no active param)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                noActiveParam:
+                  summary: Tidak ada LPS coverage param APPROVED
+                  value:
+                    error:
+                      code: LPS_COVERAGE_NO_ACTIVE_PARAM
+                      message: "Tidak ditemukan LPS coverage parameter yang APPROVED untuk tanggal 2026-06-30"
+                      details: []
+                      traceId: "01HXY..."
+                fxMissing:
+                  summary: Kurs JISDOR partial missing
+                  value:
+                    error:
+                      code: FX_RATE_NOT_FOUND
+                      message: "Kurs BI JISDOR untuk USD tidak tersedia pada 2026-06-30. 10 instrumen DEPOSITO USD tidak dapat di-proses."
+                      details:
+                        - field: "evaluationDate"
+                          rule: "fx_rate_required_for_fcy_instruments"
+                          message: "Total 10 instrumen terdampak. Preview: [INST-0101, INST-0102, ...]"
+                      traceId: "01HXY..."
+        "423":
+          $ref: "#/components/responses/PeriodeClosed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/lps/preview — DataTable: coverage utilization per (nasabah, bank) pair
+  # ---------------------------------------------------------------------------
+  /ecl/lps/preview:
+    get:
+      operationId: listLpsPreview
+      summary: Preview LPS coverage utilization — DataTable (sort+page+filter+export)
+      description: |
+        Menghitung dan menampilkan coverage utilization per pasangan (nasabah, bank)
+        secara on-the-fly berdasarkan instrumen aktif dan evaluationDate.
+
+        Permission: lps_aggregator.preview
+        Roles: ROLE-RISK, ROLE-AUDIT
+
+        Allowed sort columns: nasabah_nama, bank_nama, total_exposure_idr,
+                              covered_idr, excess_idr, covered_pct, jumlah_instrumen
+        Default sort: excess_idr DESC (paling berisiko di atas)
+
+        Allowed filter:
+        - filter[bank_id]: UUID bank counterparty
+        - filter[nasabah_id]: UUID nasabah counterparty
+        - filter[excess_idr]: operator gte/lte/gt/lt/between
+        - filter[covered_pct]: operator gte/lte/gt/lt/between
+        - q: text search di nasabah_nama + bank_nama
+
+        Export:
+        - Dataset < 10k pair: inline (synchronous). Format: csv, xlsx.
+        - Dataset >= 10k pair: async (202 + jobId).
+        - Gunakan endpoint /ecl/lps/preview/export untuk export.
+        - Audit event: LPS_AGGREGATOR.EXPORT setiap export.
+
+        Audit: LPS_AGGREGATOR.PREVIEW ditulis ke aud.audit_log per call.
+
+        Error: evaluationDate wajib; jika FCY instrumen ada namun kurs missing → 422.
+      tags: [lps-preview]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: evaluation_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          description: "Tanggal evaluasi. Format: YYYY-MM-DD. Wajib."
+          example: "2026-06-30"
+        - $ref: "#/components/parameters/cursor"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/sortParam"
+        - $ref: "#/components/parameters/searchParam"
+        - name: "filter[bank_id]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Filter by bank counterparty UUID
+        - name: "filter[nasabah_id]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Filter by nasabah counterparty UUID
+        - name: "filter[excess_idr]"
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Format: gte:500000000 atau between:0,1000000000"
+        - name: "filter[covered_pct]"
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Format: lt:100 (kurang dari 100% covered)"
+      responses:
+        "200":
+          description: List coverage utilization per pasangan (nasabah, bank)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LpsPreviewListResponse"
+              example:
+                data:
+                  - nasabahId: "550e8400-e29b-41d4-a716-000000000001"
+                    nasabahNama: "Asuransi Tugu Reasuransi"
+                    bankId: "550e8400-e29b-41d4-a716-000000000010"
+                    bankNama: "Bank BCA"
+                    lpsCapIdr: 2000000000.0000
+                    totalExposureIdr: 2500000000.0000
+                    coveredIdr: 2000000000.0000
+                    excessIdr: 500000000.0000
+                    coveredPct: 80.00
+                    jumlahInstrumen: 2
+                    jumlahExcluded: 0
+                    evaluationDate: "2026-06-30"
+                pagination:
+                  nextCursor: "eyJleGNlc3NJZHIiOjUwMDAwMDAwMH0="
+                  hasMore: true
+                  totalEstimate: 120
+                  limit: 50
+                appliedSort:
+                  - col: "excess_idr"
+                    dir: "desc"
+                appliedFilter:
+                  bank_id: "550e8400-e29b-41d4-a716-000000000010"
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: evaluationDate missing, kurs tidak tersedia, atau tidak ada LPS param
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                fxMissing:
+                  summary: Kurs JISDOR tidak tersedia untuk FCY instruments
+                  value:
+                    error:
+                      code: FX_RATE_NOT_FOUND
+                      message: "Kurs BI JISDOR untuk USD tidak tersedia pada 2026-06-28. Gunakan tanggal hari kerja terakhir yang tersedia."
+                      details:
+                        - field: "evaluation_date"
+                          rule: "fx_rate_required_for_fcy_instruments"
+                          message: "evaluationDate adalah hari non-kerja atau kurs belum di-upload"
+                      traceId: "01HXY..."
+                noActiveParam:
+                  summary: Tidak ada LPS coverage param aktif
+                  value:
+                    error:
+                      code: LPS_COVERAGE_NO_ACTIVE_PARAM
+                      message: "Tidak ditemukan LPS coverage parameter yang APPROVED untuk tanggal 2026-06-30"
+                      details: []
+                      traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/lps/preview/export — export CSV/XLSX
+  # ---------------------------------------------------------------------------
+  /ecl/lps/preview/export:
+    get:
+      operationId: exportLpsPreview
+      summary: Export LPS preview ke CSV atau XLSX (inline < 10k, async >= 10k)
+      description: |
+        Export hasil preview coverage utilization dengan filter + sort aktif.
+
+        Permission: lps_aggregator.preview
+        Roles: ROLE-RISK, ROLE-AUDIT
+
+        Inline export (< 10k pair):
+        - Sinkronus, file di-stream langsung.
+        - Content-Disposition: attachment; filename="lps-preview-{YYYYMMDD}.{ext}"
+        - Header X-Total-Rows untuk validasi client-side.
+        - CSV: UTF-8 with BOM, delimiter koma, line ending CRLF.
+        - XLSX: header bold + freeze baris pertama, money #,##0.0000, date YYYY-MM-DD.
+        - Header row Bahasa Indonesia: "Nasabah", "Bank", "Total Exposure (IDR)", "Cap LPS (IDR)",
+          "Covered (IDR)", "Excess (IDR)", "Covered %", "Jumlah Instrumen".
+        - Footer row: timestamp export + filter aktif.
+
+        Async export (>= 10k pair):
+        - 202 Accepted + jobId.
+        - Worker stream ke MinIO exports/{tenant}/{user}/{yyyy/mm/dd}/{jobId}.{ext}.
+        - Notify download link (signed URL, TTL 24 jam) via job completion.
+
+        Audit: LPS_AGGREGATOR.EXPORT ditulis ke aud.audit_log,
+               after_jsonb = {format, row_count, evaluation_date, filters}.
+      tags: [lps-preview]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: format
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [csv, xlsx]
+          description: Format file output
+        - name: evaluation_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          description: Tanggal evaluasi (wajib, sama dengan preview filter)
+          example: "2026-06-30"
+        - $ref: "#/components/parameters/sortParam"
+        - $ref: "#/components/parameters/searchParam"
+        - name: "filter[bank_id]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: "filter[nasabah_id]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: "filter[excess_idr]"
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: "filter[covered_pct]"
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: File CSV atau XLSX (inline, dataset < 10k)
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              example: 'attachment; filename="lps-preview-20260630.xlsx"'
+            X-Total-Rows:
+              schema:
+                type: integer
+              description: Jumlah baris data (tidak termasuk header)
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+                description: "UTF-8 with BOM, hanya saat format=csv"
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+                description: "XLSX, hanya saat format=xlsx"
+        "202":
+          description: |
+            Async export job diterima (dataset >= 10k pair).
+            Download link tersedia saat job completed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/JobAcceptedResponse"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: evaluationDate wajib, kurs missing, atau tidak ada LPS param
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/lps/override/submit — ROLE-RISK propose exclusion
+  # ---------------------------------------------------------------------------
+  /ecl/lps/override/submit:
+    post:
+      operationId: submitLpsExclusionOverride
+      summary: ROLE-RISK mengajukan proposal exclusion instrumen dari LPS pool
+      description: |
+        Membuat record ecl.lps_exclusion_override dengan status PENDING_APPROVAL.
+        Workflow: ROLE-RISK (maker) → ROLE-ALCO (approver) — 4-eyes, tanpa Reviewer terpisah.
+
+        Permission: lps_aggregator.override
+        Role: ROLE-RISK
+
+        Validasi:
+        - instrumenId harus exist di mst.instrumen dengan tipe_instrumen='DEPOSITO' AND status='AKTIF'
+        - alasan minimal 30 karakter (constraint chk_lps_override_alasan_min_len)
+        - validFromPeriodeId harus exist di mst.periode_buku
+        - validToPeriodeId (opsional): jika diisi, harus ≥ validFromPeriodeId (tanggal mulai ≤ tanggal akhir)
+        - Tidak boleh ada exclusion override APPROVED atau PENDING_APPROVAL aktif untuk instrumen
+          yang sama pada periode yang overlapping (CONFLICT 409)
+        - instrumenId: instrumen harus berasal dari bank yang eligible_lps_flag=TRUE
+          (jika bank tidak eligible, instrumen sudah di-exclude by default — tidak perlu override)
+
+        SoD: maker_id = JWT sub. approver_id wajib berbeda (enforced saat approve).
+
+        Idempotency-Key wajib.
+        Audit: LPS_EXCLUSION.PROPOSE ditulis ke aud.audit_log in-transaction.
+        Notifikasi: ke semua ROLE-ALCO aktif — "Proposal LPS exclusion menunggu persetujuan".
+      tags: [lps-override]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LpsOverrideSubmitRequest"
+            example:
+              instrumenId: "550e8400-e29b-41d4-a716-000000000107"
+              alasan: "Interbank placement bilateral perjanjian khusus — tidak eligible LPS per konfirmasi legal divisi hukum ref: LEG-2026-042"
+              effectiveFrom: "2026-07-01"
+              effectiveTo: null
+      responses:
+        "201":
+          description: Proposal exclusion berhasil dibuat, menunggu persetujuan ROLE-ALCO
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/LpsExclusionOverride"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  id: "550e8400-e29b-41d4-a716-000000000201"
+                  instrumenId: "550e8400-e29b-41d4-a716-000000000107"
+                  kodeInstrumen: "DEPOSITO-007"
+                  alasan: "Interbank placement bilateral perjanjian khusus..."
+                  effectiveFrom: "2026-07-01"
+                  effectiveTo: null
+                  workflowStatus: "PENDING_APPROVAL"
+                  makerId: "550e8400-e29b-41d4-a716-000000000301"
+                  makerNama: "Andi Pratama"
+                  approverId: null
+                  approvedAt: null
+                  rejectedAt: null
+                  rejectionReason: null
+                  createdAt: "2026-06-11T09:00:00+07:00"
+                  updatedAt: "2026-06-11T09:00:00+07:00"
+                  rowVersion: 1
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: Validasi field gagal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                alasanTooShort:
+                  summary: Alasan kurang dari 30 karakter
+                  value:
+                    error:
+                      code: LPS_OVERRIDE_REASON_TOO_SHORT
+                      message: "Alasan exclusion minimal 30 karakter (saat ini 22 karakter)"
+                      details:
+                        - field: "body.alasan"
+                          rule: "min_length_30"
+                          message: "Alasan exclusion minimal 30 karakter"
+                      traceId: "01HXY..."
+                wrongType:
+                  summary: Instrumen bukan DEPOSITO
+                  value:
+                    error:
+                      code: LPS_AGGREGATE_INSTRUMEN_NOT_DEPOSITO
+                      message: "LPS exclusion hanya berlaku untuk instrumen tipe DEPOSITO"
+                      details:
+                        - field: "body.instrumenId"
+                          rule: "deposito_type_required"
+                          message: "tipe_instrumen harus DEPOSITO"
+                      traceId: "01HXY..."
+                periodeInvalid:
+                  summary: effectiveTo lebih awal dari effectiveFrom
+                  value:
+                    error:
+                      code: LPS_OVERRIDE_PERIODE_INVALID
+                      message: "effectiveTo tidak boleh lebih awal dari effectiveFrom"
+                      details:
+                        - field: "body.effectiveTo"
+                          rule: "gte_effective_from"
+                          message: "effectiveTo harus >= effectiveFrom"
+                      traceId: "01HXY..."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: instrumenId tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: LPS_OVERRIDE_INSTRUMEN_NOT_FOUND
+                  message: "Instrumen tidak ditemukan atau sudah dihapus"
+                  details:
+                    - field: "body.instrumenId"
+                      rule: "exists"
+                      message: "instrumenId tidak ada di mst.instrumen"
+                  traceId: "01HXY..."
+        "409":
+          description: Sudah ada exclusion override APPROVED atau PENDING yang overlap
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: CONFLICT
+                  message: "DEPOSITO-007 sudah memiliki LPS exclusion override yang aktif (ID: OVR-001). Revoke terlebih dahulu sebelum membuat override baru."
+                  details:
+                    - field: "body.instrumenId"
+                      rule: "no_active_override_overlap"
+                      message: "Override aktif ditemukan"
+                  traceId: "01HXY..."
+        "422":
+          $ref: "#/components/responses/WorkflowInvalidTransition"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/lps/override/{id}/approve — ROLE-ALCO approve
+  # ---------------------------------------------------------------------------
+  /ecl/lps/override/{id}/approve:
+    post:
+      operationId: approveLpsExclusionOverride
+      summary: ROLE-ALCO approve proposal LPS exclusion
+      description: |
+        ROLE-ALCO menyetujui proposal exclusion.
+        Transisi: PENDING_APPROVAL → APPROVED.
+        Setelah APPROVED, instrumen di-exclude dari LPS pool sejak evaluationDate ≥ effectiveFrom.
+
+        Permission: lps_aggregator.override.approve
+        Role: ROLE-ALCO
+        MFA: ROLE-ALCO wajib MFA per DEC-026. Tidak perlu step-up MFA (OQ-M3-5: step-up
+             reserved untuk seal ECL run dan hard-close periode per DEC-027).
+
+        SoD: approver_id ≠ maker_id (enforced server-side — SOD_VIOLATION 403 jika sama).
+        Signature: SHA-256(userId || APPROVE || overrideId || signedAt || comment) disimpan.
+
+        Idempotency-Key wajib.
+        Audit: LPS_EXCLUSION.APPROVE ditulis ke aud.audit_log in-transaction.
+        Notifikasi: ke maker — "Proposal LPS exclusion disetujui ALCO".
+
+        Cache invalidation: setelah APPROVED, sinyal ke ECL calc-run system bahwa
+        cache LPS untuk instrumen terdampak perlu di-invalidate.
+      tags: [lps-override]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/overrideIdPath"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LpsOverrideActionRequest"
+            example:
+              comment: "Disetujui. Sesuai kontrak bilateral ref: LEG-BILATERAL-2026-042. Berlaku mulai 2026-07-01."
+              signatureMethod: "JWT_STANDARD"
+      responses:
+        "200":
+          description: Proposal berhasil disetujui — override APPROVED dan aktif sejak effectiveFrom
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/LpsExclusionOverride"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Permission tidak terpenuhi, SoD violation, atau MFA belum verified
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                sod:
+                  summary: SoD violation — approver sama dengan maker
+                  value:
+                    error:
+                      code: LPS_OVERRIDE_SOD_VIOLATION
+                      message: "Maker tidak dapat menjadi approver untuk proposal exclusion yang sama"
+                      details:
+                        - field: "approver"
+                          rule: "approver_not_maker"
+                          message: "SoD: approver_id ≠ maker_id"
+                      traceId: "01HXY..."
+                mfaRequired:
+                  summary: MFA belum verified
+                  value:
+                    error:
+                      code: MFA_REQUIRED
+                      message: "ROLE-ALCO wajib MFA. Pastikan mfa_verified=true di token."
+                      details: []
+                      traceId: "01HXY..."
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          description: Override proposal sudah expired (effectiveTo sudah lewat)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: LPS_OVERRIDE_EXPIRED
+                  message: "Proposal override ini sudah kadaluarsa. Periode effectiveTo sudah terlewati."
+                  details: []
+                  traceId: "01HXY..."
+        "422":
+          description: Transisi workflow tidak valid (mis. sudah APPROVED atau REJECTED)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: LPS_OVERRIDE_INVALID_TRANSITION
+                  message: "Tidak bisa approve dari state APPROVED. Override sudah dalam status final."
+                  details:
+                    - field: "workflowStatus"
+                      rule: "invalid_transition"
+                      message: "Transition APPROVED → APPROVED tidak valid"
+                  traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/lps/override/{id}/reject — ROLE-RISK or ROLE-ALCO reject
+  # ---------------------------------------------------------------------------
+  /ecl/lps/override/{id}/reject:
+    post:
+      operationId: rejectLpsExclusionOverride
+      summary: Reject proposal LPS exclusion (ROLE-RISK atau ROLE-ALCO)
+      description: |
+        ROLE-ALCO atau ROLE-RISK (maker bukan diri sendiri) menolak proposal.
+        Transisi: PENDING_APPROVAL → REJECTED.
+        Instrumen target tetap masuk LPS pool (tidak ada perubahan).
+
+        Permission: lps_aggregator.override.reject
+        Roles: ROLE-ALCO (dari PENDING_APPROVAL), ROLE-RISK (recall by maker — dari PENDING_APPROVAL)
+
+        Catatan: maker dapat menarik kembali proposalnya sendiri (recall/withdraw).
+        ROLE-ALCO dapat menolak tanpa alasan panjang, tapi comment disarankan.
+
+        Idempotency-Key wajib.
+        Audit: LPS_EXCLUSION.REJECT ditulis ke aud.audit_log in-transaction.
+        Notifikasi: ke maker — "Proposal LPS exclusion ditolak" + rejection_reason.
+      tags: [lps-override]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/overrideIdPath"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LpsOverrideActionRequest"
+            example:
+              comment: "Instrumen ini eligible LPS sesuai PBI No. 22/XX — tidak perlu exclude"
+              signatureMethod: "JWT_STANDARD"
+      responses:
+        "200":
+          description: Proposal berhasil ditolak — instrumen tetap masuk LPS pool
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/LpsExclusionOverride"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: Transisi tidak valid (mis. sudah REJECTED atau APPROVED)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: LPS_OVERRIDE_INVALID_TRANSITION
+                  message: "Tidak bisa reject dari state REJECTED."
+                  details:
+                    - field: "workflowStatus"
+                      rule: "invalid_transition"
+                      message: "Transition REJECTED → REJECTED tidak valid"
+                  traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/lps/overrides — DataTable list
+  # ---------------------------------------------------------------------------
+  /ecl/lps/overrides:
+    get:
+      operationId: listLpsExclusionOverrides
+      summary: List semua LPS exclusion overrides (sort+page+filter)
+      description: |
+        List ecl.lps_exclusion_override dengan cursor pagination, sort, dan filter.
+
+        Permission: lps_aggregator.preview (baca), lps_aggregator.override (baca + propose)
+        Roles: ROLE-RISK, ROLE-ALCO, ROLE-AUDIT
+
+        Allowed sort: created_at, effective_from, effective_to, workflow_status, kode_instrumen
+        Default sort: created_at DESC
+
+        Allowed filter:
+        - filter[workflow_status]: DRAFT|PENDING_APPROVAL|APPROVED|REJECTED|REVOKED
+        - filter[instrumen_id]: UUID
+        - filter[maker_id]: UUID
+        - filter[effective_from]: gte/lte/between
+        - q: text search di kode_instrumen + alasan
+
+        Export: CSV, XLSX (inline < 10k rows, async >= 10k).
+        Audit event: LPS_AGGREGATOR.EXPORT saat export.
+      tags: [lps-override]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/cursor"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/sortParam"
+        - $ref: "#/components/parameters/searchParam"
+        - name: "filter[workflow_status]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [DRAFT, PENDING_APPROVAL, APPROVED, REJECTED, REVOKED]
+          description: Filter by workflow status
+        - name: "filter[instrumen_id]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: "filter[maker_id]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: "filter[effective_from]"
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Format: gte:2026-07-01 atau between:2026-01-01,2026-12-31"
+        - name: export
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [csv, xlsx]
+          description: Jika diset, response adalah file download
+      responses:
+        "200":
+          description: List exclusion overrides
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LpsOverrideListResponse"
+            text/csv:
+              schema:
+                type: string
+                format: binary
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/lps/overrides/{id} — detail override
+  # ---------------------------------------------------------------------------
+  /ecl/lps/overrides/{id}:
+    get:
+      operationId: getLpsExclusionOverride
+      summary: Detail satu LPS exclusion override
+      description: |
+        Kembalikan detail lengkap satu record ecl.lps_exclusion_override.
+
+        Permission: lps_aggregator.preview
+        Roles: ROLE-RISK, ROLE-ALCO, ROLE-AUDIT
+
+        Audit: tidak ada (pure read).
+      tags: [lps-override]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/overrideIdPath"
+      responses:
+        "200":
+          description: Detail exclusion override
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/LpsExclusionOverride"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+# =============================================================================
+# COMPONENTS
+# =============================================================================
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT RSA-2048 signed oleh Keycloak. Access token TTL 15 menit (DEC-025).
+        Claims wajib: sub, preferred_username, roles[], permissions[], tenant_id,
+        mfa_verified, exp, iat, nbf.
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: UUID v4 unik per request. TTL replay 24 jam (DEC-021).
+
+    overrideIdPath:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: UUID dari ecl.lps_exclusion_override
+
+    cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+      description: Opaque base64 cursor dari pagination.nextCursor (DEC-022)
+
+    limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+      description: Jumlah item per halaman. Default 50, max 200.
+
+    sortParam:
+      name: sort
+      in: query
+      required: false
+      schema:
+        type: string
+        pattern: "^[a-z_]+(:(asc|desc))?(,[a-z_]+(:(asc|desc))?)*$"
+      description: "Multi-column sort. Format: col1:asc,col2:desc. Max 3 kolom."
+
+    searchParam:
+      name: q
+      in: query
+      required: false
+      schema:
+        type: string
+        maxLength: 200
+      description: Text search global
+
+  schemas:
+
+    # ---- ResponseMeta -------------------------------------------------------
+    ResponseMeta:
+      type: object
+      properties:
+        traceId:
+          type: string
+          example: "01HXY..."
+
+    # ---- Error Envelope -----------------------------------------------------
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details, traceId]
+          properties:
+            code:
+              $ref: "#/components/schemas/LpsErrorCode"
+            message:
+              type: string
+              description: Human-readable message Bahasa Indonesia. Tidak expose stack trace.
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                    description: Dot-notation field path
+                  rule:
+                    type: string
+                    description: Nama rule yang gagal
+                  message:
+                    type: string
+            traceId:
+              type: string
+
+    # ---- LPS Error Codes ----------------------------------------------------
+    LpsErrorCode:
+      type: string
+      description: |
+        Stable error codes — P4-M3 LPS Aggregator specific + inherited dari _common.yaml.
+        Kode baru: lihat Error Catalog di docs/state-machines/p4-m3-lps.md.
+      enum:
+        # Inherited dari _common.yaml
+        - VALIDATION_FAILED
+        - UNAUTHORIZED
+        - FORBIDDEN
+        - SOD_VIOLATION
+        - MFA_REQUIRED
+        - MFA_CHALLENGE_FAILED
+        - NOT_FOUND
+        - CONFLICT
+        - IDEMPOTENCY_REPLAY
+        - IDEMPOTENCY_MISMATCH
+        - WORKFLOW_INVALID_TRANSITION
+        - PERIODE_CLOSED
+        - ECL_PARAM_FROZEN
+        - RATE_LIMITED
+        - INTERNAL
+        - STEP_UP_REQUIRED
+        - STEP_UP_EXPIRED
+        - FX_RATE_NOT_FOUND          # Inherited: kurs tidak tersedia (M2 EAD context)
+        # LPS-specific (P4-M3) — tambah ke _common.yaml
+        - LPS_COVERAGE_NO_ACTIVE_PARAM        # 422 — tidak ada mst.lps_coverage APPROVED untuk evaluationDate
+        - LPS_OVERRIDE_INSTRUMEN_NOT_FOUND    # 404 — instrumenId tidak ada di mst.instrumen
+        - LPS_OVERRIDE_REASON_TOO_SHORT       # 422 — alasan < 30 karakter
+        - LPS_OVERRIDE_INVALID_TRANSITION     # 422 — transisi workflow tidak valid
+        - LPS_OVERRIDE_EXPIRED               # 410 — proposal/override sudah melewati effectiveTo
+        - LPS_OVERRIDE_SOD_VIOLATION         # 403 — maker = approver (LPS-specific SoD)
+        - LPS_OVERRIDE_PERIODE_INVALID       # 422 — effectiveFrom > effectiveTo
+        - LPS_AGGREGATE_INSTRUMEN_NOT_DEPOSITO # 422 — instrumen bukan DEPOSITO
+        - LPS_AGGREGATE_BULK_TOO_LARGE       # 413 — instrumen dalam scope > hard limit (50000)
+
+    # ---- Job Accepted Response (202) ----------------------------------------
+    JobAcceptedResponse:
+      type: object
+      required: [jobId, type, statusUrl, streamUrl]
+      properties:
+        jobId:
+          type: string
+          description: Job identifier (ULID). Persistent di sys.job.
+          example: "01JXYZ-LPS-BULK-001"
+        type:
+          type: string
+          description: Job type identifier
+          example: "LPS_AGGREGATE_BULK"
+        statusUrl:
+          type: string
+          example: "/api/v1/jobs/01JXYZ-LPS-BULK-001"
+        streamUrl:
+          type: string
+          description: SSE stream. Gunakan Authorization Bearer header (bukan ?token=).
+          example: "/api/v1/jobs/01JXYZ-LPS-BULK-001/stream"
+        estimatedDurationSeconds:
+          type: integer
+          nullable: true
+          description: Estimasi durasi berdasarkan history
+
+    # ---- LPS Aggregate Request (single) ------------------------------------
+    LpsAggregateRequest:
+      type: object
+      required: [nasabahId, bankId, evaluationDate]
+      properties:
+        nasabahId:
+          type: string
+          format: uuid
+          description: UUID counterparty nasabah dari mst.counterparty
+        bankId:
+          type: string
+          format: uuid
+          description: |
+            UUID counterparty bank dari mst.counterparty.
+            Harus tipe='BANK' AND eligible_lps_flag=TRUE.
+        evaluationDate:
+          type: string
+          format: date
+          description: "Tanggal evaluasi. Format: YYYY-MM-DD. Harus hari kerja (kurs BI JISDOR tersedia)."
+          example: "2026-06-30"
+
+    # ---- LPS Aggregate Bulk Request ----------------------------------------
+    LpsAggregateBulkRequest:
+      type: object
+      required: [periodeId, evaluationDate]
+      properties:
+        periodeId:
+          type: string
+          format: uuid
+          description: UUID periode buku dari mst.periode_buku
+        evaluationDate:
+          type: string
+          format: date
+          description: "Tanggal evaluasi (biasanya tanggal akhir periode). Format: YYYY-MM-DD."
+          example: "2026-06-30"
+
+    # ---- LPS Aggregate Result (single pair) ---------------------------------
+    LpsAggregateResult:
+      type: object
+      required:
+        - nasabahId
+        - bankId
+        - evaluationDate
+        - lpsCoverageParamId
+        - lpsCapIdr
+        - totalExposureIdr
+        - coveredIdr
+        - excessIdr
+        - jumlahInstrumen
+        - instrumenBreakdown
+      properties:
+        nasabahId:
+          type: string
+          format: uuid
+        nasabahNama:
+          type: string
+          example: "Asuransi Tugu Reasuransi"
+        bankId:
+          type: string
+          format: uuid
+        bankNama:
+          type: string
+          example: "Bank BCA"
+        evaluationDate:
+          type: string
+          format: date
+          example: "2026-06-30"
+        lpsCoverageParamId:
+          type: string
+          format: uuid
+          description: UUID record mst.lps_coverage yang digunakan
+        lpsCapIdr:
+          type: number
+          format: decimal
+          description: "Cap LPS yang berlaku (IDR, NUMERIC(20,4)). Default: 2.000.000.000,0000"
+          example: 2000000000.0000
+        totalExposureIdr:
+          type: number
+          format: decimal
+          description: "Total EAD semua instrumen DEPOSITO aktif untuk pasangan ini (IDR, NUMERIC(20,4))"
+          example: 2500000000.0000
+        coveredIdr:
+          type: number
+          format: decimal
+          description: "Bagian yang dijamin LPS = min(totalExposureIdr, lpsCapIdr), IDR NUMERIC(20,4)"
+          example: 2000000000.0000
+        excessIdr:
+          type: number
+          format: decimal
+          description: "totalExposureIdr - coveredIdr. Bagian ini yang masuk ECL pipeline. IDR NUMERIC(20,4)"
+          example: 500000000.0000
+        jumlahInstrumen:
+          type: integer
+          description: Jumlah instrumen DEPOSITO aktif yang masuk scope untuk pasangan ini
+          example: 2
+        instrumenBreakdown:
+          type: array
+          description: |
+            Breakdown alokasi covered/excess per instrumen.
+            Urut berdasarkan fifoRank ASC (tanggal_penempatan ASC, tiebreak instrumen_id ASC).
+            Instrumen yang di-exclude via override tetap tercantum dengan lpsExcluded=true.
+          items:
+            $ref: "#/components/schemas/InstrumenBreakdownItem"
+        warnings:
+          type: array
+          description: |
+            Warning non-blocking (mis. instrumen dengan kurs yang perlu konfirmasi,
+            instrumen dengan override yang akan expired segera).
+          items:
+            type: object
+            properties:
+              code:
+                type: string
+                description: Warning code
+              message:
+                type: string
+              instrumenId:
+                type: string
+                format: uuid
+                nullable: true
+
+    # ---- Instrumen Breakdown Item -------------------------------------------
+    InstrumenBreakdownItem:
+      type: object
+      required:
+        - instrumenId
+        - eadIdr
+        - fifoRank
+        - allocatedToCoveredIdr
+        - allocatedToExcessIdr
+        - lpsExcluded
+        - lpsFullCovered
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+        kodeInstrumen:
+          type: string
+          example: "DEPOSITO-001"
+        eadIdr:
+          type: number
+          format: decimal
+          description: "EAD instrumen dalam IDR setelah konversi kurs (NUMERIC(20,4))"
+          example: 1500000000.0000
+        fifoRank:
+          type: integer
+          description: "Urutan alokasi FIFO (1 = paling tua, dialokasikan covered lebih dulu)"
+          example: 1
+        tanggalPenempatan:
+          type: string
+          format: date
+          description: Tanggal penempatan instrumen (dasar FIFO ranking)
+          nullable: true
+          example: "2025-01-15"
+        allocatedToCoveredIdr:
+          type: number
+          format: decimal
+          description: "Bagian dari eadIdr yang masuk covered portion (IDR, NUMERIC(20,4))"
+          example: 1500000000.0000
+        allocatedToExcessIdr:
+          type: number
+          format: decimal
+          description: "Bagian dari eadIdr yang masuk excess portion — yang akan di-ECL (IDR, NUMERIC(20,4))"
+          example: 0.0000
+        lpsExcluded:
+          type: boolean
+          description: |
+            true = instrumen di-exclude via ecl.lps_exclusion_override APPROVED.
+            Jika true: allocatedToCoveredIdr=0, allocatedToExcessIdr=eadIdr (full EAD masuk ECL).
+        exclusionReason:
+          type: string
+          nullable: true
+          description: Alasan exclusion (dari ecl.lps_exclusion_override.alasan). Kosong jika tidak excluded.
+        lpsFullCovered:
+          type: boolean
+          description: "true = instrumen ini full covered (allocatedToExcessIdr = 0 AND lpsExcluded = false)"
+
+    # ---- LPS Preview Row ---------------------------------------------------
+    LpsPreviewRow:
+      type: object
+      required:
+        - nasabahId
+        - nasabahNama
+        - bankId
+        - bankNama
+        - lpsCapIdr
+        - totalExposureIdr
+        - coveredIdr
+        - excessIdr
+        - coveredPct
+        - jumlahInstrumen
+        - evaluationDate
+      properties:
+        nasabahId:
+          type: string
+          format: uuid
+        nasabahNama:
+          type: string
+          example: "Asuransi Tugu Reasuransi"
+        bankId:
+          type: string
+          format: uuid
+        bankNama:
+          type: string
+          example: "Bank BCA"
+        lpsCapIdr:
+          type: number
+          format: decimal
+          description: "Cap LPS berlaku pada evaluationDate (IDR, NUMERIC(20,4))"
+          example: 2000000000.0000
+        totalExposureIdr:
+          type: number
+          format: decimal
+          example: 2500000000.0000
+        coveredIdr:
+          type: number
+          format: decimal
+          example: 2000000000.0000
+        excessIdr:
+          type: number
+          format: decimal
+          description: "Excess yang akan masuk ECL pipeline. excessIdr = 0 → full covered."
+          example: 500000000.0000
+        coveredPct:
+          type: number
+          format: decimal
+          description: "(coveredIdr / totalExposureIdr) × 100. 2 desimal. 100.00 jika full covered."
+          example: 80.00
+        jumlahInstrumen:
+          type: integer
+          description: Jumlah instrumen DEPOSITO aktif dalam pasangan ini
+          example: 2
+        jumlahExcluded:
+          type: integer
+          description: Jumlah instrumen yang di-exclude via override aktif
+          example: 0
+        evaluationDate:
+          type: string
+          format: date
+          example: "2026-06-30"
+
+    # ---- LPS Preview List Response -----------------------------------------
+    LpsPreviewListResponse:
+      type: object
+      required: [data, pagination, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/LpsPreviewRow"
+        pagination:
+          type: object
+          required: [hasMore]
+          properties:
+            nextCursor:
+              type: string
+              nullable: true
+            hasMore:
+              type: boolean
+            totalEstimate:
+              type: integer
+              nullable: true
+            limit:
+              type: integer
+        appliedSort:
+          type: array
+          items:
+            type: object
+            properties:
+              col:
+                type: string
+              dir:
+                type: string
+                enum: [asc, desc]
+        appliedFilter:
+          type: object
+          additionalProperties: true
+        meta:
+          $ref: "#/components/schemas/ResponseMeta"
+
+    # ---- LPS Override Submit Request ----------------------------------------
+    LpsOverrideSubmitRequest:
+      type: object
+      required: [instrumenId, alasan, effectiveFrom]
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+          description: UUID instrumen DEPOSITO yang akan di-exclude dari LPS pool
+        alasan:
+          type: string
+          minLength: 30
+          maxLength: 2000
+          description: |
+            Justifikasi exclusion (minimum 30 karakter per constraint DB).
+            Harus mencantumkan dasar hukum/regulasi atau reference dokumen pendukung.
+          example: "Interbank placement bilateral perjanjian khusus — tidak eligible LPS per konfirmasi legal"
+        effectiveFrom:
+          type: string
+          format: date
+          description: Tanggal mulai exclusion berlaku (inclusive). Format YYYY-MM-DD.
+          example: "2026-07-01"
+        effectiveTo:
+          type: string
+          format: date
+          nullable: true
+          description: |
+            Tanggal akhir exclusion (inclusive). null = berlaku selamanya hingga di-revoke.
+            Jika diisi, harus >= effectiveFrom.
+          example: null
+
+    # ---- LPS Override Action Request (approve/reject) ----------------------
+    LpsOverrideActionRequest:
+      type: object
+      required: [comment, signatureMethod]
+      properties:
+        comment:
+          type: string
+          maxLength: 2000
+          description: Komentar approve/reject. Disimpan di DB dan audit log.
+          example: "Disetujui sesuai kontrak bilateral ref: LEG-2026-042"
+        signatureMethod:
+          type: string
+          enum: [JWT_STANDARD]
+          description: |
+            JWT_STANDARD: approve dengan JWT normal (MFA verified di JWT claims).
+            Tidak ada JWT_STEP_UP untuk LPS override (OQ-M3-5 resolved).
+
+    # ---- LPS Exclusion Override (response schema) --------------------------
+    LpsExclusionOverride:
+      type: object
+      required:
+        - id
+        - instrumenId
+        - alasan
+        - effectiveFrom
+        - workflowStatus
+        - makerId
+        - createdAt
+        - updatedAt
+        - rowVersion
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: UUID dari ecl.lps_exclusion_override
+        instrumenId:
+          type: string
+          format: uuid
+        kodeInstrumen:
+          type: string
+          nullable: true
+          description: Resolved kode dari mst.instrumen untuk display
+          example: "DEPOSITO-007"
+        namaInstrumen:
+          type: string
+          nullable: true
+          example: "Deposito BNI 3 bulan"
+        alasan:
+          type: string
+          description: Justifikasi exclusion
+        effectiveFrom:
+          type: string
+          format: date
+          example: "2026-07-01"
+        effectiveTo:
+          type: string
+          format: date
+          nullable: true
+          description: "null = berlaku selamanya"
+        workflowStatus:
+          type: string
+          enum: [DRAFT, PENDING_APPROVAL, APPROVED, REJECTED, REVOKED]
+          description: |
+            State machine:
+            DRAFT → PENDING_APPROVAL (saat submit)
+            PENDING_APPROVAL → APPROVED (saat ALCO approve)
+            PENDING_APPROVAL → REJECTED (saat ALCO reject atau maker recall)
+            APPROVED → REVOKED (out-of-scope Phase 4, dicatat untuk completeness)
+        makerId:
+          type: string
+          format: uuid
+        makerNama:
+          type: string
+          nullable: true
+        approverId:
+          type: string
+          format: uuid
+          nullable: true
+        approverNama:
+          type: string
+          nullable: true
+        approvedAt:
+          type: string
+          format: date-time
+          nullable: true
+        approverComment:
+          type: string
+          nullable: true
+        rejectedAt:
+          type: string
+          format: date-time
+          nullable: true
+        rejectionReason:
+          type: string
+          nullable: true
+        signatureHash:
+          type: string
+          nullable: true
+          description: SHA-256(approverId || APPROVE || overrideId || approvedAt || comment). Null jika belum approved.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        rowVersion:
+          type: integer
+          description: Optimistic lock counter
+
+    # ---- LPS Override List Response ----------------------------------------
+    LpsOverrideListResponse:
+      type: object
+      required: [data, pagination, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/LpsExclusionOverride"
+        pagination:
+          type: object
+          required: [hasMore]
+          properties:
+            nextCursor:
+              type: string
+              nullable: true
+            hasMore:
+              type: boolean
+            totalEstimate:
+              type: integer
+              nullable: true
+            limit:
+              type: integer
+        appliedSort:
+          type: array
+          items:
+            type: object
+            properties:
+              col:
+                type: string
+              dir:
+                type: string
+                enum: [asc, desc]
+        appliedFilter:
+          type: object
+          additionalProperties: true
+        meta:
+          $ref: "#/components/schemas/ResponseMeta"
+
+  # ---- Reusable Responses ---------------------------------------------------
+  responses:
+    ValidationFailed:
+      description: Validasi field atau cross-field gagal
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+    Unauthorized:
+      description: JWT tidak valid, missing, atau expired
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+    Forbidden:
+      description: Permission tidak terpenuhi
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+    NotFound:
+      description: Entity tidak ditemukan
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+    Conflict:
+      description: "Optimistic lock conflict atau duplicate resource"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+    WorkflowInvalidTransition:
+      description: State machine menolak transisi ini
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+    PeriodeClosed:
+      description: Periode buku sudah hard-closed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+    RateLimited:
+      description: Too many requests
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Detik sampai rate limit reset
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
