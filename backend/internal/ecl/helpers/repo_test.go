@@ -210,8 +210,8 @@ func TestGetPDFromBatchParams_Stage1(t *testing.T) {
 		PDCurves: map[string]PDCurveRow{
 			"idAA": {Rating: "idAA", PD12Month: d("0.00350000")},
 		},
-		ImpactPD: &ImpactPDRow{ImpactMultiplier: d("1.05000000")},
-		ImpactMevPD: map[string]ImpactMevPDRow{},
+		ImpactPD:       &ImpactPDRow{ImpactMultiplier: d("1.05000000")},
+		ImpactMevPD:    map[string]ImpactMevPDRow{},
 		Counterparties: map[uuid.UUID]CounterpartyRow{cpID: {ID: cpID}},
 	}
 
@@ -275,9 +275,9 @@ func TestGetLGDFromBatchParams_Basic(t *testing.T) {
 func TestComputeEADFromBatchParams_IDR(t *testing.T) {
 	instrID := uuid.New()
 	inst := InstrumenRow{
-		ID:           instrID,
-		MatauangKode: "IDR",
-		Nominal:      d("500000000.0000"),
+		ID:            instrID,
+		MatauangKode:  "IDR",
+		Nominal:       d("500000000.0000"),
 		TipeInstrumen: "DEPOSITO",
 	}
 	params := &BatchParams{

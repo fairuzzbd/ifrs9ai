@@ -12,7 +12,7 @@
 //	Undrawn = 0, CCF = 0 → EAD_FCY = Outstanding + Accrued
 //
 // Outstanding Principal sources (OQ-M2-3):
-//   - DEPOSITO: mst.instrumen.nominal (bullet, no amortisation)
+//   - DEPOSITO: mst.instrumen.nominal (bullet, no amortization)
 //   - OBLIGASI: ecl.eir_amortization_schedule.principal_outstanding if P4-M5 available,
 //     else mst.instrumen.nominal with OUTSTANDING_FALLBACK_TO_NOMINAL warning.
 //
@@ -25,7 +25,8 @@
 //   - FCY instruments: kurs BI_JISDOR per evaluationDate.
 //
 // Precision (DEC-016): all money NUMERIC(20,4) → RoundHalfEven(4).
-//                       FX NUMERIC(20,8) → stored at 8dp.
+//
+//	FX NUMERIC(20,8) → stored at 8dp.
 package helpers
 
 import (

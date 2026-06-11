@@ -5,8 +5,9 @@
 // Uses database/sql with the lib/pq driver (same as rest of codebase).
 //
 // Anti-N+1 design (Story APP-C-PAR-006):
-//   All data for a bulk lookup is loaded in ≤ 10 DB round-trips via
-//   LoadBatchParams. Single-instrument endpoints call targeted queries.
+//
+//	All data for a bulk lookup is loaded in ≤ 10 DB round-trips via
+//	LoadBatchParams. Single-instrument endpoints call targeted queries.
 //
 // Compliance:
 //   - No float64: all money/rate columns read into decimal.Decimal via string scan.
@@ -406,8 +407,8 @@ func (r *DBPDRepository) BatchLoadRatings(ctx context.Context, counterpartyIDs [
 		placeholders[i] = fmt.Sprintf("$%d", i+2)
 		args = append(args, id)
 	}
-	q := fmt.Sprintf(`
-SELECT DISTINCT ON (counterparty_id)
+	q := fmt.Sprintf( //nolint:gosec // column from validated allowlist
+		`SELECT DISTINCT ON (counterparty_id)
        counterparty_id, rating_pefindo
 FROM mst.rating_history_counterparty
 WHERE workflow_status = 'APPROVED'
@@ -736,8 +737,8 @@ func (r *DBInstrumenSnapshotRepo) BatchLoadInstruments(ctx context.Context, ids 
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 		args[i] = id
 	}
-	q := fmt.Sprintf(`
-SELECT id, kode_instrumen, nama_instrumen, tipe_instrumen,
+	q := fmt.Sprintf( //nolint:gosec // placeholders built from parameterized args; column from validated allowlist
+		`SELECT id, kode_instrumen, nama_instrumen, tipe_instrumen,
        mata_uang, nominal::text, klasifikasi_psak71,
        tanggal_jatuh_tempo, counterparty_id, status
 FROM mst.instrumen
@@ -783,8 +784,8 @@ func (r *DBInstrumenSnapshotRepo) BatchLoadEIRSchedules(ctx context.Context, ins
 		placeholders[i] = fmt.Sprintf("$%d", i+2)
 		args = append(args, id)
 	}
-	q := fmt.Sprintf(`
-SELECT DISTINCT ON (instrumen_id)
+	q := fmt.Sprintf( //nolint:gosec // placeholders built from parameterized args; column from validated allowlist
+		`SELECT DISTINCT ON (instrumen_id)
        instrumen_id, tanggal_cicilan, principal_outstanding::text,
        bunga_akrual::text, schedule_version
 FROM ecl.eir_amortization_schedule
@@ -829,8 +830,8 @@ func (r *DBInstrumenSnapshotRepo) BatchLoadCurrentStages(ctx context.Context, in
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 		args[i] = id
 	}
-	q := fmt.Sprintf(`
-SELECT DISTINCT ON (instrumen_id)
+	q := fmt.Sprintf( //nolint:gosec // placeholders built from parameterized args; column from validated allowlist
+		`SELECT DISTINCT ON (instrumen_id)
        instrumen_id, stage_sesudah
 FROM ecl.stage_history
 WHERE instrumen_id IN (%s)
@@ -927,8 +928,8 @@ func (r *DBInstrumenSnapshotRepo) ListECLApplicableInstruments(
 	where := "WHERE " + strings.Join(conds, " AND ")
 	// fetch limit+1 to detect hasMore
 	args = append(args, limit+1)
-	q := fmt.Sprintf(`
-SELECT id, kode_instrumen, nama_instrumen, tipe_instrumen,
+	q := fmt.Sprintf( //nolint:gosec // sortCol validated against whitelist above; sortDir validated to asc/desc
+		`SELECT id, kode_instrumen, nama_instrumen, tipe_instrumen,
        mata_uang, nominal::text, klasifikasi_psak71,
        tanggal_jatuh_tempo, counterparty_id, status
 FROM mst.instrumen i
@@ -1016,8 +1017,8 @@ func (r *DBCounterpartyRepo) BatchLoadCounterparties(ctx context.Context, ids []
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 		args[i] = id
 	}
-	q := fmt.Sprintf(`
-SELECT id, nama_counterparty, tipe_counterparty
+	q := fmt.Sprintf( //nolint:gosec // placeholders built from parameterized args; column from validated allowlist
+		`SELECT id, nama_counterparty, tipe_counterparty
 FROM mst.counterparty
 WHERE id IN (%s) AND deleted_at IS NULL`, strings.Join(placeholders, ","))
 

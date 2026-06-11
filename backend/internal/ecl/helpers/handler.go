@@ -514,12 +514,12 @@ func (h *Handler) GetPreview(c *gin.Context) {
 	}
 
 	// Query optional filter/sort params.
-	filterStage      := c.Query("filter[stage]")
-	filterTipe       := c.Query("filter[tipe]")
+	filterStage := c.Query("filter[stage]")
+	filterTipe := c.Query("filter[tipe]")
 	filterKlasifikasi := c.Query("filter[klasifikasi]")
-	filterMatauang   := c.Query("filter[matauang]")
-	sortCol          := c.DefaultQuery("sortCol", "kode_instrumen")
-	sortDir          := c.DefaultQuery("sortDir", "asc")
+	filterMatauang := c.Query("filter[matauang]")
+	sortCol := c.DefaultQuery("sortCol", "kode_instrumen")
+	sortDir := c.DefaultQuery("sortDir", "asc")
 
 	instrRows, nextCursor, hasMore, err := h.previewRepo.ListECLApplicableInstruments(
 		c.Request.Context(),
@@ -540,7 +540,8 @@ func (h *Handler) GetPreview(c *gin.Context) {
 	}
 
 	reqs := make([]BulkRequest, len(instrRows))
-	for i, row := range instrRows {
+	for i := range instrRows {
+		row := &instrRows[i]
 		reqs[i] = BulkRequest{InstrumenID: row.ID}
 	}
 
@@ -554,7 +555,8 @@ func (h *Handler) GetPreview(c *gin.Context) {
 	}
 
 	items := make([]gin.H, 0, len(results)+len(bulkErrs))
-	for _, r := range results {
+	for i := range results {
+		r := &results[i]
 		items = append(items, gin.H{
 			"instrumenId": r.InstrumenID,
 			"pdGood":      r.PDGood.StringFixed(8),
@@ -677,7 +679,8 @@ func (h *Handler) BulkLookup(c *gin.Context) {
 	}
 
 	items := make([]gin.H, 0, len(results))
-	for _, r := range results {
+	for i := range results {
+		r := &results[i]
 		items = append(items, gin.H{
 			"instrumenId": r.InstrumenID,
 			"pdGood":      r.PDGood.StringFixed(8),

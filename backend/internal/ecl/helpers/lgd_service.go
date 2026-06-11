@@ -27,9 +27,9 @@ import (
 
 // lgdService implements LGDLookupService.
 type lgdService struct {
-	lgdRepo      LGDRepository
-	instrRepo    InstrumenSnapshotRepo
-	cpRepo       CounterpartyRepo
+	lgdRepo   LGDRepository
+	instrRepo InstrumenSnapshotRepo
+	cpRepo    CounterpartyRepo
 }
 
 // NewLGDLookupService creates a LGDLookupService.

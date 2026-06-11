@@ -12,11 +12,13 @@
 //	For NORMAL:   PD_FL = PD_base × impact_pd × 1.0  (OQ-A default)
 //
 // Monotonicity check on lifetime bucket data per OQ-PAR-1a:
-//   Warning emitted if pd_lifetime_3y > pd_lifetime_5y > … (non-monotone).
-//   Interpolation proceeds regardless.
+//
+//	Warning emitted if pd_lifetime_3y > pd_lifetime_5y > … (non-monotone).
+//	Interpolation proceeds regardless.
 //
 // Tenor handling (OQ-PAR-1b):
-//   Negative tenor_remaining → PD_LOOKUP_TENOR_OUT_OF_RANGE error.
+//
+//	Negative tenor_remaining → PD_LOOKUP_TENOR_OUT_OF_RANGE error.
 //
 // All arithmetic uses decimal.Decimal. No float64.
 // Rounding: RoundHalfEven to 8 decimal places after each multiplication step
@@ -39,7 +41,7 @@ var one = decimal.NewFromInt(1)
 
 // pdService implements PDLookupService.
 type pdService struct {
-	pdRepo   PDRepository
+	pdRepo    PDRepository
 	instrRepo InstrumenSnapshotRepo
 }
 

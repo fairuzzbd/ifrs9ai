@@ -160,7 +160,7 @@ type HelperWarning struct {
 // PDDetail contains the full audit trace of a PD lookup.
 // All decimal fields use NUMERIC(10,8) precision per DEC-016.
 type PDDetail struct {
-	Stage   EclStage
+	Stage    EclStage
 	Scenario EclScenario
 
 	// PD is the final PD after FL multipliers.
@@ -323,15 +323,15 @@ type BulkRequest struct {
 
 // BulkResult contains all PD+LGD+EAD+CCF values for one instrument.
 type BulkResult struct {
-	InstrumenID uuid.UUID
-	PDGood      decimal.Decimal // NUMERIC(10,8)
-	PDNormal    decimal.Decimal // NUMERIC(10,8)
-	PDBad       decimal.Decimal // NUMERIC(10,8)
-	LGD         decimal.Decimal // NUMERIC(10,8)
-	EADIDR      decimal.Decimal // NUMERIC(20,4)
+	InstrumenID  uuid.UUID
+	PDGood       decimal.Decimal // NUMERIC(10,8)
+	PDNormal     decimal.Decimal // NUMERIC(10,8)
+	PDBad        decimal.Decimal // NUMERIC(10,8)
+	LGD          decimal.Decimal // NUMERIC(10,8)
+	EADIDR       decimal.Decimal // NUMERIC(20,4)
 	EADBreakdown EADBreakdown
-	CCF         decimal.Decimal // NUMERIC(7,4)
-	Warnings    []HelperWarning
+	CCF          decimal.Decimal // NUMERIC(7,4)
+	Warnings     []HelperWarning
 }
 
 // BulkSummary aggregates the final metrics of a bulk lookup call.
@@ -431,17 +431,17 @@ var AllAllowedColsPreview = append(append([]string{}, AllowedSortColsPreview...)
 // PDCurveRow is one row from mst.pd_pefindo.
 // All decimal fields use NUMERIC(10,8) per DEC-016.
 type PDCurveRow struct {
-	Rating         string
-	PD12Month      decimal.Decimal // pd_12month
-	PDLifetime3Y   decimal.Decimal // pd_lifetime_3y
-	PDLifetime5Y   decimal.Decimal // pd_lifetime_5y
-	PDLifetime7Y   decimal.Decimal // pd_lifetime_7y
-	PDLifetime10Y  decimal.Decimal // pd_lifetime_10y
+	Rating        string
+	PD12Month     decimal.Decimal // pd_12month
+	PDLifetime3Y  decimal.Decimal // pd_lifetime_3y
+	PDLifetime5Y  decimal.Decimal // pd_lifetime_5y
+	PDLifetime7Y  decimal.Decimal // pd_lifetime_7y
+	PDLifetime10Y decimal.Decimal // pd_lifetime_10y
 }
 
 // ImpactPDRow is one row from mst.impact_pd.
 type ImpactPDRow struct {
-	PeriodeID       string
+	PeriodeID        string
 	ImpactMultiplier decimal.Decimal // NUMERIC(10,8)
 }
 
@@ -460,8 +460,8 @@ type LGDBaselRow struct {
 
 // KursRow is one row from mst.kurs.
 type KursRow struct {
-	KodeMatauang  string
-	NilaiKurs     decimal.Decimal // NUMERIC(20,8)
+	KodeMatauang   string
+	NilaiKurs      decimal.Decimal // NUMERIC(20,8)
 	TanggalBerlaku time.Time
 	WorkflowStatus string
 }
@@ -475,11 +475,11 @@ type RatingHistoryRow struct {
 
 // EIRScheduleRow is one row from ecl.eir_amortization_schedule.
 type EIRScheduleRow struct {
-	InstrumenID         uuid.UUID
-	TanggalCicilan      time.Time
+	InstrumenID          uuid.UUID
+	TanggalCicilan       time.Time
 	PrincipalOutstanding decimal.Decimal // NUMERIC(20,4)
-	BungaAkrual         decimal.Decimal // NUMERIC(20,4)
-	ScheduleVersion     int
+	BungaAkrual          decimal.Decimal // NUMERIC(20,4)
+	ScheduleVersion      int
 }
 
 // InstrumenRow is the minimal columns from mst.instrumen needed for helpers.
@@ -498,7 +498,7 @@ type InstrumenRow struct {
 
 // CounterpartyRow is the minimal columns from mst.counterparty needed for helpers.
 type CounterpartyRow struct {
-	ID              uuid.UUID
+	ID               uuid.UUID
 	NamaCounterparty string
 	TipeCounterparty string
 }

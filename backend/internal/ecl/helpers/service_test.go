@@ -82,9 +82,9 @@ func (s *stubPDRepo) BatchLoadRatings(_ context.Context, ids []uuid.UUID, _ time
 }
 
 type stubInstrRepo struct {
-	inst    *InstrumenRow
-	eirRow  *EIRScheduleRow
-	stage   EclStage
+	inst   *InstrumenRow
+	eirRow *EIRScheduleRow
+	stage  EclStage
 }
 
 func (s *stubInstrRepo) GetEADInputs(_ context.Context, _ uuid.UUID) (*InstrumenRow, error) {
@@ -245,16 +245,14 @@ func TestPDService_Stage3_PD_IsOne(t *testing.T) {
 
 	svc := NewPDLookupService(pdRepo, instrRepo)
 	for _, scenario := range []EclScenario{ScenarioGood, ScenarioNormal, ScenarioBad} {
-		pd, detail, err := svc.GetPD(context.Background(), testInstrID, Stage3, scenario, testPeriode, testEvalDate)
+		pd, _, err := svc.GetPD(context.Background(), testInstrID, Stage3, scenario, testPeriode, testEvalDate)
 		if err != nil {
 			t.Fatalf("GetPD Stage3 %s error: %v", scenario, err)
 		}
 		if !pd.Equal(decimal.NewFromInt(1)) {
 			t.Errorf("Stage3 PD want 1.0 got %s (scenario %s)", pd, scenario)
 		}
-		if !detail.ImpactPDMultiplier.IsZero() && !detail.ImpactMevPDMultiplier.IsZero() {
-			// Stage 3 should not apply FL — multipliers should be zero
-		}
+		// Stage 3 must not apply FL multipliers (DEC-010): PD=1.0 fixed means FL was not applied.
 	}
 }
 

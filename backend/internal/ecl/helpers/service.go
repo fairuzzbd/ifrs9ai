@@ -30,17 +30,17 @@ type Services struct {
 // NewServices builds all helpers services from a DB connection.
 // auditWriter may be nil — audit writes are skipped if so.
 func NewServices(db *sql.DB, auditWriter *audit.Writer) *Services {
-	pdRepo    := NewDBPDRepository(db)
-	lgdRepo   := NewDBLGDRepository(db)
+	pdRepo := NewDBPDRepository(db)
+	lgdRepo := NewDBLGDRepository(db)
 	instrRepo := NewDBInstrumenSnapshotRepo(db)
-	cpRepo    := NewDBCounterpartyRepo(db)
-	kursRepo  := NewDBKursRepository(db)
-	ccfRepo   := NewDBCCFConfigRepo(db)
+	cpRepo := NewDBCounterpartyRepo(db)
+	kursRepo := NewDBKursRepository(db)
+	ccfRepo := NewDBCCFConfigRepo(db)
 
-	ccfSvc  := NewCCFLookupService(ccfRepo)
-	pdSvc   := NewPDLookupService(pdRepo, instrRepo)
-	lgdSvc  := NewLGDLookupService(lgdRepo, instrRepo, cpRepo)
-	eadSvc  := NewEADService(instrRepo, kursRepo, ccfSvc)
+	ccfSvc := NewCCFLookupService(ccfRepo)
+	pdSvc := NewPDLookupService(pdRepo, instrRepo)
+	lgdSvc := NewLGDLookupService(lgdRepo, instrRepo, cpRepo)
+	eadSvc := NewEADService(instrRepo, kursRepo, ccfSvc)
 	bulkSvc := NewBulkHelperService(pdRepo, lgdRepo, instrRepo, cpRepo, kursRepo, ccfRepo, auditWriter, db)
 
 	return &Services{

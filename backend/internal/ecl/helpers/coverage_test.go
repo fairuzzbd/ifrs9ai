@@ -165,7 +165,7 @@ func TestProcessOne_HappyPath_Stage1(t *testing.T) {
 	svc := buildTestBulkService("DEPOSITO", "AC", "BANK", Stage1)
 
 	req := BulkRequest{InstrumenID: instrID}
-	result, bulkErr, skipped := svc.processOne(context.Background(), req, params, testPeriode, testEvalDate)
+	result, bulkErr, skipped := svc.processOne(req, params, testPeriode, testEvalDate)
 
 	if bulkErr != nil {
 		t.Fatalf("processOne returned error: %+v", bulkErr)
@@ -209,7 +209,7 @@ func TestProcessOne_InstrumentNotInBatch_Error(t *testing.T) {
 	svc := buildTestBulkService("DEPOSITO", "AC", "BANK", Stage1)
 
 	req := BulkRequest{InstrumenID: instrID}
-	result, bulkErr, skipped := svc.processOne(context.Background(), req, params, testPeriode, testEvalDate)
+	result, bulkErr, skipped := svc.processOne(req, params, testPeriode, testEvalDate)
 
 	if result != nil {
 		t.Error("Expected nil result for missing instrument")
@@ -246,7 +246,7 @@ func TestProcessOne_FVTPL_Skipped(t *testing.T) {
 	svc := buildTestBulkService("SAHAM", "FVTPL", "BANK", Stage1)
 
 	req := BulkRequest{InstrumenID: instrID}
-	result, bulkErr, skipped := svc.processOne(context.Background(), req, params, testPeriode, testEvalDate)
+	result, bulkErr, skipped := svc.processOne(req, params, testPeriode, testEvalDate)
 
 	if result != nil || bulkErr != nil {
 		t.Error("Expected nil result and nil error for FVTPL skip")
@@ -291,7 +291,7 @@ func TestProcessOne_Stage3_PD_One(t *testing.T) {
 	svc := buildTestBulkService("DEPOSITO", "AC", "BANK", Stage3)
 
 	req := BulkRequest{InstrumenID: instrID}
-	result, bulkErr, skipped := svc.processOne(context.Background(), req, params, testPeriode, testEvalDate)
+	result, bulkErr, skipped := svc.processOne(req, params, testPeriode, testEvalDate)
 
 	if bulkErr != nil {
 		t.Fatalf("processOne Stage3 error: %+v", bulkErr)
@@ -347,7 +347,7 @@ func TestProcessOne_LGD_MappingError_ReturnsBulkErr(t *testing.T) {
 	svc := buildTestBulkService("OBLIGASI", "AC", "UNKNOWN_TYPE", Stage1)
 
 	req := BulkRequest{InstrumenID: instrID}
-	_, bulkErr, _ := svc.processOne(context.Background(), req, params, testPeriode, testEvalDate)
+	_, bulkErr, _ := svc.processOne(req, params, testPeriode, testEvalDate)
 	if bulkErr == nil {
 		t.Error("Expected bulkErr for missing LGD mapping")
 	}
@@ -417,9 +417,9 @@ func TestComputeEADFromBatchParams_FCY_MissingKurs(t *testing.T) {
 
 // stubPreviewRepo implements previewInstrumentLister.
 type stubPreviewRepo struct {
-	rows      []InstrumenRow
-	cursor    string
-	hasMore   bool
+	rows    []InstrumenRow
+	cursor  string
+	hasMore bool
 }
 
 func (s *stubPreviewRepo) ListECLApplicableInstruments(
@@ -660,7 +660,7 @@ func TestProcessOne_EAD_FCY_MissingKurs_BulkErr(t *testing.T) {
 		CounterpartyID:    cpID,
 		KlasifikasiPsak71: "AC",
 		TipeInstrumen:     "OBLIGASI",
-		MatauangKode:      "USD",   // FCY — needs kurs
+		MatauangKode:      "USD", // FCY — needs kurs
 		Nominal:           d("100000.0000"),
 	}
 
@@ -685,7 +685,7 @@ func TestProcessOne_EAD_FCY_MissingKurs_BulkErr(t *testing.T) {
 
 	svc := buildTestBulkService("OBLIGASI", "AC", "BANK", Stage1)
 	req := BulkRequest{InstrumenID: instrID}
-	result, bulkErr, _ := svc.processOne(context.Background(), req, params, testPeriode, testEvalDate)
+	result, bulkErr, _ := svc.processOne(req, params, testPeriode, testEvalDate)
 
 	if result != nil {
 		t.Error("Expected nil result for EAD error")

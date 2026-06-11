@@ -13,6 +13,7 @@
 //  7. Load lgd_basel pools (1)
 //  8. Load LGD mapping from sys.config (1)
 //  9. Load kurs batch (1)
+//
 // 10. Load EIR schedules batch (1)
 // 11. Load current stages batch (1) — may reuse a previous step slot
 //
@@ -142,7 +143,7 @@ func (s *bulkHelperService) BulkLookup(
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			res, bErr, skip := s.processOne(ctx, req, params, periodeID, evaluationDate)
+			res, bErr, skip := s.processOne(req, params, periodeID, evaluationDate)
 			slots[idx] = slot{idx: idx, result: res, bulkErr: bErr, skipped: skip}
 		}(i, req)
 	}
@@ -207,7 +208,8 @@ func (s *bulkHelperService) loadBatchParams(
 
 	// Collect unique counterparty IDs.
 	cpIDSet := make(map[uuid.UUID]struct{})
-	for _, inst := range params.Instruments {
+	for k := range params.Instruments {
+		inst := params.Instruments[k]
 		cpIDSet[inst.CounterpartyID] = struct{}{}
 	}
 	cpIDs := make([]uuid.UUID, 0, len(cpIDSet))
@@ -290,7 +292,6 @@ func (s *bulkHelperService) loadBatchParams(
 // processOne computes PD+LGD+EAD+CCF for one instrument.
 // Returns exactly one of (result, nil, nil), (nil, bulkErr, nil), or (nil, nil, skipped).
 func (s *bulkHelperService) processOne(
-	ctx context.Context,
 	req BulkRequest,
 	params *BatchParams,
 	periodeID string,
@@ -416,7 +417,7 @@ func (s *bulkHelperService) writeAuditBulkComplete(
 	if err != nil {
 		return
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer func() { _ = tx.Rollback() }() //nolint:errcheck // non-fatal cleanup; audit write is best-effort
 
 	ev := audit.Event{
 		Action:     "ECL_PARAM.BULK_LOOKUP_COMPLETE",
@@ -436,5 +437,8 @@ func (s *bulkHelperService) writeAuditBulkComplete(
 	if err := s.auditWriter.WithTx(tx).Write(ctx, ev); err != nil {
 		return
 	}
-	_ = tx.Commit()
+	if err := tx.Commit(); err != nil {
+		// Non-fatal: audit write failed; Rollback will be called via defer.
+		_ = err
+	}
 }

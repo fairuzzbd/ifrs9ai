@@ -95,14 +95,6 @@ func newTestHandler(pdSvc PDLookupService, lgdSvc LGDLookupService, eadSvc EADSe
 	return &Handler{svc: svc}
 }
 
-func withPermission(r *http.Request, perm string) *http.Request {
-	ctx := r.Context()
-	// Gin context permission injection via header convention (test middleware)
-	r.Header.Set("X-Test-Perms", perm)
-	_ = ctx
-	return r
-}
-
 func newRouter(h *Handler) *gin.Engine {
 	r := gin.New()
 	// Test middleware to inject permissions from X-Test-Perms header.
