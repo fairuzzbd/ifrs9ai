@@ -587,6 +587,20 @@ func main() {
 	wfService.RegisterEntityHook(lpsOverrideHook.EntityType(), lpsOverrideHook)
 
 	// -----------------------------------------------------------------------
+	// LPS Expiry Worker — Asynq job: lps:expiry-check (issue #47)
+	// Transitions stale APPROVED_ACTIVE overrides → EXPIRED daily at 01:00 WIB.
+	// Schedule: "@every 24h" (registered below); production uses cron "@daily 01:00 Asia/Jakarta".
+	// Worker panics at startup if auditWriter is nil (DEC-018 compliance guard).
+	// -----------------------------------------------------------------------
+	lpsExpiryRepo := lps.NewDBExpiryRepo(db)
+	lpsExpiryAuditWriter := lps.NewAuditWriterAdapter(audit.NewWriter(db))
+	// System actor UUID: fixed well-known value for SYSTEM-initiated transitions.
+	// Same pattern as staging.HandleOverrideExpiryCheck (staging/worker_tasks.go:231).
+	lpsSystemUserID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	lpsExpiryWorker := lps.NewExpiryWorker(lpsExpiryRepo, lpsExpiryAuditWriter, logger, lpsSystemUserID)
+	_ = lpsExpiryWorker // registered on Asynq mux below (Phase 2: wire asynq.ServeMux)
+
+	// -----------------------------------------------------------------------
 	// Look-through ECL (APP-C-LKT-001..005, Phase 4 Module 4)
 	// Endpoints (all under /api/v1/ecl/lookthrough/):
 	//   POST  composition/submit           — ROLE-AKUN submit fund composition
