@@ -29,7 +29,10 @@ func init() {
 
 // ─── TestEvaluate_202_ReturnsJobID ────────────────────────────────────────────
 
-func TestEvaluate_202_ReturnsResults(t *testing.T) {
+// TestEvaluate_202_ReturnsJobID verifies that EvaluateHandler returns 202 with
+// jobId + statusUrl + count (UX §3, F5 fix). In test mode (nil enqueuer) the
+// handler falls back to synchronous evaluation and still returns 202.
+func TestEvaluate_202_ReturnsJobID(t *testing.T) {
 	instrumenID := uuid.New()
 	instrumen := defaultMockInstrumen()
 	instrumen.originRating = "idA"
@@ -40,7 +43,7 @@ func TestEvaluate_202_ReturnsResults(t *testing.T) {
 		instrumen, &mockPeriodeReader{},
 		noopAuditWriter(), noopLogger(),
 	)
-	h := staging.NewHandler(svc)
+	h := staging.NewHandler(svc) // nil enqueuer → sync fallback
 
 	body, _ := json.Marshal(map[string]any{
 		"instrumenIds": []string{instrumenID.String()},
@@ -65,8 +68,71 @@ func TestEvaluate_202_ReturnsResults(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected data object, got: %v", resp["data"])
 	}
+	if data["jobId"] == nil {
+		t.Error("expected jobId in response data (UX §3)")
+	}
+	if data["statusUrl"] == nil {
+		t.Error("expected statusUrl in response data (UX §3)")
+	}
 	if data["count"] == nil {
 		t.Error("expected count in response data")
+	}
+}
+
+// TestEvaluateSync_200_SingleInstrument verifies the debug sync endpoint (F5).
+func TestEvaluateSync_200_SingleInstrument(t *testing.T) {
+	instrumenID := uuid.New()
+	instrumen := defaultMockInstrumen()
+	instrumen.originRating = "idA"
+	instrumen.currentRating = "idA" // no SICR
+
+	svc := staging.NewService(
+		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
+		instrumen, &mockPeriodeReader{},
+		noopAuditWriter(), noopLogger(),
+	)
+	h := staging.NewHandler(svc)
+
+	body, _ := json.Marshal(map[string]any{
+		"instrumenIds": []string{instrumenID.String()},
+		"triggerType":  "ALL",
+	})
+	ctx := ctxWithActor(uuid.New().String(), "ROLE-RISK", "TUGURE")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/ecl/staging/evaluate/sync", bytes.NewReader(body)).WithContext(ctx)
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.EvaluateSyncHandler(c)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEvaluateSync_400_TooManyIDs verifies the 1-ID limit on sync endpoint (F5).
+func TestEvaluateSync_400_TooManyIDs(t *testing.T) {
+	svc := staging.NewService(
+		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
+		defaultMockInstrumen(), &mockPeriodeReader{},
+		noopAuditWriter(), noopLogger(),
+	)
+	h := staging.NewHandler(svc)
+
+	body, _ := json.Marshal(map[string]any{
+		"instrumenIds": []string{uuid.New().String(), uuid.New().String()},
+		"triggerType":  "ALL",
+	})
+	ctx := ctxWithActor(uuid.New().String(), "ROLE-RISK", "TUGURE")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/ecl/staging/evaluate/sync", bytes.NewReader(body)).WithContext(ctx)
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.EvaluateSyncHandler(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for >1 IDs on sync endpoint, got %d", w.Code)
 	}
 }
 
@@ -1378,6 +1444,63 @@ func TestRecordDPDHandler_422_ServiceError(t *testing.T) {
 
 	if w.Code != http.StatusOK && w.Code < 400 {
 		t.Errorf("expected error status from service, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEvaluate_400_TooManyIDs verifies EvaluateHandler rejects > 500 instrumenIds.
+func TestEvaluate_400_TooManyIDs(t *testing.T) {
+	svc := staging.NewService(
+		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
+		defaultMockInstrumen(), &mockPeriodeReader{},
+		noopAuditWriter(), noopLogger(),
+	)
+	h := staging.NewHandler(svc)
+
+	ids := make([]string, 501)
+	for i := range ids {
+		ids[i] = uuid.New().String()
+	}
+	body, _ := json.Marshal(map[string]any{
+		"instrumenIds": ids,
+		"triggerType":  "ALL",
+	})
+	ctx := ctxWithActor(uuid.New().String(), "ROLE-RISK", "TUGURE")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/ecl/staging/evaluate",
+		bytes.NewReader(body)).WithContext(ctx)
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.EvaluateHandler(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for >500 instrumenIds, got %d", w.Code)
+	}
+}
+
+// TestEvaluateSync_400_EmptyIDs verifies the sync endpoint rejects an empty instrumenIds slice.
+func TestEvaluateSync_400_EmptyIDs(t *testing.T) {
+	svc := staging.NewService(
+		newMockDPDRepo(), newMockHistRepo(), newMockOverrideRepo(),
+		defaultMockInstrumen(), &mockPeriodeReader{},
+		noopAuditWriter(), noopLogger(),
+	)
+	h := staging.NewHandler(svc)
+
+	body, _ := json.Marshal(map[string]any{
+		"instrumenIds": []string{},
+		"triggerType":  "ALL",
+	})
+	ctx := ctxWithActor(uuid.New().String(), "ROLE-RISK", "TUGURE")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/ecl/staging/evaluate/sync", bytes.NewReader(body)).WithContext(ctx)
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.EvaluateSyncHandler(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for empty instrumenIds on sync endpoint, got %d", w.Code)
 	}
 }
 

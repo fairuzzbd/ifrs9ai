@@ -1,8 +1,9 @@
 // Package staging — HTTP handler layer for ECL Staging Engine (APP-C-STG-001..005).
 //
-// 11 endpoints per api/openapi/app-c-staging.yaml:
+// 12 endpoints per api/openapi/app-c-staging.yaml:
 //
-//	POST   /ecl/staging/evaluate                       → EvaluateHandler (202)
+//	POST   /ecl/staging/evaluate                       → EvaluateHandler (202 + Asynq)
+//	POST   /ecl/staging/evaluate/sync                  → EvaluateSyncHandler (200, debug, 1 ID, ROLE-RISK)
 //	GET    /ecl/staging/instrumen/{id}                 → GetCurrentStageHandler
 //	GET    /ecl/staging/instrumen/{id}/history         → GetHistoryHandler
 //	POST   /ecl/staging/override/submit                → SubmitOverrideHandler
@@ -16,36 +17,62 @@
 //
 // All POST endpoints require Idempotency-Key header (enforced by middleware, DEC-021).
 // Handlers contain no business logic; they only parse → delegate → serialize.
+//
+// F5 (UX §3): EvaluateHandler dispatches to Asynq and returns 202 + jobId.
+// Operations > 2 seconds must NOT block the HTTP thread.
 package staging
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
 
+	"blips-ifrs9.tugu-re.com/internal/auth"
 	domainerrors "blips-ifrs9.tugu-re.com/internal/common/errors"
 	"blips-ifrs9.tugu-re.com/internal/common/listquery"
 	"blips-ifrs9.tugu-re.com/internal/common/pagination"
 	"blips-ifrs9.tugu-re.com/internal/common/response"
 )
 
+// TaskEnqueuer is the minimal interface from asynq.Client used by EvaluateHandler.
+// Defined as an interface so tests can inject a no-op implementation.
+type TaskEnqueuer interface {
+	EnqueueContext(ctx interface{}, task *asynq.Task, opts ...asynq.Option) (*asynq.TaskInfo, error)
+}
+
 // Handler is the HTTP handler for staging endpoints.
 type Handler struct {
-	svc *Service
+	svc          *Service
+	taskEnqueuer TaskEnqueuer // nil = sync fallback (dev / test)
 }
 
 // NewHandler creates a Handler.
-func NewHandler(svc *Service) *Handler {
-	return &Handler{svc: svc}
+// Pass a non-nil asynq.Client for production use; pass nil for dev/test to fall back to
+// the synchronous evaluate path (EvaluateSyncHandler behaviour).
+func NewHandler(svc *Service, opts ...TaskEnqueuer) *Handler {
+	h := &Handler{svc: svc}
+	if len(opts) > 0 {
+		h.taskEnqueuer = opts[0]
+	}
+	return h
 }
 
 // ─── POST /ecl/staging/evaluate ──────────────────────────────────────────────
 
 // EvaluateHandler handles POST /api/v1/ecl/staging/evaluate.
-// Returns 202 Accepted — triggers SICR evaluation for submitted instrument IDs.
-// Idempotency-Key enforced by middleware.
+//
+// Returns 202 Accepted per UX §3 (long-running process).
+// Each instrument ID is dispatched as an individual Asynq task
+// (TaskTypeEvaluateStaging) against the default queue.
+//
+// When taskEnqueuer is nil (dev / test mode) the handler falls back to
+// calling EvaluateSingleInstrumen synchronously and still returns 202.
+//
+// Idempotency-Key enforced by middleware (DEC-021).
 func (h *Handler) EvaluateHandler(c *gin.Context) {
 	var req EvaluateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -54,8 +81,6 @@ func (h *Handler) EvaluateHandler(c *gin.Context) {
 		return
 	}
 
-	// For batch evaluation, submit Asynq tasks per instrument.
-	// For single-instrument debug path, InstrumenIDs can contain one item.
 	if len(req.InstrumenIDs) == 0 {
 		response.Error(c, domainerrors.New(domainerrors.CodeValidationFailed,
 			"instrumenIds wajib diisi (minimal 1, maksimal 500)"))
@@ -67,18 +92,97 @@ func (h *Handler) EvaluateHandler(c *gin.Context) {
 		return
 	}
 
-	tanggal := time.Now().UTC()
-	results := make([]*EvaluationResult, 0, len(req.InstrumenIDs))
-	for _, id := range req.InstrumenIDs {
-		result, err := h.svc.EvaluateSingleInstrumen(c.Request.Context(), id, tanggal, nil)
-		if err != nil {
-			response.Error(c, err)
-			return
+	claims := auth.ClaimsFromContext(c.Request.Context())
+	actorSub := ""
+	actorRole := ""
+	tenantID := "TUGURE"
+	if claims != nil {
+		actorSub = claims.Sub
+		if len(claims.Roles) > 0 {
+			actorRole = claims.Roles[0]
 		}
-		results = append(results, result)
+		if claims.TenantID != "" {
+			tenantID = claims.TenantID
+		}
 	}
 
-	response.Accepted(c, gin.H{"results": results, "count": len(results)})
+	jobID := uuid.New()
+	tanggal := time.Now().UTC()
+
+	if h.taskEnqueuer != nil {
+		// Production path: enqueue each instrument as an Asynq task (UX §3).
+		for _, instrumenID := range req.InstrumenIDs {
+			jobIDCopy := jobID
+			payload := EvaluateStagingPayload{
+				InstrumenID:       instrumenID,
+				TanggalAssessment: tanggal,
+				TenantID:          tenantID,
+				JobID:             &jobIDCopy,
+				ActorSub:          actorSub,
+				ActorRole:         actorRole,
+			}
+			task, err := NewEvaluateStagingTask(payload)
+			if err != nil {
+				response.Error(c, domainerrors.New(domainerrors.CodeInternal,
+					fmt.Sprintf("gagal membuat task untuk instrumen %s: %v", instrumenID, err)))
+				return
+			}
+			if _, err := h.taskEnqueuer.EnqueueContext(c.Request.Context(), task); err != nil {
+				response.Error(c, domainerrors.New(domainerrors.CodeInternal,
+					fmt.Sprintf("gagal enqueue task untuk instrumen %s: %v", instrumenID, err)))
+				return
+			}
+		}
+	} else {
+		// Dev / test fallback: synchronous evaluation (still returns 202).
+		for _, instrumenID := range req.InstrumenIDs {
+			jobIDCopy := jobID
+			if _, err := h.svc.EvaluateSingleInstrumen(c.Request.Context(), instrumenID, tanggal, &jobIDCopy); err != nil {
+				response.Error(c, err)
+				return
+			}
+		}
+	}
+
+	response.Accepted(c, gin.H{
+		"jobId":     jobID.String(),
+		"statusUrl": "/api/v1/jobs/" + jobID.String(),
+		"count":     len(req.InstrumenIDs),
+	})
+}
+
+// ─── POST /ecl/staging/evaluate/sync ─────────────────────────────────────────
+
+// EvaluateSyncHandler handles POST /api/v1/ecl/staging/evaluate/sync.
+//
+// Debug endpoint reserved for ROLE-RISK single-instrument evaluation.
+// Limit: 1 instrument ID; returns 200 with full EvaluationResult.
+// This endpoint must NOT be used for batch operations (use /evaluate for that).
+func (h *Handler) EvaluateSyncHandler(c *gin.Context) {
+	var req EvaluateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, domainerrors.New(domainerrors.CodeValidationFailed,
+			"Request body tidak valid: "+err.Error()))
+		return
+	}
+	if len(req.InstrumenIDs) == 0 {
+		response.Error(c, domainerrors.New(domainerrors.CodeValidationFailed,
+			"instrumenIds wajib diisi (tepat 1 ID untuk endpoint sync)"))
+		return
+	}
+	if len(req.InstrumenIDs) > 1 {
+		response.Error(c, domainerrors.New(domainerrors.CodeValidationFailed,
+			"endpoint sync hanya mendukung 1 instrumen ID per request"))
+		return
+	}
+
+	tanggal := time.Now().UTC()
+	result, err := h.svc.EvaluateSingleInstrumen(c.Request.Context(), req.InstrumenIDs[0], tanggal, nil)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.OK(c, result)
 }
 
 // ─── GET /ecl/staging/instrumen/{id} ─────────────────────────────────────────

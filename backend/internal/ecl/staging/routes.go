@@ -38,7 +38,10 @@ func RegisterRoutes(rg *gin.RouterGroup, h *Handler, v *auth.Verifier, db *sql.D
 	// Staging evaluation + query.
 	stagingGroup := authed.Group("/ecl/staging")
 	{
+		// Batch evaluate: returns 202 + jobId (Asynq dispatch). UX §3.
 		stagingGroup.POST("/evaluate", idmp, h.EvaluateHandler)
+		// Debug sync evaluate: returns 200 with full result. ROLE-RISK only, 1 ID max.
+		stagingGroup.POST("/evaluate/sync", idmp, h.EvaluateSyncHandler)
 		stagingGroup.GET("/instrumen/:id", h.GetCurrentStageHandler)
 		stagingGroup.GET("/instrumen/:id/history", h.GetHistoryHandler)
 		stagingGroup.GET("/overrides", h.ListOverridesHandler)
