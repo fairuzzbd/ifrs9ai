@@ -51,6 +51,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
 
+	"blips-ifrs9.tugu-re.com/internal/ecl/helpers"
 	"blips-ifrs9.tugu-re.com/internal/ecl/staging"
 )
 
@@ -512,6 +513,28 @@ func main() {
 	staging.RegisterRoutes(v1, stagingHandler, jwtVerifier, db)
 	stagingHook := staging.NewWorkflowHook(stagingOverrideRepo)
 	wfService.RegisterEntityHook("STAGING_OVERRIDE", stagingHook)
+
+	// -----------------------------------------------------------------------
+	// ECL Helpers — PD/LGD/EAD/CCF Lookup (APP-C-PAR-001..006, Phase 4 Module 2)
+	// Endpoints (all under /api/v1/ecl/helpers/):
+	//   GET  pd              — single PD lookup (Stage 1/2/3 × Good/Normal/Bad)
+	//   POST pd/bulk         — batch PD (max 1000 items)
+	//   GET  lgd             — single LGD lookup (pool-based Basel-style)
+	//   POST lgd/bulk        — batch LGD
+	//   GET  ead             — single EAD (IDR/FCY, EIR schedule, CCF)
+	//   POST ead/bulk        — batch EAD
+	//   GET  ccf             — single CCF lookup
+	//   GET  preview         — paginated pre-run ECL applicable instrument list
+	//   GET  preview/export  — async export (> 10k row → MinIO + notify)
+	//   POST bulk-lookup     — combined PD+LGD+EAD+CCF per instrument per periode
+	//
+	// Permissions: ecl_helpers.read (all except preview) + ecl_helpers.preview
+	// ECL formula: SoW §4, FSD-APP-C §3 — uses ALCO-approved params (immutable after seal)
+	// Anti-N+1: loadBatchParams loads all data in ≤ 11 DB round-trips
+	// -----------------------------------------------------------------------
+	helpersSvc := helpers.NewServices(db, auditWriter)
+	helpersHandler := helpers.NewHandler(helpersSvc)
+	helpers.RegisterRoutes(v1.Group("/ecl"), helpersHandler)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,

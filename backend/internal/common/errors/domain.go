@@ -78,6 +78,37 @@ const (
 	// Mapping jurnal module codes (APP-D) — HTTP 422.
 	CodeMappingJurnalDebitCreditMismatch Code = "MAPPING_JURNAL_DEBIT_CREDIT_MISMATCH" //nolint:gosec
 	CodeMappingJurnalKodeAkunNotApproved Code = "MAPPING_JURNAL_KODE_AKUN_NOT_APPROVED"
+
+	// P4-M2 ECL Helpers — PD lookup codes (APP-C-PAR-001) — HTTP 422/404.
+	CodePDLookupRatingMissing     Code = "PD_LOOKUP_RATING_MISSING"     // counterparty has no active rating per evaluationDate
+	CodePDLookupCurveNotFound     Code = "PD_LOOKUP_CURVE_NOT_FOUND"    // no APPROVED pd_pefindo row for rating
+	CodePDLookupParameterInactive Code = "PD_LOOKUP_PARAMETER_INACTIVE" // impact_pd not APPROVED for periodeId
+	CodePDLookupFLParamMissing    Code = "PD_LOOKUP_FL_PARAM_MISSING"   // impact_mev_pd (GOOD/BAD) not APPROVED
+	CodePDLookupTenorOutOfRange   Code = "PD_LOOKUP_TENOR_OUT_OF_RANGE" // tanggal_jatuh_tempo in the past (anomaly)
+
+	// P4-M2 ECL Helpers — LGD lookup codes (APP-C-PAR-002) — HTTP 422.
+	CodeLGDLookupPoolNotFound       Code = "LGD_LOOKUP_POOL_NOT_FOUND"      // no APPROVED lgd_basel row for tipe_eksposur
+	CodeLGDLookupMappingNotFound    Code = "LGD_LOOKUP_MAPPING_NOT_FOUND"   // tipe_counterparty not in LGD_COUNTERPARTY_TYPE_MAPPING
+	CodeLGDCollateralHaircutInvalid Code = "LGD_COLLATERAL_HAIRCUT_INVALID" // collateral haircut out of [0,1) range
+	CodeLGDLookupUseLookthrough     Code = "LGD_LOOKUP_USE_LOOKTHROUGH"     // REKSADANA must use P4-M4 look-through
+
+	// P4-M2 ECL Helpers — EAD computation codes (APP-C-PAR-003) — HTTP 422/404.
+	CodeEADFXRateMissing     Code = "EAD_FX_RATE_MISSING"      // no kurs BI JISDOR for currency per evaluationDate
+	CodeEADFXRateNotApproved Code = "EAD_FX_RATE_NOT_APPROVED" // kurs found but workflow_status != APPROVED
+	CodeEADInstrumenNotFound Code = "EAD_INSTRUMEN_NOT_FOUND"  // instrumenId not found in mst.instrumen
+
+	// P4-M2 ECL Helpers — CCF lookup codes (APP-C-PAR-004) — HTTP 422.
+	CodeCCFConfigMissing        Code = "CCF_CONFIG_MISSING"         // sys.config CCF_TABLE not found
+	CodeCCFInstrumenTypeUnknown Code = "CCF_INSTRUMEN_TYPE_UNKNOWN" // tipe_instrumen not in TipeInstrumen enum
+
+	// P4-M2 ECL Helpers — bulk / cross-cutting codes.
+	CodeHelpersBulkTooLarge              Code = "HELPERS_BULK_TOO_LARGE"              // > 1000 instruments per batch (HTTP 413)
+	CodeHelpersParameterSnapshotMismatch Code = "HELPERS_PARAMETER_SNAPSHOT_MISMATCH" // calc run sealed with old snapshot (HTTP 409)
+	CodeInstrumentECLNotApplicable       Code = "INSTRUMENT_ECL_NOT_APPLICABLE"       // FVTPL / FVOCI_ELECTION (HTTP 422)
+	CodeECLParamNotReady                 Code = "ECL_PARAM_NOT_READY"                 // parameters not all APPROVED for periodeId (HTTP 422)
+
+	// F3: POCI instruments require credit-adjusted EIR from P4-M7 (FSD-APP-C §3.5, IFRS9 §5.5.13).
+	CodePOCIDeferredToM7 Code = "POCI_DEFERRED_TO_M7" // POCI instrument — deferred to P4-M7 (HTTP 422)
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
@@ -121,6 +152,22 @@ func (c Code) HTTPStatus() int {
 		CodeFLPeriodDuplicate, CodeFLMultiplierRange,
 		CodeMappingJurnalDebitCreditMismatch, CodeMappingJurnalKodeAkunNotApproved:
 		return http.StatusUnprocessableEntity
+	// P4-M2 ECL Helpers error codes.
+	case CodePDLookupRatingMissing, CodePDLookupCurveNotFound,
+		CodePDLookupParameterInactive, CodePDLookupFLParamMissing,
+		CodePDLookupTenorOutOfRange,
+		CodeLGDLookupPoolNotFound, CodeLGDLookupMappingNotFound,
+		CodeLGDCollateralHaircutInvalid, CodeLGDLookupUseLookthrough,
+		CodeEADFXRateMissing, CodeEADFXRateNotApproved,
+		CodeCCFConfigMissing, CodeCCFInstrumenTypeUnknown,
+		CodeInstrumentECLNotApplicable, CodeECLParamNotReady,
+		CodeHelpersParameterSnapshotMismatch,
+		CodePOCIDeferredToM7:
+		return http.StatusUnprocessableEntity
+	case CodeEADInstrumenNotFound:
+		return http.StatusNotFound
+	case CodeHelpersBulkTooLarge:
+		return http.StatusRequestEntityTooLarge
 	case CodePeriodeClosed, CodeECLParamFrozen:
 		return 423 // Locked
 	case CodeRateLimited:
