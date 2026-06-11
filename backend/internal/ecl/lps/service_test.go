@@ -41,7 +41,14 @@ func (m *mockDepositoRepo) ListAllActivePairs(ctx context.Context, evalDate time
 	return m.allPairs, m.err
 }
 func (m *mockDepositoRepo) BulkListDepositoForAggregate(ctx context.Context, evalDate time.Time) ([]BulkDepositoRow, error) {
-	return m.bulkRows, m.err
+	if m.err != nil {
+		return nil, m.err
+	}
+	// Mirror issue #48 LIMIT+1 check: repo rejects > maxBulkInstruments in production.
+	if len(m.bulkRows) > maxBulkInstruments {
+		return nil, ErrLPSAggregateBulkTooLarge(len(m.bulkRows))
+	}
+	return m.bulkRows, nil
 }
 
 // mockOverrideRepo implements OverrideRepoIface.
