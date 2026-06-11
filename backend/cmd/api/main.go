@@ -50,6 +50,8 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/master/ratinghistory"
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
+
+	"blips-ifrs9.tugu-re.com/internal/ecl/staging"
 )
 
 // version adalah versi service yang dilaporkan probe liveness.
@@ -472,6 +474,44 @@ func main() {
 	wfService.RegisterEntityHook("PORTOFOLIO", portofolioHook)
 	portofolioHandler := portofolio.NewHandler(portofolioSvc, wfHandler)
 	portofolio.RegisterRoutes(v1, portofolioHandler)
+
+	// -----------------------------------------------------------------------
+	// ECL Staging Engine (APP-C-STG-001..005, Phase 4 Module 1)
+	// Endpoints:
+	//   POST   /ecl/staging/evaluate
+	//   GET    /ecl/staging/instrumen/:id
+	//   GET    /ecl/staging/instrumen/:id/history
+	//   POST   /ecl/staging/override/submit
+	//   POST   /ecl/staging/override/:id/{review,approve,approve2,reject}
+	//   GET    /ecl/staging/overrides
+	//   POST   /ecl/dpd/record
+	//   GET    /ecl/dpd/instrumen/:id
+	//
+	// Note: staging package manages its own workflow state directly in
+	// ecl.staging_override_proposal — no sys.workflow_instance used.
+	// The WorkflowHook below is an extension point for Phase 5.
+	// -----------------------------------------------------------------------
+	stagingDPDRepo := staging.NewDBDPDRepository(db)
+	stagingHistRepo := staging.NewDBStageHistoryRepository(db)
+	stagingOverrideRepo := staging.NewDBOverrideProposalRepository(db)
+	// instrumenReader adapter: queries mst.instrumen + mst.rating_history_counterparty
+	// directly via *sql.DB, avoiding circular imports with the instrumen package.
+	stagingInstrumenReader := staging.NewDBInstrumenReader(db)
+	// periodeReader adapter: queries mst.periode_buku directly via *sql.DB.
+	stagingPeriodeReader := staging.NewDBPeriodeBukuReader(db)
+	stagingSvc := staging.NewService(
+		stagingDPDRepo,
+		stagingHistRepo,
+		stagingOverrideRepo,
+		stagingInstrumenReader,
+		stagingPeriodeReader,
+		auditWriter,
+		logger,
+	)
+	stagingHandler := staging.NewHandler(stagingSvc)
+	staging.RegisterRoutes(v1, stagingHandler, jwtVerifier, db)
+	stagingHook := staging.NewWorkflowHook(stagingOverrideRepo)
+	wfService.RegisterEntityHook("STAGING_OVERRIDE", stagingHook)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,

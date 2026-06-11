@@ -490,5 +490,28 @@ func DefaultConfigs() map[string]*Config {
 				Approver2NotAnyPrevious:    true,
 			},
 		},
+		// STAGING_OVERRIDE — Phase 4 M1 manual override (APP-C-STG-004/005).
+		// Stage 2→3 = 4-eyes (RISK maker + RISK reviewer + ALCO approve).
+		// Stage 3→2 = 6-eyes (adds KOMITE approve2). Both paths: step-up MFA on approve(2).
+		// NOTE: staging service manages workflow state directly in ecl.staging_override_proposal,
+		// NOT via sys.workflow_instance. This config entry is reference-only (Phase 5 migration).
+		"STAGING_OVERRIDE": {
+			EntityType:  "STAGING_OVERRIDE",
+			Eyes:        6, // conservative: 6-eyes covers Stage 3→2 path; service enforces correct path per target stage.
+			Retractable: false,
+			RequiredPermissions: map[string]string{
+				"submit":   "ecl_run.create",
+				"review":   "ecl_run.create",
+				"approve":  "ecl_parameter.approve",
+				"approve2": "ecl_parameter.approve",
+				"reject":   "ecl_run.create",
+			},
+			StepUpRequired: map[string]bool{"approve": true, "approve2": true},
+			SoDRules: SoDRulesConfig{
+				ReviewerNotMaker:           true,
+				ApproverNotMakerOrReviewer: true,
+				Approver2NotAnyPrevious:    true,
+			},
+		},
 	}
 }
