@@ -111,11 +111,12 @@ func NewDBPeriodeBukuReader(db *sql.DB) *DBPeriodeBukuReader {
 	return &DBPeriodeBukuReader{db: db}
 }
 
-// ListClosedBulananSince returns closed BULANAN periode_buku tanggal_mulai >= from,
+// ListClosedBulananSince returns HARD_CLOSED BULANAN periode_buku with tanggal_mulai >= from,
 // ordered ascending by tanggal_mulai.
 //
-// Per state-machine §5.3 step 2: used for cure assessment.
-// Only BULANAN tipe_periode and status = 'HARD_CLOSED' or 'SOFT_CLOSED' are returned.
+// Per DEC-012 + FSD-APP-C §3.3: cure must count only HARD_CLOSED periods.
+// SOFT_CLOSED periods are re-openable and therefore not final — they must NOT
+// count toward the 3-consecutive-period cure criterion.
 func (r *DBPeriodeBukuReader) ListClosedBulananSince(ctx context.Context, from time.Time, tenantID string) ([]time.Time, error) {
 	if r.db == nil {
 		return nil, nil
@@ -124,7 +125,7 @@ func (r *DBPeriodeBukuReader) ListClosedBulananSince(ctx context.Context, from t
 		SELECT tanggal_mulai
 		FROM mst.periode_buku
 		WHERE tipe_periode = 'BULANAN'
-		  AND status IN ('HARD_CLOSED', 'SOFT_CLOSED')
+		  AND status = 'HARD_CLOSED'
 		  AND tanggal_mulai >= $1
 		  AND tenant_id = $2
 		  AND deleted_at IS NULL
@@ -144,4 +145,27 @@ func (r *DBPeriodeBukuReader) ListClosedBulananSince(ctx context.Context, from t
 		periods = append(periods, t)
 	}
 	return periods, rows.Err()
+}
+
+// GetTanggalAkhirByID returns mst.periode_buku.tanggal_akhir for the given periode ID.
+// Returns ErrNotFound if no matching (non-deleted) periode_buku row exists.
+//
+// Used by SubmitOverride to set periodeAkhir from the real periode_buku record
+// rather than a hardcoded 1-year offset (F4 fix per migration 000022 §Section 2).
+func (r *DBPeriodeBukuReader) GetTanggalAkhirByID(ctx context.Context, periodeID uuid.UUID) (time.Time, error) {
+	if r.db == nil {
+		return time.Time{}, ErrNotFound
+	}
+	var t time.Time
+	err := r.db.QueryRowContext(ctx,
+		`SELECT tanggal_akhir FROM mst.periode_buku WHERE id = $1 AND deleted_at IS NULL`,
+		periodeID,
+	).Scan(&t)
+	if err == sql.ErrNoRows {
+		return time.Time{}, ErrNotFound
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("staging DBPeriodeBukuReader.GetTanggalAkhirByID: %w", err)
+	}
+	return t, nil
 }
