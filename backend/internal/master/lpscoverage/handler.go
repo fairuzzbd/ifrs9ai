@@ -231,14 +231,19 @@ func (h *Handler) Delete(c *gin.Context) {
 		return
 	}
 
-	if err := h.svc.SoftDelete(c.Request.Context(), id); err != nil {
+	deleted, err := h.svc.SoftDelete(c.Request.Context(), id)
+	if err != nil {
 		response.Error(c, err)
+		return
+	}
+	if deleted == nil || deleted.DeletedAt == nil {
+		response.Error(c, domainerrors.ErrNotFound("LPS Coverage "+id.String()))
 		return
 	}
 
 	response.OK(c, DeleteResponse{
 		Deleted:   true,
-		DeletedAt: time.Now().Format(time.RFC3339),
+		DeletedAt: deleted.DeletedAt.Format(time.RFC3339),
 		EntityID:  id.String(),
 	})
 }
