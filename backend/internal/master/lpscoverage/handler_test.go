@@ -263,7 +263,7 @@ func TestList_ValidSortCol_Returns200(t *testing.T) {
 
 // TestExport_CSV_NoDB_Returns500 verifies that when no database is available
 // ExportCSV fails at BeginTx and the handler returns 500 (not a silent success).
-// This is the expected behaviour per DEC-018: audit-in-tx means we cannot export
+// This is the expected behavior per DEC-018: audit-in-tx means we cannot export
 // without a transaction, so an unavailable DB produces an explicit error.
 func TestExport_CSV_NoDB_Returns500(t *testing.T) {
 	csvData := "\xef\xbb\xbfID,Coverage Amount (IDR)\r\n"

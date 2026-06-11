@@ -26,7 +26,7 @@ type repoAdapter struct {
 	overlapErr error
 	refCount   int64
 	refErr     error
-	// beginTxFn overrides the default BeginTx behaviour.
+	// beginTxFn overrides the default BeginTx behavior.
 	// If nil, BeginTx returns (nil, errTestNoDB).
 	beginTxFn func() (*sql.Tx, error)
 }
