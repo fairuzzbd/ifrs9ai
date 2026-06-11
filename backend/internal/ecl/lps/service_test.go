@@ -115,7 +115,7 @@ func (m *mockOverrideRepo) Reject(ctx context.Context, tx *sql.Tx, id uuid.UUID,
 	return nil
 }
 func (m *mockOverrideRepo) List(ctx context.Context, filterWF, filterInstr, filterMaker, search, sortCol, sortDir, cursor string, limit int) ([]LPSExclusionOverride, string, bool, error) {
-	var result []LPSExclusionOverride
+	result := make([]LPSExclusionOverride, 0, len(m.overrides))
 	for _, ov := range m.overrides {
 		result = append(result, *ov)
 	}

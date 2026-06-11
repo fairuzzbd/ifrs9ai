@@ -293,7 +293,8 @@ func toOverrideDTO(o *LPSExclusionOverride) overrideDTO {
 // All IDR amounts serialized via StringFixed(4) — no float64 (DEC-016).
 func toPairAggregateDTO(agg *PairAggregation, evalDate time.Time) aggregateResultDTO {
 	breakdown := make([]instrumenBreakdownDTO, 0, len(agg.Breakdown))
-	for _, b := range agg.Breakdown {
+	for i := range agg.Breakdown {
+		b := &agg.Breakdown[i]
 		var tp *string
 		if !b.TanggalPenempatan.IsZero() {
 			s := b.TanggalPenempatan.Format("2006-01-02")
@@ -475,7 +476,8 @@ func (h *Handler) ListPreview(c *gin.Context) {
 	}
 
 	dtos := make([]previewRowDTO, 0, len(rows))
-	for _, r := range rows {
+	for i := range rows {
+		r := &rows[i]
 		dtos = append(dtos, previewRowDTO{
 			NasabahID:        r.NasabahID.String(),
 			NasabahNama:      r.NasabahNama,
@@ -552,7 +554,8 @@ func (h *Handler) ExportPreview(c *gin.Context) {
 		_, _ = c.Writer.WriteString("\xef\xbb\xbf") //nolint:errcheck,gosec
 		// Header row in Bahasa Indonesia.
 		fmt.Fprintf(c.Writer, "Nasabah ID,Nasabah,Bank ID,Bank,Total Exposure (IDR),Cap LPS (IDR),Covered (IDR),Excess (IDR),Covered %%,Jumlah Instrumen\r\n") //nolint:errcheck
-		for _, r := range rows {
+		for i := range rows {
+			r := &rows[i]
 			fmt.Fprintf(c.Writer, "%s,%q,%s,%q,%s,%s,%s,%s,%s,%d\r\n", //nolint:errcheck
 				r.NasabahID, r.NasabahNama, r.BankID, r.BankNama,
 				r.TotalExposureIDR.StringFixed(4), r.LPSCapIDR.StringFixed(4),
@@ -754,9 +757,8 @@ func (h *Handler) ListOverrides(c *gin.Context) {
 	}
 
 	dtos := make([]overrideDTO, 0, len(overrides))
-	for _, ov := range overrides {
-		ov := ov
-		dtos = append(dtos, toOverrideDTO(&ov))
+	for i := range overrides {
+		dtos = append(dtos, toOverrideDTO(&overrides[i]))
 	}
 
 	c.JSON(http.StatusOK, gin.H{

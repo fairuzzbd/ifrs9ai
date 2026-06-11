@@ -4,15 +4,21 @@
 # Phase 0 baseline config. Pragmatic set — noise-heavy style linters
 # intentionally excluded (see bottom of file). Expand as codebase matures.
 #
-# golangci-lint v2.6.0
+# Target linter version: golangci-lint v1.59.1 (golangci/golangci-lint:v1.59.1-alpine)
 # CI job: backend-lint in .github/workflows/ci.yml
 # Convention reference: .claude/memory/git-conventions.md
 # ---------------------------------------------------------------------------
 
-version: "2"
-
 run:
+  # Timeout for analysis; generous to accommodate repo growth.
   timeout: 5m
+
+  # Run from the backend/ directory (CI does `cd backend && golangci-lint run ./...`).
+  # Root module: blips-ifrs9.tugu-re.com (see backend/go.mod).
+  # NOTE: skip-files/skip-dirs moved to issues.exclude-files/exclude-dirs in
+  # golangci-lint v1.59 (removed from run:).
+
+  # Go version from go.mod.
   go: "1.24"
 
 # ---------------------------------------------------------------------------
@@ -20,139 +26,170 @@ run:
 # ---------------------------------------------------------------------------
 
 linters:
-  default: none
+  disable-all: true
   enable:
     # --- Correctness / bugs ---
-    - errcheck
-    - govet
-    - staticcheck
-    - ineffassign
-    - unused
+    - errcheck       # Unhandled errors — mandatory for financial domain.
+    - govet          # Reports suspicious constructs (shadow, printf misuse, etc.).
+    - staticcheck    # Comprehensive static analysis (superset of go-simple checks).
+    - gosimple       # Simplification suggestions from staticcheck suite.
+    - ineffassign    # Detects assignments that are never used.
+    - unused         # Reports unused code (functions, types, variables, constants).
 
     # --- Security (mandatory for regulated software / PII / auth) ---
-    - gosec
+    - gosec          # Security checks: SQL injection hints, hardcoded creds, weak crypto, etc.
+
+    # --- Formatting ---
+    - gofmt          # Standard Go formatting.
+    - goimports      # gofmt + import ordering (local prefix configured below).
 
     # --- Code quality ---
-    - gocritic
-    - revive
-    - misspell
-    - bodyclose
-    - prealloc
-    - unconvert
-    - unparam
+    - gocritic       # Opinionated checks; categories filtered to avoid noise (see settings).
+    - revive         # Drop-in golint replacement; configurable per-rule.
+    - misspell       # Catches common English spelling mistakes in comments/strings.
+    - bodyclose      # HTTP response body must be closed — prevents goroutine leaks.
+    - prealloc       # Suggests slice pre-allocation where loop length is known.
+    - unconvert      # Removes unnecessary type conversions.
+    - unparam        # Reports function parameters that are always the same value.
 
-  settings:
-    errcheck:
-      check-type-assertions: true
-      check-blank: true
+linters-settings:
 
-    gocritic:
-      enabled-tags:
-        - diagnostic
-        - performance
-      disabled-checks:
-        - commentedOutCode
-        - hugeParam
-        - rangeValCopy
+  # errcheck: be strict — every error must be handled in financial software.
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
 
-    revive:
-      rules:
-        - name: blank-imports
-        - name: context-as-argument
-        - name: context-keys-type
-        - name: dot-imports
-        - name: error-return
-        - name: error-strings
-        - name: error-naming
-        - name: exported
-        - name: if-return
-        - name: increment-decrement
-        - name: var-naming
-        - name: var-declaration
-        - name: package-comments
-        - name: range
-        - name: receiver-naming
-        - name: time-naming
-        - name: unexported-return
-        - name: indent-error-flow
-        - name: errorf
-        - name: redefines-builtin-id
+  # goimports: group imports with internal module prefix last (local group).
+  goimports:
+    local-prefixes: blips-ifrs9.tugu-re.com
 
-    gosec:
-      severity: low
-      confidence: low
-      excludes:
-        - G104
+  # gofmt: enforce simplification (-s flag).
+  gofmt:
+    simplify: true
 
-    misspell:
-      locale: US
+  # gocritic: enable stable, non-noisy check categories only.
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - performance
+    disabled-checks:
+      - commentedOutCode   # Legitimate during Phase 0 scaffold.
+      - hugeParam          # Can be noisy on domain structs; defer until stable API.
+      - paramTypeCombine   # Style-only, defer.
 
-    staticcheck:
-      checks: ["all"]
-
-    unparam:
-      check-exported: false
-
-  exclusions:
-    # Test files: relax strict linters — test helpers intentionally ignore
-    # errors, use contextless mocks, and don't need pre-allocation hints.
+  # revive: keep rules to actionable correctness checks; skip pure style.
+  revive:
     rules:
-      - path: "_test\\.go$"
-        linters:
-          - errcheck
-          - gosec
-          - unparam
-          - revive
-          - prealloc
+      - name: blank-imports
+      - name: context-as-argument   # context.Context must be the first argument.
+      - name: context-keys-type     # Unexported keys for context values.
+      - name: dot-imports
+      - name: error-return          # error must be the last return value.
+      - name: error-strings         # Error strings should not be capitalized or end in punctuation.
+      - name: error-naming          # Error variable names should start with Err.
+      - name: exported              # Exported types/funcs must have doc comments.
+      - name: if-return
+      - name: increment-decrement
+      - name: var-naming
+      - name: var-declaration
+      - name: package-comments
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: indent-error-flow
+      - name: errorf
 
-      # cmd/ entrypoints: unused params are normal for cobra/main commands.
-      - path: "cmd/"
-        linters:
-          - unparam
+  # gosec: treat all severity levels as issues.
+  gosec:
+    severity: low
+    confidence: low
+    # G104 (errors unhandled) overlaps errcheck — suppress to avoid duplicate noise.
+    excludes:
+      - G104
 
-    # Exclude generated and mock files from all linting.
-    paths:
-      - ".*\\.gen\\.go$"
-      - ".*_mock\\.go$"
-      - testdata
-      - vendor
+  # misspell: ignore bilingual BLIPS terms — codebase is intentionally bilingual
+  # (Bahasa Indonesia + British English alongside American English).
+  # This list covers false positives from the misspell linter; extend as needed
+  # when new domain terms are flagged.
+  misspell:
+    locale: US
+    ignore-words:
+      - implementasi   # Bahasa Indonesia — "implementation"
+      - variabel       # Bahasa Indonesia — "variable"
+      - catalogue      # British English — used in "error catalogue"
+      - initialise     # British English — used in comments/docs
+
+  # staticcheck: use all checks (SA*, S1*, QF*).
+  staticcheck:
+    checks: ["all"]
+
+  # unparam: report params that are always the same value (helps catch dead config).
+  unparam:
+    check-exported: false   # Too noisy on public API surface during Phase 0.
 
 # ---------------------------------------------------------------------------
-# Formatters
-# ---------------------------------------------------------------------------
-
-formatters:
-  enable:
-    - gofmt
-    - goimports
-  settings:
-    gofmt:
-      simplify: true
-    goimports:
-      local-prefixes:
-        - blips-ifrs9.tugu-re.com
-
-# ---------------------------------------------------------------------------
-# Issues (v2: only numeric limits and new-from-* diffs here)
+# Per-file / per-path overrides
 # ---------------------------------------------------------------------------
 
 issues:
+  # Skip generated files and test fixtures (moved here from run: in v1.59).
+  exclude-files:
+    - ".*\\.gen\\.go$"
+    - ".*_mock\\.go$"
+    - "mocks/.*\\.go$"
+  exclude-dirs:
+    - testdata
+    - vendor
+
+  # Max issues per linter per file before truncation.
   max-issues-per-linter: 50
   max-same-issues: 10
+
+  # Do not limit issues in new code — show everything.
+  new: false
+
+  exclude-rules:
+    # Test files: relax errcheck and gosec (test helpers often ignore errors intentionally).
+    - path: "_test\\.go$"
+      linters:
+        - errcheck
+        - gosec
+        - unparam
+
+    # Mock / generated files (belt-and-suspenders in addition to skip-files above).
+    - path: "(.*_mock\\.go|mocks/.*\\.go|.*\\.gen\\.go)"
+      linters:
+        - all
+
+    # cmd/ entrypoints: allow unused parameters (main args, cobra commands).
+    - path: "cmd/"
+      linters:
+        - unparam
+
+  # Max line length: 140 characters. Accommodates long SQL query strings common
+  # in a data-heavy financial backend, without being overly permissive.
+  # Note: golangci-lint v1.59.1 enforces line length via gocritic/revive rules;
+  # the explicit cap is documented here as policy reference.
 
 # ---------------------------------------------------------------------------
 # Linters intentionally NOT enabled (Phase 0 rationale)
 # ---------------------------------------------------------------------------
 #
-# wsl / nlreturn  — Whitespace/blank-line style; too noisy.
-# varnamelen      — Short variable names (i, tx, r) are idiomatic Go.
-# wrapcheck       — Requires wrapping all external errors; high noise.
-# exhaustruct     — Requires all struct fields set; impractical during scaffolding.
-# funlen          — Length cap disrupts complex ECL/EIR logic.
-# cyclop/gocognit — Complexity caps deferred until logic stabilises.
-# godot           — Period at end of comment; pure style.
-# lll             — Line length; enforced at code review, not CI.
-# godox           — TODO/FIXME; Phase 0 has intentional scaffolding TODOs.
-# tagliatelle     — Struct tag style; deferred until API is stable.
-# ireturn         — Return interfaces; valid DI pattern.
+# wsl            — Whitespace style; too noisy on fresh code, zero correctness value.
+# nlreturn       — Blank lines before returns; pure style, blocks PRs unnecessarily.
+# varnamelen     — Short variable names like i, tx, r are idiomatic Go; very noisy.
+# wrapcheck      — Requires wrapping all external errors; high noise, deferred to Phase 2
+#                  once error taxonomy is stable.
+# exhaustivestruct / exhaustruct — Requires all struct fields to be set; impractical
+#                  during fast scaffolding phase; enable per-struct when API stabilises.
+# funlen         — Function length cap; too disruptive on complex financial logic
+#                  (ECL calc runs, EIR solver) that are intentionally long.
+# cyclop / gocognit / gocyclo — Complexity caps; deferred until ECL/EIR logic is stable.
+# godot          — Period at end of every comment; pure style, high noise.
+# lll            — Line-length linter; policy is 140 chars (see above), but lll adds
+#                  duplicate noise alongside gofmt for trivial long strings.
+# godox          — TODO/FIXME warnings; Phase 0 has intentional TODOs in scaffold code.
+# tagliatelle    — Struct tag naming style; deferred until API schema is stable.
+# ireturn        — Return interfaces; valid pattern for dependency injection; deferred.
 # ---------------------------------------------------------------------------

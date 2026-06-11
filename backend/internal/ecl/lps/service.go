@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -29,6 +30,17 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/audit"
 	domainerrors "blips-ifrs9.tugu-re.com/internal/common/errors"
 )
+
+// rollbackTx attempts a transaction rollback and logs any error at Warn level.
+// Safe to call even if tx is nil (post-commit).
+func rollbackTx(ctx context.Context, tx *sql.Tx, logger *slog.Logger) {
+	if tx == nil {
+		return
+	}
+	if err := tx.Rollback(); err != nil && err != sql.ErrTxDone {
+		logger.WarnContext(ctx, "lps: tx rollback failed", "error", err)
+	}
+}
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -211,7 +223,8 @@ func (s *AggregatorService) Aggregate(ctx context.Context, nasabahID, bankID uui
 
 	// Step 3: for each instrument compute EAD_IDR.
 	eadsIDR := make([]decimal.Decimal, len(instruments))
-	for i, inst := range instruments {
+	for i := range instruments {
+		inst := &instruments[i]
 		ead, fxErr := s.toIDR(ctx, inst.Nominal, inst.MataUang, evalDate)
 		if fxErr != nil {
 			return nil, fxErr
@@ -221,8 +234,8 @@ func (s *AggregatorService) Aggregate(ctx context.Context, nasabahID, bankID uui
 
 	// Fetch overrides for all instruments in batch.
 	ids := make([]uuid.UUID, len(instruments))
-	for i, inst := range instruments {
-		ids[i] = inst.ID
+	for i := range instruments {
+		ids[i] = instruments[i].ID
 	}
 	overrideSet, err := s.overrideRepo.GetActiveSetForInstrumens(ctx, ids, evalDate)
 	if err != nil {
@@ -266,13 +279,14 @@ func (s *AggregatorService) AggregateBulk(ctx context.Context, evalDate time.Tim
 	}
 	order := []groupKey{}
 	groups := map[groupKey]*pairGroup{}
-	for _, row := range bulkRows {
+	for i := range bulkRows {
+		row := &bulkRows[i]
 		key := groupKey{row.NasabahID, row.BankID}
 		if _, ok := groups[key]; !ok {
 			groups[key] = &pairGroup{}
 			order = append(order, key)
 		}
-		groups[key].rows = append(groups[key].rows, row)
+		groups[key].rows = append(groups[key].rows, *row)
 	}
 
 	// Concurrent fan-out with semaphore.
@@ -309,7 +323,8 @@ func (s *AggregatorService) AggregateBulk(ctx context.Context, evalDate time.Tim
 		if res.err != nil {
 			return nil, res.err
 		}
-		for _, b := range res.agg.Breakdown {
+		for i := range res.agg.Breakdown {
+			b := &res.agg.Breakdown[i]
 			breakdown[b.InstrumenID] = LPSBreakdown{
 				EAD_IDR:        b.EAD_IDR,
 				CoveredIDR:     b.AllocatedToCovered,
@@ -334,7 +349,8 @@ func (s *AggregatorService) aggregatePairFromBulkRows(rows []BulkDepositoRow, ca
 	eadsIDR := make([]decimal.Decimal, len(rows))
 	overrideSet := make(map[uuid.UUID]*LPSExclusionOverride)
 
-	for i, row := range rows {
+	for i := range rows {
+		row := &rows[i]
 		instruments[i] = InstrumenDepositoRow{
 			ID:                 row.InstrumenID,
 			KodeInstrumen:      row.KodeInstrumen,
@@ -390,7 +406,8 @@ func (s *AggregatorService) allocatePair(
 	breakdown := make([]InstrumenBreakdown, 0, len(instruments))
 	var totalExposure, totalCovered, totalExcess decimal.Decimal
 
-	for rank, inst := range instruments {
+	for rank := range instruments {
+		inst := &instruments[rank]
 		ead := eadsIDR[rank]
 		totalExposure = totalExposure.Add(ead)
 
@@ -438,8 +455,8 @@ func (s *AggregatorService) allocatePair(
 	}
 
 	jumlahExcluded := 0
-	for _, b := range breakdown {
-		if b.LPSExcluded {
+	for i := range breakdown {
+		if breakdown[i].LPSExcluded {
 			jumlahExcluded++
 		}
 	}
@@ -504,7 +521,8 @@ func (s *AggregatorService) Preview(ctx context.Context, evalDate time.Time, _, 
 	}
 	order := []pairKey{}
 	accums := map[pairKey]*pairAccum{}
-	for _, row := range bulkRows {
+	for i := range bulkRows {
+		row := &bulkRows[i]
 		k := pairKey{row.NasabahID, row.BankID}
 		if _, ok := accums[k]; !ok {
 			accums[k] = &pairAccum{
@@ -555,8 +573,8 @@ func (s *AggregatorService) Preview(ctx context.Context, evalDate time.Time, _, 
 	// Cursor is the index into rows (opaque; encoded as row index string).
 	startIdx := 0
 	if cursor != "" {
-		for i, r := range rows {
-			if r.NasabahID.String()+":"+r.BankID.String() == cursor {
+		for i := range rows {
+			if rows[i].NasabahID.String()+":"+rows[i].BankID.String() == cursor {
 				startIdx = i + 1
 				break
 			}
@@ -607,6 +625,7 @@ type OverrideService struct {
 	overrideRepo OverrideRepoIface
 	periodeRepo  PeriodeBukuRepoIface
 	auditWriter  AuditWriterIface
+	logger       *slog.Logger
 }
 
 // NewOverrideService creates an OverrideService.
@@ -621,6 +640,7 @@ func NewOverrideService(
 		overrideRepo: overrideRepo,
 		periodeRepo:  periodeRepo,
 		auditWriter:  auditWriter,
+		logger:       slog.Default(),
 	}
 }
 
@@ -677,18 +697,14 @@ func (s *OverrideService) Submit(ctx context.Context, req SubmitOverrideRequest,
 	if err != nil {
 		return nil, fmt.Errorf("lps: begin tx: %w", err)
 	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback() //nolint:errcheck
-		}
-	}()
+	defer rollbackTx(ctx, tx, s.logger)
 
 	if err = s.overrideRepo.Create(ctx, tx, override); err != nil {
 		return nil, fmt.Errorf("lps: create override: %w", err)
 	}
 
 	if s.auditWriter != nil {
-		_ = s.auditWriter.Write(ctx, tx, AuditEvent{ //nolint:errcheck
+		if auditErr := s.auditWriter.Write(ctx, tx, AuditEvent{
 			ActorUserID: makerID,
 			ActorRole:   actorRole,
 			Action:      "LPS_EXCLUSION_OVERRIDE.SUBMIT",
@@ -697,7 +713,9 @@ func (s *OverrideService) Submit(ctx context.Context, req SubmitOverrideRequest,
 			BeforeJSON:  nil,
 			AfterJSON:   override,
 			TenantID:    tenantID,
-		})
+		}); auditErr != nil {
+			return nil, fmt.Errorf("lps: audit submit: %w", auditErr)
+		}
 	}
 
 	if err = tx.Commit(); err != nil {
@@ -732,18 +750,14 @@ func (s *OverrideService) ApproveOverride(ctx context.Context, overrideID uuid.U
 	if err != nil {
 		return nil, fmt.Errorf("lps: begin tx approve: %w", err)
 	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback() //nolint:errcheck
-		}
-	}()
+	defer rollbackTx(ctx, tx, s.logger)
 
 	if err = s.overrideRepo.Approve(ctx, tx, overrideID, approverID, signedAt, sigHash, comment, approverID); err != nil {
 		return nil, fmt.Errorf("lps: approve override: %w", err)
 	}
 
 	if s.auditWriter != nil {
-		_ = s.auditWriter.Write(ctx, tx, AuditEvent{ //nolint:errcheck
+		if auditErr := s.auditWriter.Write(ctx, tx, AuditEvent{
 			ActorUserID: approverID,
 			ActorRole:   actorRole,
 			Action:      "LPS_EXCLUSION_OVERRIDE.APPROVE",
@@ -752,7 +766,9 @@ func (s *OverrideService) ApproveOverride(ctx context.Context, overrideID uuid.U
 			BeforeJSON:  map[string]string{"workflowStatus": string(WorkflowStatusPendingApproval)},
 			AfterJSON:   map[string]string{"workflowStatus": string(WorkflowStatusApprovedActive), "comment": comment},
 			TenantID:    tenantID,
-		})
+		}); auditErr != nil {
+			return nil, fmt.Errorf("lps: audit approve: %w", auditErr)
+		}
 	}
 
 	if err = tx.Commit(); err != nil {
@@ -780,18 +796,14 @@ func (s *OverrideService) RejectOverride(ctx context.Context, overrideID uuid.UU
 	if err != nil {
 		return nil, fmt.Errorf("lps: begin tx reject: %w", err)
 	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback() //nolint:errcheck
-		}
-	}()
+	defer rollbackTx(ctx, tx, s.logger)
 
 	if err = s.overrideRepo.Reject(ctx, tx, overrideID, actorID, rejectReason, actorID); err != nil {
 		return nil, fmt.Errorf("lps: reject override: %w", err)
 	}
 
 	if s.auditWriter != nil {
-		_ = s.auditWriter.Write(ctx, tx, AuditEvent{ //nolint:errcheck
+		if auditErr := s.auditWriter.Write(ctx, tx, AuditEvent{
 			ActorUserID: actorID,
 			ActorRole:   actorRole,
 			Action:      "LPS_EXCLUSION_OVERRIDE.REJECT",
@@ -800,7 +812,9 @@ func (s *OverrideService) RejectOverride(ctx context.Context, overrideID uuid.UU
 			BeforeJSON:  map[string]string{"workflowStatus": string(WorkflowStatusPendingApproval)},
 			AfterJSON:   map[string]string{"workflowStatus": string(WorkflowStatusRejected), "rejectReason": rejectReason},
 			TenantID:    tenantID,
-		})
+		}); auditErr != nil {
+			return nil, fmt.Errorf("lps: audit reject: %w", auditErr)
+		}
 	}
 
 	if err = tx.Commit(); err != nil {
