@@ -25,6 +25,7 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 
@@ -52,6 +53,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/workflow"
 
 	"blips-ifrs9.tugu-re.com/internal/ecl/helpers"
+	"blips-ifrs9.tugu-re.com/internal/ecl/lps"
 	"blips-ifrs9.tugu-re.com/internal/ecl/staging"
 )
 
@@ -535,6 +537,53 @@ func main() {
 	helpersSvc := helpers.NewServices(db, auditWriter)
 	helpersHandler := helpers.NewHandler(helpersSvc)
 	helpers.RegisterRoutes(v1.Group("/ecl"), helpersHandler)
+
+	// -----------------------------------------------------------------------
+	// ECL LPS Aggregator (APP-C-LPS-001..005, Phase 4 Module 3)
+	// Endpoints (all under /api/v1/ecl/lps/):
+	//   POST  aggregate              — single (nasabah,bank) pair LPS coverage
+	//   POST  aggregate/bulk         — bulk all pairs for periodeId (202 job)
+	//   GET   preview                — DataTable coverage utilization
+	//   GET   preview/export         — CSV/XLSX export (inline or async)
+	//   POST  override/submit        — ROLE-RISK propose exclusion
+	//   POST  override/:id/approve   — ROLE-ALCO approve (MFA required DEC-026)
+	//   POST  override/:id/reject    — ROLE-RISK or ROLE-ALCO reject
+	//   GET   overrides              — DataTable override list
+	//   GET   overrides/:id          — detail
+	//
+	// Decisions: DEC-010, DEC-014, DEC-016, DEC-017, DEC-018, DEC-021, DEC-022.
+	// Formula: SoW §4.3, FSD-APP-C §3.3. Cap IDR 2B per nasabah per bank.
+	// -----------------------------------------------------------------------
+	lpsDepositoRepo := lps.NewDBDepositoInstrumenRepo(db)
+	lpsCovRepoForAgg := lps.NewDBLPSCoverageRepo(db)
+	lpsOverrideRepo := lps.NewDBOverrideRepo(db)
+
+	// KursRepoIface adapter: kurs.Repository.GetByKodeAndDate → lps.KursRepoIface.
+	lpsKursAdapter := lps.NewKursAdapter(func(ctx context.Context, kode string, tanggal time.Time) (string, bool, error) {
+		k, err := kursRepo.GetByKodeAndDate(ctx, kode, tanggal)
+		if err != nil || k == nil {
+			return "", false, err
+		}
+		return k.KursTengah.StringFixed(8), true, nil
+	})
+
+	// PeriodeBukuRepoIface adapter: periodebuku.Repository.GetByID → lps.PeriodeBukuRepoIface.
+	lpsPeriodeAdapter := lps.NewDBPeriodeBukuReader(func(ctx context.Context, id uuid.UUID) (string, string, bool, error) {
+		pb, err := periodeBukuRepo.GetByID(ctx, id)
+		if err != nil || pb == nil {
+			return "", "", false, err
+		}
+		return pb.TanggalMulai, pb.TanggalAkhir, true, nil
+	})
+
+	lpsAggregatorSvc := lps.NewAggregatorService(lpsCovRepoForAgg, lpsDepositoRepo, lpsOverrideRepo, lpsKursAdapter)
+	lpsOverrideSvc := lps.NewOverrideService(db, lpsOverrideRepo, lpsPeriodeAdapter, lps.NewAuditWriterAdapter(audit.NewWriter(db)))
+	lpsHandler := lps.NewHandler(lpsAggregatorSvc, lpsOverrideSvc)
+	lps.RegisterRoutes(v1, lpsHandler, jwtVerifier, db)
+
+	// Register workflow hook for LPS_EXCLUSION_OVERRIDE entity type.
+	lpsOverrideHook := lps.NewOverrideWorkflowHook(lpsOverrideRepo)
+	wfService.RegisterEntityHook(lpsOverrideHook.EntityType(), lpsOverrideHook)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,
