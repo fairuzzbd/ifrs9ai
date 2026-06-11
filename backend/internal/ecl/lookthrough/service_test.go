@@ -180,7 +180,7 @@ type mockResultRepo struct {
 	getErr    error
 }
 
-func (m *mockResultRepo) UpsertResult(_ context.Context, _ *sql.Tx, _ uuid.UUID, _ uuid.UUID, _ Result, _ uuid.UUID, _ uuid.UUID, _ time.Time, _ string) error {
+func (m *mockResultRepo) UpsertResult(_ context.Context, _ *sql.Tx, _ uuid.UUID, _ uuid.UUID, _ Result, _ uuid.UUID, _ uuid.UUID, _ time.Time, _ uuid.UUID, _ string) error {
 	return m.upsertErr
 }
 
@@ -425,7 +425,7 @@ func TestLookthroughService_Compute_FVTPLSkip(t *testing.T) {
 	svc := newTestLookthroughService(instRepo, &mockFundCompositionRepo{}, nil, nil, nil)
 
 	result, err := svc.Compute(context.Background(),
-		instRepo.inst.ID, uuid.UUID{}, uuid.New(), time.Now())
+		instRepo.inst.ID, uuid.UUID{}, uuid.New(), time.Now(), uuid.UUID{})
 
 	if err != nil {
 		t.Fatalf("expected nil error for FVTPL skip, got: %v", err)
@@ -461,7 +461,7 @@ func TestLookthroughService_Compute_POCIDeferred(t *testing.T) {
 	svc := newTestLookthroughService(instRepo, &mockFundCompositionRepo{}, nil, nil, nil)
 
 	_, err := svc.Compute(context.Background(),
-		instRepo.inst.ID, uuid.UUID{}, uuid.New(), time.Now())
+		instRepo.inst.ID, uuid.UUID{}, uuid.New(), time.Now(), uuid.UUID{})
 
 	if err == nil {
 		t.Fatal("expected POCI deferred error")
@@ -484,7 +484,7 @@ func TestLookthroughService_Compute_NABMissing(t *testing.T) {
 	svc := newTestLookthroughService(instRepo, &mockFundCompositionRepo{}, nil, nil, nil)
 
 	_, err := svc.Compute(context.Background(),
-		instRepo.inst.ID, uuid.UUID{}, uuid.New(), time.Now())
+		instRepo.inst.ID, uuid.UUID{}, uuid.New(), time.Now(), uuid.UUID{})
 
 	if err == nil {
 		t.Fatal("expected NAB missing error")
@@ -510,7 +510,7 @@ func TestLookthroughService_Compute_FundCompositionMissing(t *testing.T) {
 	svc := newTestLookthroughService(instRepo, compRepo, nil, nil, nil)
 
 	_, err := svc.Compute(context.Background(),
-		instRepo.inst.ID, uuid.UUID{}, uuid.New(), time.Now())
+		instRepo.inst.ID, uuid.UUID{}, uuid.New(), time.Now(), uuid.UUID{})
 
 	if err == nil {
 		t.Fatal("expected fund composition missing error")
@@ -568,7 +568,7 @@ func TestLookthroughService_Compute_Success(t *testing.T) {
 	svc := newTestLookthroughService(instRepo, compRepo, pdlgdRepo, nil, nil)
 
 	result, err := svc.Compute(context.Background(),
-		instrumenID, uuid.UUID{}, uuid.New(), time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC))
+		instrumenID, uuid.UUID{}, uuid.New(), time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC), uuid.UUID{})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -613,7 +613,7 @@ func TestLookthroughService_BulkCompute_TooLarge(t *testing.T) {
 	instRepo := &mockReksadanaRepo{bulk: instruments}
 	svc := newTestLookthroughService(instRepo, &mockFundCompositionRepo{}, nil, nil, nil)
 
-	_, err := svc.BulkCompute(context.Background(), uuid.New(), uuid.New(), time.Now())
+	_, err := svc.BulkCompute(context.Background(), uuid.New(), uuid.New(), time.Now(), uuid.UUID{})
 	if err == nil {
 		t.Fatal("expected bulk too large error")
 	}
@@ -637,7 +637,7 @@ func TestLookthroughService_BulkCompute_POCIIsNonFatal(t *testing.T) {
 	instRepo := &mockReksadanaRepo{bulk: instruments, inst: &pociInst}
 	svc := newTestLookthroughService(instRepo, &mockFundCompositionRepo{}, nil, nil, nil)
 
-	results, err := svc.BulkCompute(context.Background(), uuid.New(), uuid.New(), time.Now())
+	results, err := svc.BulkCompute(context.Background(), uuid.New(), uuid.New(), time.Now(), uuid.UUID{})
 	if err != nil {
 		t.Fatalf("bulk compute should not return top-level error for POCI: %v", err)
 	}
@@ -1265,7 +1265,7 @@ func TestLookthroughService_Compute_InstrumenNotFound(t *testing.T) {
 	instRepo := &mockReksadanaRepo{inst: nil, getErr: nil}
 	svc := newTestLookthroughService(instRepo, &mockFundCompositionRepo{}, nil, nil, nil)
 
-	_, err := svc.Compute(context.Background(), uuid.New(), uuid.UUID{}, uuid.New(), time.Now())
+	_, err := svc.Compute(context.Background(), uuid.New(), uuid.UUID{}, uuid.New(), time.Now(), uuid.UUID{})
 	if err == nil {
 		t.Fatal("expected error when instrumen not found")
 	}
@@ -1278,7 +1278,7 @@ func TestLookthroughService_Compute_InstrumenRepoError(t *testing.T) {
 	instRepo := &mockReksadanaRepo{getErr: sentinel}
 	svc := newTestLookthroughService(instRepo, &mockFundCompositionRepo{}, nil, nil, nil)
 
-	_, err := svc.Compute(context.Background(), uuid.New(), uuid.UUID{}, uuid.New(), time.Now())
+	_, err := svc.Compute(context.Background(), uuid.New(), uuid.UUID{}, uuid.New(), time.Now(), uuid.UUID{})
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("expected sentinel error, got: %v", err)
 	}
@@ -1311,7 +1311,7 @@ func TestLookthroughService_Compute_PDLGDMissing(t *testing.T) {
 	svc := newTestLookthroughService(instRepo, compRepo, pdlgdRepo, nil, nil)
 
 	_, err := svc.Compute(context.Background(),
-		instRepo.inst.ID, uuid.UUID{}, uuid.New(), time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC))
+		instRepo.inst.ID, uuid.UUID{}, uuid.New(), time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC), uuid.UUID{})
 	if err == nil {
 		t.Fatal("expected PDLGD missing error")
 	}
@@ -1464,7 +1464,7 @@ func TestLookthroughService_BulkCompute_InstrumenRepoError(t *testing.T) {
 	instRepo := &mockReksadanaRepo{bulkErr: sentinel}
 	svc := newTestLookthroughService(instRepo, &mockFundCompositionRepo{}, nil, nil, nil)
 
-	_, err := svc.BulkCompute(context.Background(), uuid.New(), uuid.New(), time.Now())
+	_, err := svc.BulkCompute(context.Background(), uuid.New(), uuid.New(), time.Now(), uuid.UUID{})
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("expected sentinel error, got: %v", err)
 	}
@@ -1485,7 +1485,7 @@ func TestLookthroughService_BulkCompute_AllFVTPL(t *testing.T) {
 	instRepo := &mockReksadanaRepo{bulk: bulk, inst: &bulk[0]}
 	svc := newTestLookthroughService(instRepo, &mockFundCompositionRepo{}, nil, nil, nil)
 
-	results, err := svc.BulkCompute(context.Background(), uuid.New(), uuid.New(), time.Now())
+	results, err := svc.BulkCompute(context.Background(), uuid.New(), uuid.New(), time.Now(), uuid.UUID{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

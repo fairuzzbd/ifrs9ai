@@ -753,9 +753,10 @@ func (r *DBScenarioParamRepo) GetFLMultipliers(ctx context.Context, periodeID uu
 type ResultRepo interface {
 	// UpsertResult inserts or updates the ecl.lookthrough_underlying row for (instrumen_id, run_id).
 	// tx must be an open transaction (audit-in-tx DEC-018).
+	// actorID is the user UUID from JWT claims (created_by / updated_by).
 	UpsertResult(ctx context.Context, tx *sql.Tx, instrumenID, runID uuid.UUID,
 		result Result, compositionID uuid.UUID, periodeID uuid.UUID,
-		evaluationDate time.Time, tenantID string) error
+		evaluationDate time.Time, actorID uuid.UUID, tenantID string) error
 
 	// GetByInstrumenAndRun fetches the stored result for (instrumen_id, run_id).
 	GetByInstrumenAndRun(ctx context.Context, instrumenID, runID uuid.UUID) (*StoredLookthroughResult, error)
@@ -814,10 +815,11 @@ SET fund_composition_id = EXCLUDED.fund_composition_id,
     row_version = ecl.lookthrough_underlying.row_version + 1`
 
 // UpsertResult inserts or updates the look-through result row.
+// actorID must be the authenticated user UUID from JWT claims (F4 — no placeholder).
 func (r *DBLookthroughResultRepo) UpsertResult(ctx context.Context, tx *sql.Tx,
 	instrumenID, runID uuid.UUID,
 	result Result, compositionID uuid.UUID, periodeID uuid.UUID,
-	evaluationDate time.Time, tenantID string,
+	evaluationDate time.Time, actorID uuid.UUID, tenantID string,
 ) error {
 	id := uuid.New()
 	breakdownJSON := marshalBreakdown(result.Breakdown)
@@ -828,7 +830,7 @@ func (r *DBLookthroughResultRepo) UpsertResult(ctx context.Context, tx *sql.Tx,
 		result.TotalECLIDR.StringFixed(4),
 		breakdownJSON,
 		result.FVTPLSkipped, result.Warning,
-		instrumenID, // created_by = instrumen owner placeholder (actual actor from ctx in service)
+		actorID, // created_by / updated_by from JWT actor (DEC-018)
 		tenantID,
 	)
 	return err

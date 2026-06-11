@@ -365,7 +365,7 @@ func TestDBLookthroughResultRepo_UpsertResult(t *testing.T) {
 
 	err = repo.UpsertResult(context.Background(), tx,
 		result.InstrumenID, uuid.New(), result,
-		uuid.New(), uuid.New(), time.Now(), "TUGURE")
+		uuid.New(), uuid.New(), time.Now(), uuid.New(), "TUGURE")
 	if err != nil {
 		t.Fatalf("UpsertResult error: %v", err)
 	}

@@ -63,7 +63,7 @@ func BenchmarkBulkCompute500(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := svc.BulkCompute(context.Background(), calcRunID, runID, evalDate)
+		_, err := svc.BulkCompute(context.Background(), calcRunID, runID, evalDate, uuid.UUID{})
 		if err != nil {
 			b.Fatalf("BulkCompute error: %v", err)
 		}

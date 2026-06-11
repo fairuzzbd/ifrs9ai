@@ -65,7 +65,7 @@ type mockLookthroughService struct {
 	previewErr     error
 }
 
-func (m *mockLookthroughService) Compute(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID, _ time.Time) (*Result, error) {
+func (m *mockLookthroughService) Compute(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID, _ time.Time, _ uuid.UUID) (*Result, error) {
 	return m.computeResult, m.computeErr
 }
 func (m *mockLookthroughService) Preview(_ context.Context, _ uuid.UUID, _ time.Time, _ string, _ int) ([]PreviewSummaryRow, string, bool, error) {
@@ -78,7 +78,7 @@ type mockResultRepoForHandler struct {
 	getErr error
 }
 
-func (m *mockResultRepoForHandler) UpsertResult(_ context.Context, _ *sql.Tx, _ uuid.UUID, _ uuid.UUID, _ Result, _ uuid.UUID, _ uuid.UUID, _ time.Time, _ string) error {
+func (m *mockResultRepoForHandler) UpsertResult(_ context.Context, _ *sql.Tx, _ uuid.UUID, _ uuid.UUID, _ Result, _ uuid.UUID, _ uuid.UUID, _ time.Time, _ uuid.UUID, _ string) error {
 	return nil
 }
 func (m *mockResultRepoForHandler) GetByInstrumenAndRun(_ context.Context, _ uuid.UUID, _ uuid.UUID) (*StoredLookthroughResult, error) {
