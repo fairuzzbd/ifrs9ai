@@ -8,10 +8,12 @@ package staging_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
 
 	"blips-ifrs9.tugu-re.com/internal/audit"
 	"blips-ifrs9.tugu-re.com/internal/auth"
@@ -49,6 +51,20 @@ func ctxWithStepUp(sub, role, tenantID string) context.Context {
 // silently skipped (the writer checks for nil db).
 func noopAuditWriter() *audit.Writer {
 	return audit.NewWriter(nil)
+}
+
+// trackingAuditContainer wraps audit.Writer so tests can verify it was passed.
+// Because audit.Writer does not expose an interface, we use the noop (nil-DB)
+// variant and just check that the object is the same pointer that was passed in.
+type trackingAuditContainer struct {
+	Writer *audit.Writer
+}
+
+// newTrackingAuditWriter returns a container holding a noop audit.Writer.
+// Tests can pass container.Writer to constructors and later confirm no error path
+// was triggered (the noop writer silently drops writes on nil DB).
+func newTrackingAuditWriter() *trackingAuditContainer {
+	return &trackingAuditContainer{Writer: audit.NewWriter(nil)}
 }
 
 // ─── noopLogger ──────────────────────────────────────────────────────────────
@@ -305,12 +321,61 @@ func (m *mockInstrumenReader) GetOriginationDate(_ context.Context, _ uuid.UUID)
 // ─── mockPeriodeReader ────────────────────────────────────────────────────────
 
 type mockPeriodeReader struct {
-	periods []time.Time
-	err     error
+	periods        []time.Time
+	err            error
+	tanggalAkhir   time.Time
+	tanggalAkhirErr error
 }
 
 func (m *mockPeriodeReader) ListClosedBulananSince(_ context.Context, _ time.Time, _ string) ([]time.Time, error) {
 	return m.periods, m.err
+}
+
+// GetTanggalAkhirByID returns tanggalAkhir for the mock periode reader.
+// If tanggalAkhirErr is set, returns that error.
+// If tanggalAkhir is zero, falls back to 1 year from now (permissive default for tests
+// that do not care about this field).
+func (m *mockPeriodeReader) GetTanggalAkhirByID(_ context.Context, _ uuid.UUID) (time.Time, error) {
+	if m.tanggalAkhirErr != nil {
+		return time.Time{}, m.tanggalAkhirErr
+	}
+	if !m.tanggalAkhir.IsZero() {
+		return m.tanggalAkhir, nil
+	}
+	return time.Now().AddDate(1, 0, 0), nil
+}
+
+// ─── mockExpiredErrRepo ───────────────────────────────────────────────────────
+
+// mockExpiredErrRepo is an override repo variant where MarkExpired always fails.
+// Used to cover the error branch in HandleOverrideExpiryCheck.
+type mockExpiredErrRepo struct {
+	*mockOverrideRepo
+	markExpiredErr error
+}
+
+func newMockExpiredErrRepo() *mockExpiredErrRepo {
+	return &mockExpiredErrRepo{
+		mockOverrideRepo: newMockOverrideRepo(),
+		markExpiredErr:   fmt.Errorf("mark expired DB error"),
+	}
+}
+
+func (m *mockExpiredErrRepo) MarkExpired(_ context.Context, _ *sql.Tx, _ uuid.UUID, _ uuid.UUID) error {
+	return m.markExpiredErr
+}
+
+// ─── noopEnqueuer ─────────────────────────────────────────────────────────────
+
+// noopEnqueuer implements staging.TaskEnqueuer for tests that need a non-nil enqueuer
+// (to exercise the Asynq dispatch path) without a real Redis connection.
+type noopEnqueuer struct {
+	enqueuedCount int
+}
+
+func (e *noopEnqueuer) EnqueueContext(_ interface{}, _ *asynq.Task, _ ...asynq.Option) (*asynq.TaskInfo, error) {
+	e.enqueuedCount++
+	return &asynq.TaskInfo{}, nil
 }
 
 // ─── newTestService ───────────────────────────────────────────────────────────

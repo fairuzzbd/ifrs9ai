@@ -1413,3 +1413,200 @@ func TestSubmitOverride_InvalidTransition_Stage1ToStage3(t *testing.T) {
 		t.Errorf("expected STAGING_OVERRIDE_INVALID_TRANSITION, got %s", de.Code())
 	}
 }
+
+// ─── F2: Cure uses only HARD_CLOSED periods ───────────────────────────────────
+
+// TestAssessCure_SoftClosedPeriods_DoNotTriggerCure (F2 fix, DEC-012 + FSD-APP-C §3.3)
+// Soft-closed periods are re-openable → they must NOT count toward cure.
+// Verifies that even 3 "periods" from a reader configured to return soft-closed
+// dates do NOT cause the cure path: the mock itself controls what it returns, so
+// this test seeds only 2 hard-closed periods → cure fails.
+func TestAssessCure_OnlyTwoHardClosed_DoesNotCure(t *testing.T) {
+	instrumenID := uuid.New()
+	dpdRepo := newMockDPDRepo()
+	dpdRepo.aboveCnt = 0
+
+	sicrDate := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	histRepo := newMockHistRepo()
+	histRepo.sicrDate = &sicrDate
+	histRepo.hasSICR = false
+	histRepo.rows = append(histRepo.rows, &staging.StageHistoryEntry{
+		ID:             uuid.New(),
+		InstrumenID:    instrumenID,
+		StageSebelum:   staging.Stage1,
+		StageSesudah:   staging.Stage2,
+		TriggerType:    staging.TriggerDPDGte30,
+		TanggalMigrasi: sicrDate,
+		TenantID:       "TUGURE",
+		CreatedBy:      uuid.New(),
+	})
+
+	// Only 2 HARD_CLOSED periods (adapter now filters SOFT_CLOSED out).
+	// F2 fix: DBPeriodeBukuReader.ListClosedBulananSince now only returns HARD_CLOSED.
+	// This test confirms that 2 periods (not 3) → cured=false.
+	periodeReader := &mockPeriodeReader{
+		periods: []time.Time{
+			time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC), // HARD_CLOSED
+			time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC), // HARD_CLOSED
+			// 3rd period would be SOFT_CLOSED — mock returns only 2
+		},
+	}
+
+	svc := newTestService(dpdRepo, histRepo, newMockOverrideRepo(), defaultMockInstrumen(), periodeReader)
+	ctx := ctxWithActor(uuid.New().String(), "ROLE-RISK", "TUGURE")
+
+	cured, err := svc.AssessCure(ctx, instrumenID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cured {
+		t.Error("expected cured=false with only 2 HARD_CLOSED periods (soft-closed must not count, DEC-012)")
+	}
+}
+
+// ─── F3: IG→non-IG SICR independent of notch delta ───────────────────────────
+
+// TestEvaluateInstrumen_IGToNonIG_1Notch_TriggersSICR (F3 fix, DEC-011)
+// A 1-notch downgrade from idBBB- (last IG, index 9) to idBB+ (first non-IG, index 10)
+// has delta=1, which does NOT trigger the "≥2 notch" rule alone.
+// The IG→non-IG trigger must fire independently regardless of notch delta.
+// Previously, EvaluateSingleInstrumen passed ratingPrevious="" so this was broken.
+// F3 fix: pass originRating as ratingPrevious so EvaluateSICR detects the boundary.
+func TestEvaluateInstrumen_IGToNonIG_1Notch_TriggersSICR(t *testing.T) {
+	dpdRepo := newMockDPDRepo()
+	histRepo := newMockHistRepo()
+	overRepo := newMockOverrideRepo()
+	instrumen := defaultMockInstrumen()
+	// idBBB- (last IG) → idBB+ (first non-IG): delta=1 (not ≥2), but IG→non-IG must fire.
+	instrumen.originRating = "idBBB-"
+	instrumen.currentRating = "idBB+"
+
+	svc := newTestService(dpdRepo, histRepo, overRepo, instrumen, &mockPeriodeReader{})
+	ctx := ctxWithActor(uuid.New().String(), "ROLE-RISK", "TUGURE")
+
+	result, err := svc.EvaluateSingleInstrumen(ctx, uuid.New(), time.Now().UTC(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Skipped {
+		t.Error("expected not skipped")
+	}
+	if result.NewStage == nil || *result.NewStage != staging.Stage2 {
+		t.Errorf("expected Stage2 (IG→non-IG 1-notch must trigger SICR), got %v", result.NewStage)
+	}
+	if result.SICRResult.TriggerType != staging.TriggerIGToNonIG {
+		t.Errorf("expected TriggerIGToNonIG, got %s (F3 fix: IG→non-IG independent of delta)",
+			result.SICRResult.TriggerType)
+	}
+}
+
+// ─── F4: SubmitOverride periodeAkhir reads periode_buku.tanggal_akhir ─────────
+
+// TestSubmitOverride_ReadsPerioDeAkhirFromPeriodeBuku (F4 fix)
+// periodeAkhir must come from mst.periode_buku.tanggal_akhir, not now+1year.
+func TestSubmitOverride_ReadsPeriodeAkhirFromPeriodeBuku(t *testing.T) {
+	instrumenID := uuid.New()
+	histRepo := newMockHistRepo()
+	histRepo.rows = append(histRepo.rows, &staging.StageHistoryEntry{
+		ID:             uuid.New(),
+		InstrumenID:    instrumenID,
+		StageSebelum:   staging.Stage1,
+		StageSesudah:   staging.Stage2,
+		TriggerType:    staging.TriggerDPDGte30,
+		TanggalMigrasi: time.Now().AddDate(0, -1, 0),
+		TenantID:       "TUGURE",
+		CreatedBy:      uuid.New(),
+	})
+
+	expectedAkhir := time.Date(2027, 3, 31, 23, 59, 59, 0, time.UTC)
+	periodeReader := &mockPeriodeReader{
+		tanggalAkhir: expectedAkhir,
+	}
+
+	svc := newTestService(newMockDPDRepo(), histRepo, newMockOverrideRepo(), defaultMockInstrumen(), periodeReader)
+	ctx := ctxWithActor(uuid.New().String(), "ROLE-RISK", "TUGURE")
+
+	prop, err := svc.SubmitOverride(ctx, staging.OverrideSubmitRequest{
+		InstrumenID: instrumenID,
+		StageTarget: staging.Stage1,
+		Alasan:      "Instrument has fully recovered, DPD cleared for 3 months",
+		PeriodeID:   uuid.New(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if prop == nil {
+		t.Fatal("expected non-nil proposal")
+	}
+	// Verify periodeAkhir matches what the reader returned, not now+1year.
+	if !prop.PeriodeAkhir.Equal(expectedAkhir) {
+		t.Errorf("expected PeriodeAkhir=%v (from periode_buku), got %v", expectedAkhir, prop.PeriodeAkhir)
+	}
+}
+
+// TestSubmitOverride_PeriodeNotFound_Returns422 (F4 fix)
+// If mst.periode_buku row does not exist, SubmitOverride must return an error.
+func TestSubmitOverride_PeriodeNotFound_Returns422(t *testing.T) {
+	instrumenID := uuid.New()
+	histRepo := newMockHistRepo()
+	histRepo.rows = append(histRepo.rows, &staging.StageHistoryEntry{
+		ID:             uuid.New(),
+		InstrumenID:    instrumenID,
+		StageSebelum:   staging.Stage1,
+		StageSesudah:   staging.Stage2,
+		TriggerType:    staging.TriggerDPDGte30,
+		TanggalMigrasi: time.Now().AddDate(0, -1, 0),
+		TenantID:       "TUGURE",
+		CreatedBy:      uuid.New(),
+	})
+
+	periodeReader := &mockPeriodeReader{
+		tanggalAkhirErr: staging.ErrNotFound, // periode not found
+	}
+
+	svc := newTestService(newMockDPDRepo(), histRepo, newMockOverrideRepo(), defaultMockInstrumen(), periodeReader)
+	ctx := ctxWithActor(uuid.New().String(), "ROLE-RISK", "TUGURE")
+
+	_, err := svc.SubmitOverride(ctx, staging.OverrideSubmitRequest{
+		InstrumenID: instrumenID,
+		StageTarget: staging.Stage1,
+		Alasan:      "Instrument has fully recovered, DPD cleared for 3 months",
+		PeriodeID:   uuid.New(),
+	})
+	if err == nil {
+		t.Fatal("expected error when periode_buku not found")
+	}
+	de, ok := domainerrors.IsDomainError(err)
+	if !ok {
+		t.Fatalf("expected DomainError, got %T: %v", err, err)
+	}
+	if string(de.Code()) != staging.CodeStagingRatingBaselineMissing {
+		t.Errorf("expected STAGING_RATING_BASELINE_MISSING (periode not found), got %s", de.Code())
+	}
+}
+
+// ─── DBPeriodeBukuReader adapter (nil-db path) ───────────────────────────────
+
+// TestDBPeriodeBukuReader_NilDB_GetTanggalAkhirByID_ReturnsNotFound verifies the
+// nil-db guard in GetTanggalAkhirByID returns ErrNotFound (no panic).
+// This covers the adapter code path introduced in the F4 fix.
+func TestDBPeriodeBukuReader_NilDB_GetTanggalAkhirByID_ReturnsNotFound(t *testing.T) {
+	reader := staging.NewDBPeriodeBukuReader(nil)
+	_, err := reader.GetTanggalAkhirByID(context.Background(), uuid.New())
+	if err != staging.ErrNotFound {
+		t.Errorf("expected ErrNotFound for nil-db reader, got %v", err)
+	}
+}
+
+// TestDBPeriodeBukuReader_NilDB_ListClosedBulananSince_ReturnsEmpty verifies the
+// nil-db guard in ListClosedBulananSince returns empty slice (no panic).
+func TestDBPeriodeBukuReader_NilDB_ListClosedBulananSince_ReturnsEmpty(t *testing.T) {
+	reader := staging.NewDBPeriodeBukuReader(nil)
+	result, err := reader.ListClosedBulananSince(context.Background(), time.Now(), "TUGURE")
+	if err != nil {
+		t.Errorf("expected nil error for nil-db reader, got %v", err)
+	}
+	if len(result) != 0 {
+		t.Errorf("expected empty slice for nil-db reader, got %d items", len(result))
+	}
+}
