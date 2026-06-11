@@ -262,11 +262,20 @@ ORDER BY i.counterparty_id ASC, i.bank_counterparty_id ASC,
          i.tanggal_penempatan ASC, i.id ASC`
 
 // BulkListDepositoForAggregate executes the batch N+1-free query.
+//
+// Issue #48 — LIMIT+1 pre-query size check:
+// Appends LIMIT maxBulkInstruments+1 to the query so the DB stops scanning after
+// 50 001 rows. If the result set exceeds maxBulkInstruments, returns
+// ErrLPSAggregateBulkTooLarge immediately — no memory wasted materialising 60k+ rows.
+// This avoids the previous pattern of fetching all rows and checking len() after.
 func (r *DBDepositoInstrumenRepo) BulkListDepositoForAggregate(ctx context.Context, evalDate time.Time) ([]BulkDepositoRow, error) {
 	if r.db == nil {
 		return nil, nil
 	}
-	rows, err := r.db.QueryContext(ctx, bulkDepositoQuery, evalDate, "TUGURE")
+	// LIMIT+1 trick: fetch one extra row to detect oversized result sets before materialising.
+	// If we receive maxBulkInstruments+1 rows, the real count is ≥ that value → reject.
+	limitedQuery := bulkDepositoQuery + fmt.Sprintf("\nLIMIT %d", maxBulkInstruments+1)
+	rows, err := r.db.QueryContext(ctx, limitedQuery, evalDate, "TUGURE")
 	if err != nil {
 		return nil, err
 	}
@@ -313,6 +322,12 @@ func (r *DBDepositoInstrumenRepo) BulkListDepositoForAggregate(ctx context.Conte
 			row.FXRate = &rate
 		}
 		result = append(result, row)
+		// LIMIT+1 check: if we have already accumulated maxBulkInstruments+1 rows,
+		// we know the real count exceeds the cap. Return the error immediately — no
+		// need to scan further. The DB will stop sending rows because of LIMIT clause.
+		if len(result) > maxBulkInstruments {
+			return nil, ErrLPSAggregateBulkTooLarge(len(result))
+		}
 	}
 	return result, rows.Err()
 }

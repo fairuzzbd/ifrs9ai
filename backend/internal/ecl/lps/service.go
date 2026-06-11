@@ -260,13 +260,12 @@ func (s *AggregatorService) AggregateBulk(ctx context.Context, evalDate time.Tim
 	}
 
 	// Step 2: Single batch query — all DEPOSITO instruments with FX pre-joined.
+	// Issue #48: size check now happens inside BulkListDepositoForAggregate via LIMIT+1
+	// trick (no extra round-trip, lower peak memory than fetching 60k+ rows first).
+	// ErrLPSAggregateBulkTooLarge (413) is returned directly from the repo if count > 50k.
 	bulkRows, err := s.depositoRepo.BulkListDepositoForAggregate(ctx, evalDate)
 	if err != nil {
 		return nil, err
-	}
-
-	if len(bulkRows) > maxBulkInstruments {
-		return nil, ErrLPSAggregateBulkTooLarge(len(bulkRows))
 	}
 
 	// Group by (nasabah, bank) — order preserved (bulkRows already sorted by nasabah, bank, FIFO).
