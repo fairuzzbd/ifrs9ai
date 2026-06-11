@@ -148,8 +148,15 @@ func GetLGDFromBatchParams(
 			fmt.Sprintf("LGD pool '%s' tidak tersedia untuk periode %s.", tipeEksposur, periodeID))
 	}
 	detail.BaseLGD = pool.LGD
-	detail.CollateralHaircut = decimal.Zero
-	lgdEff := pool.LGD.RoundBank(8)
+
+	// F4: mirror single-instrument haircut formula in batch path (DEC-016).
+	// Phase 1: haircut = 0 for all instruments (deposito/obligasi/saham).
+	// Phase 2+: look up collateral haircut per instrument type from params.CollateralHaircut.
+	haircut := decimal.Zero // Phase 1: hardcoded 0; Phase 2: lookup per instrument type TBD
+	detail.CollateralHaircut = haircut
+
+	// LGD_eff = LGD_pool × (1 - haircut). Rounded to 8dp (DEC-016).
+	lgdEff := pool.LGD.Mul(one.Sub(haircut)).RoundBank(8)
 	detail.LGDEffective = lgdEff
 	detail.LGD = lgdEff
 	return lgdEff, detail, nil
