@@ -268,6 +268,25 @@ components:
         - STAGING_OVERRIDE_EXPIRED          # 410 — override proposal sudah kadaluarsa
         - STAGING_RATING_BASELINE_MISSING   # 422 — rating_at_origination tidak ditemukan
         - STAGING_CALC_RUN_SEALED           # 423 — calc run periode sudah sealed, tidak bisa override
+        # ECL Helpers (APP-C, P4-M2)
+        - PD_LOOKUP_RATING_MISSING          # 422 — rating aktif counterparty tidak ada per evaluationDate
+        - PD_LOOKUP_CURVE_NOT_FOUND         # 422 — tidak ada pd_pefindo APPROVED untuk rating+periode
+        - PD_LOOKUP_PARAMETER_INACTIVE      # 422 — impact_pd tidak ada row APPROVED untuk periodeId
+        - PD_LOOKUP_FL_PARAM_MISSING        # 422 — impact_mev_pd (GOOD/BAD) tidak ada untuk skenario+periode
+        - PD_LOOKUP_TENOR_OUT_OF_RANGE      # 422 — tenor_remaining negatif (instrumen sudah jatuh tempo)
+        - LGD_LOOKUP_POOL_NOT_FOUND         # 422 — tidak ada row APPROVED di mst.lgd_basel untuk tipe_eksposur
+        - LGD_LOOKUP_MAPPING_NOT_FOUND      # 422 — tipe_counterparty tidak ada di LGD_COUNTERPARTY_TYPE_MAPPING
+        - LGD_COLLATERAL_HAIRCUT_INVALID    # 422 — collateral haircut value di luar range [0, 1)
+        - LGD_LOOKUP_USE_LOOKTHROUGH        # 422 — instrumen REKSADANA harus via look-through P4-M4
+        - EAD_FX_RATE_MISSING               # 422 — kurs BI JISDOR tidak tersedia per evaluationDate
+        - EAD_FX_RATE_NOT_APPROVED          # 422 — kurs ada tapi workflow_status bukan APPROVED
+        - EAD_INSTRUMEN_NOT_FOUND           # 404 — instrumenId tidak ada di mst.instrumen
+        - CCF_CONFIG_MISSING                # 422 — sys.config CCF_TABLE tidak ditemukan
+        - CCF_INSTRUMEN_TYPE_UNKNOWN        # 422 — tipe_instrumen bukan nilai enum yang valid
+        - HELPERS_BULK_TOO_LARGE            # 413 — request array > 1000 item
+        - HELPERS_PARAMETER_SNAPSHOT_MISMATCH # 409 — calc run sealed pakai snapshot lama (defer ke M7)
+        - INSTRUMENT_ECL_NOT_APPLICABLE     # 422 — instrumen FVTPL/FVOCI_ELECTION tidak butuh ECL
+        - ECL_PARAM_NOT_READY               # 422 — parameter belum semua APPROVED untuk periode
 
     # ---- Timestamps -------------------------------------------------------
     TimestampISO:
