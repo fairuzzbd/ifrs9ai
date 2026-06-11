@@ -287,6 +287,16 @@ components:
         - HELPERS_PARAMETER_SNAPSHOT_MISMATCH # 409 — calc run sealed pakai snapshot lama (defer ke M7)
         - INSTRUMENT_ECL_NOT_APPLICABLE     # 422 — instrumen FVTPL/FVOCI_ELECTION tidak butuh ECL
         - ECL_PARAM_NOT_READY               # 422 — parameter belum semua APPROVED untuk periode
+        # LPS Aggregator (APP-C, P4-M3)
+        - LPS_COVERAGE_NO_ACTIVE_PARAM        # 422 — tidak ada mst.lps_coverage APPROVED berlaku pada evaluationDate; blocking calc run
+        - LPS_OVERRIDE_INSTRUMEN_NOT_FOUND    # 404 — instrumenId tidak ada di mst.instrumen atau sudah soft-deleted
+        - LPS_OVERRIDE_REASON_TOO_SHORT       # 422 — alasan exclusion < 30 karakter
+        - LPS_OVERRIDE_INVALID_TRANSITION     # 422 — transisi workflow LPS override tidak valid untuk state saat ini
+        - LPS_OVERRIDE_EXPIRED               # 410 — proposal/override sudah melewati effectiveTo atau periode sudah expired
+        - LPS_OVERRIDE_SOD_VIOLATION         # 403 — approver_id = maker_id pada LPS exclusion override (4-eyes SoD)
+        - LPS_OVERRIDE_PERIODE_INVALID       # 422 — effectiveFrom > effectiveTo pada proposal override
+        - LPS_AGGREGATE_INSTRUMEN_NOT_DEPOSITO # 422 — instrumen bukan tipe DEPOSITO (scope Phase 4 = DEPOSITO only)
+        - LPS_AGGREGATE_BULK_TOO_LARGE       # 413 — instrumen dalam scope bulk aggregate > 50.000
 
     # ---- Timestamps -------------------------------------------------------
     TimestampISO:
