@@ -53,6 +53,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
 
+	eclcore "blips-ifrs9.tugu-re.com/internal/ecl/core"
 	"blips-ifrs9.tugu-re.com/internal/ecl/eir"
 	"blips-ifrs9.tugu-re.com/internal/ecl/helpers"
 	"blips-ifrs9.tugu-re.com/internal/ecl/lookthrough"
@@ -684,6 +685,42 @@ func main() {
 	eirHandler := eir.NewHandlerM6(eirComputeSvc, eirScheduleSvc, eirAmendSvc, eirBulkSvc, eirDetectionSvc, eirDriftSvc)
 	eir.RegisterRoutes(v1, eirHandler, jwtVerifier, db)
 
+	// -----------------------------------------------------------------------
+	// ECL Core Orchestrator (APP-C-ECL-001..007, Phase 4 Module 7)
+	// Endpoints (all under /api/v1/ecl/):
+	//   POST  compute                                        — single instrument ECL
+	//   POST  compute/bulk                                   — bulk 202+jobId (Asynq)
+	//   GET   results/:calcRunId                             — paginated result lines
+	//   GET   results/:calcRunId/instrumen/:instrumenId      — single result row
+	//   GET   results/:calcRunId/portofolio/:id/summary      — portfolio aggregate
+	//   GET   results/:calcRunId/roll-forward                — CKPN roll-forward report
+	//   POST  recompute/ad-hoc                               — preview recompute (ROLE-RISK)
+	//
+	// Decisions: DEC-010, DEC-013, DEC-016, DEC-017, DEC-018.
+	// Formula: SoW §4, FSD-APP-C §3.
+	// -----------------------------------------------------------------------
+
+	// BobotRepo adapter: reads mst.bobot_skenario APPROVED_ACTIVE rows for a periodeID.
+	// Implements eclcore.BobotRepo interface inline.
+	eclBobotRepo := eclcore.NewDBBobotRepo(db)
+
+	// InstrumenReader adapter: reads mst.instrumen snapshot for M7.
+	eclInstrReader := eclcore.NewDBInstrumenReader(db)
+
+	eclOrchestrator := eclcore.NewOrchestrator(
+		db,
+		auditWriter,
+		helpersSvc,
+		lpsAggregatorSvc, // M3 LPS aggregator
+		ltLookthroughSvc, // M4 look-through
+		eclInstrReader,
+		eclBobotRepo,
+		logger,
+	)
+	eclBulkWorker := eclcore.NewBulkWorker(eclOrchestrator, nil, logger)
+	eclHandler := eclcore.NewHandler(eclOrchestrator)
+	eclcore.RegisterRoutes(v1, eclHandler)
+
 	// B1 fix: Register DriftCronHandler on Asynq mux + scheduler.
 	// Previously the handler was instantiated then discarded (_ = ...), making the
 	// drift cron feature completely dead.  Now we:
@@ -701,6 +738,7 @@ func main() {
 		asynqMux := asynq.NewServeMux()
 		asynqMux.HandleFunc(eir.TaskDriftCron, driftCronHandler.HandleDriftCronTask)
 		asynqMux.HandleFunc(eir.TaskDriftAdHoc, driftCronHandler.HandleDriftAdHocTask)
+		asynqMux.HandleFunc(eclcore.TaskNameECLBulkCompute, eclBulkWorker.Handle)
 		// lpsExpiryWorker will be registered here in Phase 5 worker binary.
 		// asynqMux.HandleFunc(lps.TaskExpiryCheck, lpsExpiryWorker.HandleExpiryCheck)
 
