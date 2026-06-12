@@ -154,13 +154,13 @@ const (
 
 	// P4-M6 EIR Amendment Lifecycle codes (APP-C-M6-001..005).
 	// State machine: docs/state-machines/p4-m6-amendment-lifecycle.md §6.
-	CodeEIRAmendmentDetectionNoMatch    Code = "EIR_AMENDMENT_DETECTION_NO_MATCH"    // 422 — instrumen not eligible / doc type wrong / proposal active
-	CodeEIRAmendmentCancelForbidden     Code = "EIR_AMENDMENT_CANCEL_FORBIDDEN"      // 403 — caller not maker, or reviewer already signed
+	CodeEIRAmendmentDetectionNoMatch    Code = "EIR_AMENDMENT_DETECTION_NO_MATCH"      // 422 — instrumen not eligible / doc type wrong / proposal active
+	CodeEIRAmendmentCancelForbidden     Code = "EIR_AMENDMENT_CANCEL_FORBIDDEN"        // 403 — caller not maker, or reviewer already signed
 	CodeEIRAmendmentCancelReasonShort   Code = "EIR_AMENDMENT_CANCEL_REASON_TOO_SHORT" // 422 — cancelReason < 20 chars
-	CodeEIRDriftReportNotFound          Code = "EIR_DRIFT_REPORT_NOT_FOUND"          // 404 — sys.drift_report row missing
+	CodeEIRDriftReportNotFound          Code = "EIR_DRIFT_REPORT_NOT_FOUND"            // 404 — sys.drift_report row missing
 	CodeEIRDriftReportPeriodeOutOfRange Code = "EIR_DRIFT_REPORT_PERIODE_OUT_OF_RANGE" // 422 — periode param out of data range
-	CodeEIRDriftGenerationInProgress    Code = "EIR_DRIFT_GENERATION_IN_PROGRESS"    // 409 — concurrent drift job running
-	CodeEIRDriftThresholdInvalid        Code = "EIR_DRIFT_THRESHOLD_INVALID"         // 422 — sys.parameter threshold values invalid
+	CodeEIRDriftGenerationInProgress    Code = "EIR_DRIFT_GENERATION_IN_PROGRESS"      // 409 — concurrent drift job running
+	CodeEIRDriftThresholdInvalid        Code = "EIR_DRIFT_THRESHOLD_INVALID"           // 422 — sys.parameter threshold values invalid
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
