@@ -12,10 +12,15 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 )
+
+// WarnBobotDefaultFallbackUsed is the warning code emitted when bobot falls back to defaults.
+// F6 fix: explicit fallback only via AllowBobotDefaultFallback flag — not on DB error.
+const WarnBobotDefaultFallbackUsed = "ECL_BOBOT_DEFAULT_FALLBACK_USED"
 
 // ─── DBInstrumenReader ────────────────────────────────────────────────────────
 
@@ -157,8 +162,14 @@ func joinStrings(ss []string, sep string) string { //nolint:unparam // sep is a 
 
 // DBBobotRepo implements BobotRepo by querying mst.bobot_skenario.
 // It reads the three approved active rows (GOOD/NORMAL/BAD) for a given periodeID.
+//
+// F6 fix: DB errors and empty rows now return an error (not silent fallback).
+// AllowDefaultFallback flag enables explicit fallback for seeded/test environments only,
+// with a log warning and the WarnBobotDefaultFallbackUsed code to callers.
 type DBBobotRepo struct {
-	db *sql.DB
+	db                  *sql.DB
+	AllowDefaultFallback bool   // if true, returns default bobot when 0 rows found (with warning)
+	logger              *slog.Logger
 }
 
 // NewDBBobotRepo creates a DBBobotRepo. Panics if db is nil.
@@ -166,13 +177,15 @@ func NewDBBobotRepo(db *sql.DB) *DBBobotRepo {
 	if db == nil {
 		panic("core.NewDBBobotRepo: db must not be nil")
 	}
-	return &DBBobotRepo{db: db}
+	return &DBBobotRepo{db: db, logger: slog.Default()}
 }
 
 // GetActiveBobot returns the BobotSnapshot for the given periodeID.
 // Looks for APPROVED_ACTIVE rows in mst.bobot_skenario for skenario GOOD/NORMAL/BAD.
-// Falls back to default (0.25/0.50/0.25) if no rows found — with a log warning.
-// Per DEC-010: bobot must sum to 1.0; ALCO can override.
+//
+// F6 fix: returns error if DB unreachable or if 0 APPROVED_ACTIVE rows found.
+// AllowDefaultFallback=true uses defaults with a warning (explicit seed/test path only).
+// Per DEC-010: bobot must be ALCO-approved; silent fallback hides missing ALCO approval.
 func (r *DBBobotRepo) GetActiveBobot(ctx context.Context, periodeID string) (BobotSnapshot, error) {
 	q := `
 SELECT skenario, bobot
@@ -185,7 +198,8 @@ ORDER BY skenario`
 
 	rows, err := r.db.QueryContext(ctx, q, periodeID)
 	if err != nil {
-		return defaultBobotFallback(), nil // DB error → use default
+		// F6 fix: DB error is now propagated — callers should not proceed without bobot.
+		return BobotSnapshot{}, fmt.Errorf("core.GetActiveBobot: query bobot_skenario: %w", err)
 	}
 	defer rows.Close()
 
@@ -209,15 +223,34 @@ ORDER BY skenario`
 			found++
 		}
 	}
-	if rows.Err() != nil || found < 3 {
-		// Fallback to DEC-010 defaults if not all three found.
-		return defaultBobotFallback(), nil
+	if err := rows.Err(); err != nil {
+		return BobotSnapshot{}, fmt.Errorf("core.GetActiveBobot: scan bobot_skenario rows: %w", err)
+	}
+
+	if found < 3 {
+		if r.AllowDefaultFallback {
+			// Explicit fallback path: seed/test environment only.
+			// Log warning so operator knows ALCO bobot is missing.
+			logger := r.logger
+			if logger == nil {
+				logger = slog.Default()
+			}
+			logger.WarnContext(ctx, "core.GetActiveBobot: no APPROVED_ACTIVE bobot found; using DEC-010 defaults",
+				"periode_id", periodeID,
+				"found_rows", found,
+				"warning_code", WarnBobotDefaultFallbackUsed,
+			)
+			return defaultBobotFallback(), nil
+		}
+		// F6 fix: error when 0 approved rows and fallback not explicitly allowed.
+		return BobotSnapshot{}, fmt.Errorf("%w: no APPROVED_ACTIVE bobot_skenario rows for periodeID %q (found %d/3)",
+			errDomain(CodeECLParamNotFound, "bobot_skenario not found"), periodeID, found)
 	}
 	return BobotSnapshot{Good: good, Normal: normal, Bad: bad}, nil
 }
 
 // defaultBobotFallback returns DEC-010 default weights (0.25/0.50/0.25).
-// Used when mst.bobot_skenario has no approved active rows.
+// Used only when AllowDefaultFallback=true (seed/test environments).
 func defaultBobotFallback() BobotSnapshot {
 	return BobotSnapshot{
 		Good:   decimal.NewFromFloat(0.25),

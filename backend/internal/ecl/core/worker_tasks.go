@@ -118,7 +118,19 @@ func NewECLBulkComputeTask(payload TaskECLBulkComputePayload) (*asynq.Task, erro
 //
 // Performance: 1,000 instruments ≤ 30s SLA (state-machine doc §7.1).
 // Uses semaphore of 16 goroutines for fan-out.
+// F4 fix: returns ECL_CALC_RUN_SEALED (423) if sealChecker is injected and run is sealed.
 func (o *ECLOrchestrator) ComputeBulk(ctx context.Context, req BulkComputeRequest, progressFn ProgressFn) (*BulkComputeResult, error) {
+	// F4 fix: sealed-run guard at bulk entry point.
+	if o.sealChecker != nil {
+		sealed, err := o.sealChecker.IsSealedCalcRun(ctx, req.CalcRunID)
+		if err != nil {
+			return nil, fmt.Errorf("core.ComputeBulk: seal check: %w", err)
+		}
+		if sealed {
+			return nil, errDomain(CodeECLCalcRunSealed, "calc run is sealed — bulk compute not allowed")
+		}
+	}
+
 	// 1. Load active instruments in scope.
 	instruments, err := o.instrReader.ListActiveByScope(ctx, req.Scope)
 	if err != nil {
@@ -282,14 +294,17 @@ func (o *ECLOrchestrator) ComputeBulk(ctx context.Context, req BulkComputeReques
 }
 
 // reportProgress calls progressFn every progressReportEvery instruments.
+// F7 fix: use integer arithmetic instead of float64 to avoid float64 for percentage.
+// pct = processed * 100 / total (integer division — accurate enough for progress display).
 func reportProgress(progressFn ProgressFn, processed, total int) {
 	if progressFn == nil || total == 0 {
 		return
 	}
 	if processed%progressReportEvery == 0 || processed == total {
+		pct := processed * 100 / total // integer arithmetic, no float64
 		progressFn(processed, total,
-			fmt.Sprintf("Menghitung instrument %d dari %d (%.0f%%)",
-				processed, total, float64(processed)/float64(total)*100))
+			fmt.Sprintf("Menghitung instrument %d dari %d (%d%%)",
+				processed, total, pct))
 	}
 }
 
