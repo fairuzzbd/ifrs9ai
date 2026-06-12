@@ -1,0 +1,1654 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-C ECL Calc Run Orchestration (P4-M8)
+  version: "1.0.0"
+  description: |
+    Calc run lifecycle: create DRAFT, start bulk compute (Asynq), monitor progress,
+    seal (4-eyes: RISK request → ALCO approve + step-up MFA), cancel, parameter snapshot.
+
+    Story set: APP-C-M8-001..006
+    FSD: FSD-APP-C-ECL-EIR-v1.0.docx §5 (calc run orchestration), §6 (seal workflow)
+    SoW_v1.4.docx §4
+    BRD §8.2 (ECL Computation Requirements), §9.3 (Seal + Immutability)
+
+    ## Depends on (harus MERGED sebelum M8)
+    - P4-M7: ECLEngine.BulkCompute(), ecl.calc_header (mig 000029+000030)
+    - Phase 2: sys.job (mig 000004), GET /api/v1/jobs/{jobId}, SSE stream
+
+    ## Seal workflow (4-eyes — LOCKED per decision P4-M8)
+    RISK trigger seal/request → ALCO approve seal/approve + step-up MFA
+    ROLE-CFO boleh menggantikan ALCO sebagai approver (lihat permission calc_run.seal_approve)
+    SoD: created_by ≠ seal_approver_id enforced server-side + DB CHECK
+
+    ## Block after seal
+    Setelah ada satu SEALED calc_run per periode_id:
+    - POST /ecl/calc-runs → 422 CALC_RUN_PERIODE_ALREADY_SEALED
+    - ALCO override feature DEFERRED ke backlog (OQ-M8-2)
+
+    ## Parameter snapshot scope (frozen at /start)
+    Snapshot diambil dari tabel aktif per periode_id saat endpoint /start dipanggil:
+    - mst.bobot_skenario (workflow_status = APPROVED)
+    - mst.pd_pefindo (workflow_status = APPROVED)
+    - mst.lgd_basel (workflow_status = APPROVED)
+    - mst.impact_pd (workflow_status = APPROVED)
+    - mst.impact_mev_pd (workflow_status = APPROVED, skenario GOOD/NORMAL/BAD)
+    - mst.lps_coverage (workflow_status = APPROVED, berlaku per evaluation_date)
+    - mst.kurs (BI JISDOR, evaluation_date)
+    Disimpan di ecl.calc_run.parameter_snapshot_jsonb (JSONB).
+    Jika salah satu parameter belum APPROVED → 422 CALC_RUN_PARAMETER_SNAPSHOT_INVALID
+
+    ## Performance SLA
+    POST /ecl/calc-runs (create) ≤ 200ms
+    POST /ecl/calc-runs/{id}/start (dispatch) ≤ 500ms
+    POST /ecl/calc-runs/{id}/seal/* (seal transitions) ≤ 200ms
+    GET /ecl/calc-runs (list) ≤ 500ms (cursor pagination, max 200 rows)
+
+    ## Asynq dispatch
+    /start endpoint → Asynq task type "ECL_CALC_RUN"
+    payload: { calc_run_id, periode_id, evaluation_date, scope }
+    worker calls M7 ECLEngine.BulkCompute() per instrument
+    progress reported via Redis pub/sub → SSE /api/v1/jobs/{jobId}/stream
+
+    ## UX §1 compliance
+    GET /ecl/calc-runs: sort + cursor pagination + filter + export
+    All POST mutating endpoints: Idempotency-Key required (DEC-021)
+    /start endpoint: 202 + jobId + statusUrl + streamUrl (UX §3)
+
+    ## Permissions
+    calc_run.create       — ROLE-RISK
+    calc_run.start        — ROLE-RISK
+    calc_run.read         — ROLE-RISK, ROLE-AUDIT, ROLE-AKUN, ROLE-AKUN-CTL, ROLE-CFO
+    calc_run.seal_request — ROLE-RISK
+    calc_run.seal_approve — ROLE-ALCO, ROLE-CFO
+    calc_run.cancel       — ROLE-RISK (maker = created_by only)
+    calc_run.export       — ROLE-RISK, ROLE-AKUN-CTL, ROLE-CFO, ROLE-AUDIT
+
+    ## Audit events
+    CALC_RUN.CREATED, CALC_RUN.STARTED, CALC_RUN.COMPLETED,
+    CALC_RUN.COMPLETED_WITH_ERRORS, CALC_RUN.CANCELLED,
+    CALC_RUN.SEAL_REQUESTED, CALC_RUN.SEAL_APPROVED, CALC_RUN.SEALED,
+    CALC_RUN.SEAL_REJECTED, CALC_RUN.SOD_VIOLATION_ATTEMPT
+
+    ## Migration
+    data-modeler: migration 000031 — CREATE TABLE ecl.calc_run
+    (see docs/state-machines/p4-m8-calc-run.md §Hand-off for full column spec)
+
+    ## review-required
+    Seluruh file ini memerlukan BLOCKING gate dari ifrs9-compliance-reviewer
+    (seal = immutable per DEC-018, parameter freeze completeness OQ-M8-5)
+    dan security-engineer (step-up MFA, audit in-transaction, SoD enforcement).
+
+servers:
+  - url: /api/v1
+    description: BLIPS REST API v1
+
+tags:
+  - name: ecl-calc-run
+    description: ECL Calc Run lifecycle management (create, start, monitor, seal, cancel)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PATHS
+# ─────────────────────────────────────────────────────────────────────────────
+paths:
+
+  # ─── Collection ────────────────────────────────────────────────────────────
+  /ecl/calc-runs:
+
+    # ── POST /ecl/calc-runs — create DRAFT ────────────────────────────────────
+    post:
+      operationId: createCalcRun
+      summary: Create ECL calc run (DRAFT)
+      description: |
+        Membuat entri ecl.calc_run baru dengan status DRAFT, terikat ke periode_buku.
+        Tidak ada compute yang terjadi di endpoint ini.
+
+        **Pre-conditions:**
+        - mst.periode_buku dengan periode_id exists dan status != HARD_CLOSED
+        - Tidak ada calc_run dengan status IN_PROGRESS untuk periode_id yang sama
+        - Tidak ada calc_run dengan status SEALED untuk periode_id yang sama
+
+        **Permission required:** `calc_run.create` (ROLE-RISK)
+
+        **Audit:** CALC_RUN.CREATED ditulis in-transaction
+      tags: [ecl-calc-run]
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID v4. Same key + same payload → IDEMPOTENCY_REPLAY 200. (DEC-021)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCalcRunRequest"
+            example:
+              periodeId: "JUNI-2026"
+              evaluationDate: "2026-06-30"
+              scope: "ALL_ACTIVE"
+      responses:
+        "201":
+          description: Calc run DRAFT berhasil dibuat
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/CalcRunHeader"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  id: "550e8400-e29b-41d4-a716-446655440000"
+                  periodeId: "JUNI-2026"
+                  evaluationDate: "2026-06-30"
+                  scope: "ALL_ACTIVE"
+                  status: "DRAFT"
+                  processedCount: 0
+                  errorCount: 0
+                  createdBy: "user-risk-01-uuid"
+                  createdAt: "2026-06-12T08:00:00+07:00"
+                  updatedAt: "2026-06-12T08:00:00+07:00"
+                  rowVersion: 1
+                meta:
+                  traceId: "01HXY..."
+        "200":
+          description: IDEMPOTENCY_REPLAY — request identik sudah diproses sebelumnya
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/CalcRunHeader"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: |
+            Unprocessable — berbagai kondisi bisnis:
+            - PERIODE_CLOSED (423) — periode hard-closed
+            - CALC_RUN_DUPLICATE_IN_PROGRESS (409) — sudah ada IN_PROGRESS untuk periode ini
+            - CALC_RUN_PERIODE_ALREADY_SEALED (409) — periode sudah memiliki SEALED run
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "423":
+          $ref: "#/components/responses/PeriodeClosed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    # ── GET /ecl/calc-runs — DataTable list ───────────────────────────────────
+    get:
+      operationId: listCalcRuns
+      summary: List ECL calc runs (DataTable — sort + filter + cursor + export)
+      description: |
+        List semua calc_run. Cursor pagination, multi-sort, filter per kolom.
+        Export (CSV/XLSX) menggunakan filter+sort aktif.
+
+        **Permission required:** `calc_run.read` (ROLE-RISK, ROLE-AUDIT, ROLE-AKUN, ROLE-AKUN-CTL, ROLE-CFO)
+
+        **Allowed sort columns:** id, periode_id, status, evaluation_date, created_at,
+        completed_at, sealed_at, processed_count, error_count
+
+        **Allowed filter columns:** periode_id, status, evaluation_date, created_by,
+        created_at (range), sealed_at (is_null/is_not_null)
+
+        **Export:** GET /ecl/calc-runs/export?format=csv&... (async jika estimasi > 10k rows)
+      tags: [ecl-calc-run]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/cursor"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/sortParam"
+        - $ref: "#/components/parameters/searchParam"
+        - name: "filter[periode_id]"
+          in: query
+          schema:
+            type: string
+          description: Filter by periode_id (exact match)
+          example: "JUNI-2026"
+        - name: "filter[status]"
+          in: query
+          schema:
+            type: string
+            enum: [DRAFT, IN_PROGRESS, COMPLETED, COMPLETED_WITH_ERRORS, SEALED, CANCELLED]
+          description: Filter by status
+        - name: "filter[evaluation_date]"
+          in: query
+          schema:
+            type: string
+          description: "Filter by evaluation_date. Format: eq:2026-06-30 or between:2026-06-01,2026-06-30"
+        - name: "filter[created_by]"
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Filter by creator UUID
+        - name: include_cancelled
+          in: query
+          schema:
+            type: boolean
+            default: false
+          description: Sertakan CANCELLED runs dalam hasil (default false untuk non-AUDIT)
+        - $ref: "#/components/parameters/includeDeleted"
+      responses:
+        "200":
+          description: List berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CalcRunSummary"
+                  pagination:
+                    $ref: "#/components/schemas/PaginationResponse"
+                  appliedSort:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        col:
+                          type: string
+                        dir:
+                          type: string
+                          enum: [asc, desc]
+                  appliedFilter:
+                    type: object
+                    additionalProperties: true
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  - id: "550e8400-e29b-41d4-a716-446655440000"
+                    periodeId: "JUNI-2026"
+                    evaluationDate: "2026-06-30"
+                    status: "SEALED"
+                    processedCount: 995
+                    errorCount: 0
+                    sealedAt: "2026-06-12T10:00:00+07:00"
+                    createdAt: "2026-06-12T08:00:00+07:00"
+                pagination:
+                  nextCursor: null
+                  hasMore: false
+                  totalEstimate: 1
+                  limit: 50
+                appliedSort:
+                  - col: created_at
+                    dir: desc
+                appliedFilter:
+                  periode_id: "JUNI-2026"
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ─── Single item ───────────────────────────────────────────────────────────
+  /ecl/calc-runs/{id}:
+
+    # ── GET /ecl/calc-runs/{id} — header + progress + snapshot summary ────────
+    get:
+      operationId: getCalcRun
+      summary: Get calc run detail (header + progress + parameter snapshot summary)
+      description: |
+        Kembalikan header calc run lengkap beserta progress job saat ini (jika IN_PROGRESS)
+        dan ringkasan parameter snapshot (jika sudah di-start).
+
+        **Permission required:** `calc_run.read`
+      tags: [ecl-calc-run]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/calcRunId"
+      responses:
+        "200":
+          description: Detail calc run
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/CalcRunDetail"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ─── /start ────────────────────────────────────────────────────────────────
+  /ecl/calc-runs/{id}/start:
+
+    post:
+      operationId: startCalcRun
+      summary: Start bulk compute — DRAFT → IN_PROGRESS, snapshot parameters, dispatch Asynq
+      description: |
+        Transisi calc_run dari DRAFT ke IN_PROGRESS. Operasi ini:
+        1. Memvalidasi semua parameter ECL tersedia dan APPROVED untuk periode
+        2. Memvalidasi kurs BI JISDOR tersedia untuk evaluation_date
+        3. Membekukan parameter snapshot ke calc_run.parameter_snapshot_jsonb
+        4. Membuat sys.job baru (type=ECL_CALC_RUN, status=queued, can_cancel=true)
+        5. Mentransisi status ke IN_PROGRESS
+        6. Mendispatch Asynq task ECL_CALC_RUN ke worker queue
+        7. Mengembalikan 202 + jobId + statusUrl + streamUrl
+
+        Client harus subscribe ke streamUrl (SSE) atau polling statusUrl setiap 2 detik
+        untuk monitor progress (UX §3).
+
+        **Pre-conditions:**
+        - calc_run.status = DRAFT
+        - mst.periode_buku.status != HARD_CLOSED
+        - Semua parameter ECL aktif dan APPROVED untuk periode_id
+        - mst.kurs tersedia untuk evaluation_date
+
+        **Permission required:** `calc_run.start` (ROLE-RISK)
+
+        **Audit:** CALC_RUN.STARTED ditulis in-transaction (before Asynq dispatch)
+
+        **Performance SLA:** ≤ 500ms (snapshot + dispatch, tidak menunggu compute selesai)
+      tags: [ecl-calc-run]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/calcRunId"
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID v4. Double-click protection — same key + same payload → IDEMPOTENCY_REPLAY.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                comment:
+                  type: string
+                  maxLength: 500
+                  description: Komentar opsional dari ROLE-RISK saat memulai run
+            example:
+              comment: "Run manual untuk periode JUNI-2026 setelah koreksi data PD."
+      responses:
+        "202":
+          description: Accepted — Asynq job dispatched, compute berjalan di background
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/StartCalcRunResponse"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  calcRunId: "550e8400-e29b-41d4-a716-446655440000"
+                  jobId: "01HXYZ123456789ABCDEF"
+                  statusUrl: "/api/v1/jobs/01HXYZ123456789ABCDEF"
+                  streamUrl: "/api/v1/jobs/01HXYZ123456789ABCDEF/stream"
+                meta:
+                  traceId: "01HXY..."
+        "200":
+          description: IDEMPOTENCY_REPLAY — start sudah pernah dipanggil dengan key yang sama
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/StartCalcRunResponse"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: |
+            Unprocessable — kondisi bisnis:
+            - CALC_RUN_INVALID_TRANSITION — status bukan DRAFT
+            - CALC_RUN_PARAMETER_SNAPSHOT_INVALID — parameter ECL belum APPROVED
+            - ECL_PARAM_NOT_FOUND — parameter tidak ditemukan untuk periode
+            - FX_RATE_NOT_FOUND — kurs BI JISDOR belum tersedia
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "423":
+          $ref: "#/components/responses/PeriodeClosed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ─── /cancel ───────────────────────────────────────────────────────────────
+  /ecl/calc-runs/{id}/cancel:
+
+    post:
+      operationId: cancelCalcRun
+      summary: Cancel calc run (maker-only; DRAFT or IN_PROGRESS)
+      description: |
+        Membatalkan calc_run. Hanya creator (created_by = current user) yang boleh cancel.
+
+        - Jika DRAFT: langsung transisi ke CANCELLED, tidak ada Asynq job yang perlu di-stop.
+        - Jika IN_PROGRESS: kirim sinyal cancel ke Asynq job via ctx cancellation.
+          Worker berhenti setelah batch instrumen aktif selesai (≤ 100 instrumen tambahan).
+          Rows ecl.calc_result_line yang sudah di-commit TIDAK di-rollback
+          (partial result tetap ada untuk audit trail).
+
+        cancel_reason wajib ≥ 30 karakter — alasan bisnis harus substantif.
+
+        **Pre-conditions:**
+        - calc_run.status IN (DRAFT, IN_PROGRESS)
+        - Current user = calc_run.created_by (maker-only rule)
+        - cancel_reason.length ≥ 30
+
+        **Permission required:** `calc_run.cancel` (ROLE-RISK, maker only)
+
+        **Audit:** CALC_RUN.CANCELLED ditulis in-transaction
+      tags: [ecl-calc-run]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/calcRunId"
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CancelCalcRunRequest"
+            example:
+              cancelReason: "Data master counterparty belum lengkap, akan dibuat ulang setelah koreksi PD Pefindo."
+      responses:
+        "200":
+          description: Cancel berhasil atau IDEMPOTENCY_REPLAY
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/CalcRunHeader"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            FORBIDDEN — tidak memiliki permission calc_run.cancel
+            atau bukan creator dari calc_run ini (maker-only enforcement)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: |
+            CALC_RUN_INVALID_TRANSITION — status bukan DRAFT atau IN_PROGRESS
+            (COMPLETED, SEALED, CANCELLED tidak bisa di-cancel)
+            CALC_RUN_CANCEL_REASON_TOO_SHORT — cancelReason < 30 karakter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ─── /seal/request ─────────────────────────────────────────────────────────
+  /ecl/calc-runs/{id}/seal/request:
+
+    post:
+      operationId: requestCalcRunSeal
+      summary: Request seal — COMPLETED → SEAL_REQUESTED (ROLE-RISK)
+      description: |
+        ROLE-RISK mengajukan permintaan seal setelah calc_run berstatus COMPLETED.
+        Transisi: COMPLETED → SEAL_REQUESTED.
+
+        Setelah request berhasil:
+        - calc_run.seal_requested_by = current user
+        - calc_run.seal_requested_at = now()
+        - ROLE-ALCO / ROLE-CFO menerima notifikasi pending approval
+
+        **Constraint:** COMPLETED_WITH_ERRORS tidak bisa di-request seal.
+        Perbaiki error instrumen dan re-run terlebih dahulu.
+
+        **Pre-conditions:**
+        - calc_run.status = COMPLETED (error_count = 0)
+        - Current user memiliki permission calc_run.seal_request (ROLE-RISK)
+        - Tidak ada SEALED calc_run lain untuk periode_id yang sama
+
+        **SoD note:** User yang melakukan seal/request tidak boleh menjadi approver
+        di seal/approve (server-side enforced).
+
+        **Permission required:** `calc_run.seal_request` (ROLE-RISK)
+
+        **Audit:** CALC_RUN.SEAL_REQUESTED ditulis in-transaction
+      tags: [ecl-calc-run]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/calcRunId"
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SealRequestBody"
+            example:
+              comment: "ECL JUNI-2026 telah diverifikasi. Semua instrumen diproses tanpa error. Siap untuk di-seal."
+      responses:
+        "200":
+          description: Seal request berhasil — status menjadi SEAL_REQUESTED
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/CalcRunSealState"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  id: "550e8400-e29b-41d4-a716-446655440000"
+                  status: "SEAL_REQUESTED"
+                  sealRequestedBy: "user-risk-01-uuid"
+                  sealRequestedAt: "2026-06-12T09:00:00+07:00"
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: |
+            - CALC_RUN_SEAL_REQUIRES_COMPLETED — status bukan COMPLETED
+            - CALC_RUN_HAS_ERRORS — error_count > 0 (COMPLETED_WITH_ERRORS)
+            - CALC_RUN_PERIODE_ALREADY_SEALED — sudah ada SEALED run untuk periode ini
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ─── /seal/approve ─────────────────────────────────────────────────────────
+  /ecl/calc-runs/{id}/seal/approve:
+
+    post:
+      operationId: approveCalcRunSeal
+      summary: Approve seal — SEAL_REQUESTED → SEALED (ROLE-ALCO or ROLE-CFO, step-up MFA)
+      description: |
+        ROLE-ALCO atau ROLE-CFO melakukan approval seal. Ini adalah satu-satunya step
+        approval dalam workflow 4-eyes (RISK request → ALCO/CFO approve).
+
+        Setelah approve berhasil:
+        - calc_run.status = SEALED
+        - calc_run.sealed_at = now()
+        - calc_run.seal_approved_by = current user
+        - calc_run.signature_hash_seal = SHA-256(approver_id || calc_run_id || sealed_at || comment)
+        - DB trigger fn_ecl_calc_run_no_modify_when_sealed aktif
+        - ecl.calc_result_line terkait tidak dapat diubah lagi (ECL_PARAM_FROZEN 423)
+
+        **Step-up MFA wajib (DEC-027):**
+        Header X-Step-Up-Token harus menyertakan token dari POST /auth/step-up.
+        Token harus diperoleh ≤ 5 menit sebelum request ini.
+        Token expired atau invalid → 403 STEP_UP_EXPIRED / STEP_UP_REQUIRED
+
+        **SoD enforcement (server-side):**
+        current user ≠ calc_run.seal_requested_by
+        Jika sama → 403 CALC_RUN_SEAL_SOD_VIOLATION + audit CALC_RUN.SOD_VIOLATION_ATTEMPT
+
+        **Permission required:** `calc_run.seal_approve` (ROLE-ALCO, ROLE-CFO)
+
+        **Audit:** CALC_RUN.SEAL_APPROVED + CALC_RUN.SEALED ditulis in-transaction
+        (single transaction: approve + seal + write audit + update result lines immutability)
+      tags: [ecl-calc-run]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/calcRunId"
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: header
+          name: X-Step-Up-Token
+          required: true
+          schema:
+            type: string
+          description: |
+            Token step-up MFA dari POST /auth/step-up.
+            Wajib untuk endpoint ini (DEC-027).
+            TTL: 5 menit sejak diterbitkan.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SealApproveBody"
+            example:
+              comment: "Parameter konsisten dengan baseline ALCO. ECL JUNI-2026 final dan immutable."
+      responses:
+        "200":
+          description: Seal approve berhasil — status menjadi SEALED
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/CalcRunSealState"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  id: "550e8400-e29b-41d4-a716-446655440000"
+                  status: "SEALED"
+                  sealedAt: "2026-06-12T10:00:00+07:00"
+                  sealApprovedBy: "user-alco-01-uuid"
+                  signatureHashSeal: "sha256-hex-string..."
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            FORBIDDEN — tidak memiliki permission calc_run.seal_approve
+            SOD_VIOLATION / CALC_RUN_SEAL_SOD_VIOLATION — approver = requester
+            STEP_UP_REQUIRED / STEP_UP_EXPIRED — step-up MFA tidak valid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: |
+            CALC_RUN_SEAL_NOT_REQUESTED — status bukan SEAL_REQUESTED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ─── /seal/reject ──────────────────────────────────────────────────────────
+  /ecl/calc-runs/{id}/seal/reject:
+
+    post:
+      operationId: rejectCalcRunSeal
+      summary: Reject seal — SEAL_REQUESTED → COMPLETED (ROLE-ALCO or ROLE-CFO)
+      description: |
+        ROLE-ALCO atau ROLE-CFO menolak request seal. Status kembali ke COMPLETED
+        sehingga ROLE-RISK dapat menganalisis dan mengajukan seal request ulang.
+
+        reject_reason wajib diisi. Tidak perlu step-up MFA untuk reject
+        (hanya approve yang memerlukan step-up per DEC-027).
+
+        **SoD enforcement:** current user ≠ calc_run.seal_requested_by
+
+        **Permission required:** `calc_run.seal_approve` (ROLE-ALCO, ROLE-CFO)
+        (sama dengan approve — sudah menerima notifikasi untuk review)
+
+        **Audit:** CALC_RUN.SEAL_REJECTED ditulis in-transaction
+      tags: [ecl-calc-run]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/calcRunId"
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SealRejectBody"
+            example:
+              rejectReason: "Parameter LGD pool tipe OBLIGASI perlu direvisi. Koordinasikan dengan Risk Manager sebelum re-submit."
+      responses:
+        "200":
+          description: Seal reject berhasil — status kembali ke COMPLETED
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/CalcRunSealState"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  id: "550e8400-e29b-41d4-a716-446655440000"
+                  status: "COMPLETED"
+                  sealRejectedBy: "user-alco-01-uuid"
+                  sealRejectedAt: "2026-06-12T09:30:00+07:00"
+                  rejectReason: "Parameter LGD pool tipe OBLIGASI perlu direvisi..."
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            FORBIDDEN — tidak memiliki permission calc_run.seal_approve
+            SOD_VIOLATION — approver = requester
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: |
+            CALC_RUN_SEAL_NOT_REQUESTED — status bukan SEAL_REQUESTED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ─── /parameter-snapshot ───────────────────────────────────────────────────
+  /ecl/calc-runs/{id}/parameter-snapshot:
+
+    get:
+      operationId: getCalcRunParameterSnapshot
+      summary: Get frozen parameter snapshot (read-only, audit)
+      description: |
+        Kembalikan parameter_snapshot_jsonb yang dibekukan saat /start dipanggil.
+        Tersedia setelah status IN_PROGRESS (snapshot sudah diambil).
+        Untuk status DRAFT → 422 karena snapshot belum ada.
+
+        Digunakan untuk:
+        - Audit trail verifikasi parameter yang dipakai saat compute
+        - Reconcile hasil ECL dengan parameter ALCO-approved
+        - ROLE-AUDIT review
+
+        **Permission required:** `calc_run.read`
+
+        **Note:** Endpoint ini hanya read-only. Parameter snapshot tidak bisa diubah
+        setelah /start (immutable per DEC-018).
+      tags: [ecl-calc-run]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/calcRunId"
+      responses:
+        "200":
+          description: Parameter snapshot berhasil dikembalikan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/ParameterSnapshot"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: Snapshot belum tersedia — calc_run masih DRAFT (belum di-start)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ─── /stream ───────────────────────────────────────────────────────────────
+  /ecl/calc-runs/{id}/stream:
+
+    get:
+      operationId: streamCalcRunProgress
+      summary: SSE stream for calc run progress
+      description: |
+        Server-Sent Events (SSE) stream untuk monitoring progress bulk compute
+        secara real-time. Endpoint ini mendelegasikan ke /api/v1/jobs/{jobId}/stream
+        dari sys.job terkait dengan calc_run ini.
+
+        **Redirect behavior:**
+        Jika calc_run.job_id sudah ada (post-start), server dapat redirect ke
+        /api/v1/jobs/{calc_run.job_id}/stream.
+        Klien yang tidak follow redirect dapat langsung query job_id dari
+        GET /ecl/calc-runs/{id} lalu subscribe ke /api/v1/jobs/{jobId}/stream.
+
+        **SSE event types:**
+        - `progress` — data: { progress: 0-100, currentStep: string, processedCount: int, errorCount: int }
+        - `completed` — data: { calcRunId, jobId, totalComputed, totalSkippedFvtpl, totalPociDeferred, errorCount, eclWeightedIdrTotal }
+        - `completed_with_errors` — data: { ...same as completed, errors: [{instrumenId, errorCode}] }
+        - `cancelled` — data: { calcRunId, cancelledBy, partialCount }
+        - `failed` — data: { errorCode, message }
+        - `close` — koneksi ditutup
+
+        **Auth:** JWT Bearer via Authorization header (SSE ticket via /auth/sse-ticket
+        direkomendasikan untuk browser — tidak kirim JWT di query param).
+
+        **Pre-conditions:** calc_run.status = IN_PROGRESS (job aktif)
+        Jika DRAFT → tidak ada stream, 422.
+        Jika COMPLETED/SEALED/CANCELLED → stream tidak aktif, endpoint return 410 Gone.
+
+        **Permission required:** `calc_run.read`
+
+        **Fallback:** Jika SSE error, client harus fallback ke polling
+        GET /api/v1/jobs/{jobId} setiap 2 detik (UX §3).
+      tags: [ecl-calc-run]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/calcRunId"
+      responses:
+        "200":
+          description: SSE stream aktif
+          headers:
+            Content-Type:
+              schema:
+                type: string
+                enum: ["text/event-stream"]
+            Cache-Control:
+              schema:
+                type: string
+                enum: ["no-cache"]
+            X-Accel-Buffering:
+              schema:
+                type: string
+                enum: ["no"]
+              description: Disable Nginx/Traefik proxy buffering untuk SSE
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  SSE stream format:
+
+                  event: progress
+                  data: {"progress":47,"currentStep":"Menghitung instrumen 470 dari 1000","processedCount":470,"errorCount":0}
+
+                  event: completed
+                  data: {"calcRunId":"...","totalComputed":995,"totalSkippedFvtpl":5,"totalPociDeferred":0,"errorCount":0,"eclWeightedIdrTotal":12345678.9000}
+
+                  event: close
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          description: Gone — calc_run sudah selesai/cancelled, stream tidak aktif
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "422":
+          description: Calc run belum di-start (status = DRAFT)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COMPONENTS
+# ─────────────────────────────────────────────────────────────────────────────
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT RSA-2048 signed oleh Keycloak. TTL access 15 menit (DEC-025).
+
+  parameters:
+    calcRunId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: UUID dari ecl.calc_run
+
+    cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+      description: Opaque base64 cursor dari pagination.nextCursor (DEC-022)
+
+    limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+      description: Jumlah item per halaman. Default 50, max 200.
+
+    sortParam:
+      name: sort
+      in: query
+      required: false
+      schema:
+        type: string
+        pattern: "^[a-z_]+(:(asc|desc))?(,[a-z_]+(:(asc|desc))?)*$"
+      description: "Multi-column sort. Format: col1:asc,col2:desc. Max 3 kolom."
+
+    searchParam:
+      name: q
+      in: query
+      required: false
+      schema:
+        type: string
+        maxLength: 200
+      description: Text search global
+
+    includeDeleted:
+      name: include_deleted
+      in: query
+      required: false
+      schema:
+        type: boolean
+        default: false
+      description: Tampilkan soft-deleted records. Hanya untuk ROLE-AUDIT.
+
+  schemas:
+
+    # ── CalcRunStatus ─────────────────────────────────────────────────────────
+    CalcRunStatus:
+      type: string
+      enum:
+        - DRAFT
+        - IN_PROGRESS
+        - COMPLETED
+        - COMPLETED_WITH_ERRORS
+        - SEAL_REQUESTED
+        - SEALED
+        - CANCELLED
+      description: |
+        Status lifecycle calc_run.
+        DRAFT: dibuat, belum di-start
+        IN_PROGRESS: Asynq job berjalan
+        COMPLETED: semua instrumen berhasil diproses (error_count = 0)
+        COMPLETED_WITH_ERRORS: selesai tapi ada error instrumen (error_count > 0)
+        SEAL_REQUESTED: RISK sudah request seal, menunggu ALCO/CFO approve
+        SEALED: final, immutable (terminal)
+        CANCELLED: dibatalkan maker (terminal)
+
+    CalcRunScope:
+      type: string
+      enum: [ALL_ACTIVE]
+      description: |
+        Scope instrumen yang di-hitung. Phase 4: hanya ALL_ACTIVE.
+        ALL_ACTIVE = semua instrumen aktif (deleted_at IS NULL, klasifikasi bukan FVTPL/FVOCI_ELECTION)
+        FVTPL/FVOCI_ELECTION di-skip secara internal oleh engine (routing SKIP_FVTPL).
+
+    # ── Request bodies ────────────────────────────────────────────────────────
+    CreateCalcRunRequest:
+      type: object
+      required: [periodeId, evaluationDate]
+      properties:
+        periodeId:
+          type: string
+          maxLength: 50
+          description: |
+            ID periode buku. FK → mst.periode_buku(id).
+            Periode harus EXISTS dan status != HARD_CLOSED.
+          example: "JUNI-2026"
+        evaluationDate:
+          type: string
+          format: date
+          description: |
+            Tanggal evaluasi ECL. Umumnya = tanggal terakhir periode (last business day).
+            Kurs BI JISDOR harus tersedia untuk tanggal ini saat /start dipanggil.
+          example: "2026-06-30"
+        scope:
+          $ref: "#/components/schemas/CalcRunScope"
+        comment:
+          type: string
+          maxLength: 500
+          description: Komentar opsional dari ROLE-RISK
+
+    CancelCalcRunRequest:
+      type: object
+      required: [cancelReason]
+      properties:
+        cancelReason:
+          type: string
+          minLength: 30
+          maxLength: 1000
+          description: |
+            Alasan pembatalan — minimum 30 karakter.
+            Harus substantif (bukan hanya "salah input").
+          example: "Data master counterparty belum lengkap, akan dibuat ulang setelah koreksi PD Pefindo."
+
+    SealRequestBody:
+      type: object
+      required: [comment]
+      properties:
+        comment:
+          type: string
+          minLength: 10
+          maxLength: 1000
+          description: Komentar ROLE-RISK saat mengajukan seal request
+          example: "ECL JUNI-2026 telah diverifikasi. Semua instrumen diproses tanpa error."
+
+    SealApproveBody:
+      type: object
+      required: [comment]
+      properties:
+        comment:
+          type: string
+          minLength: 10
+          maxLength: 1000
+          description: Komentar ALCO/CFO saat menyetujui seal
+          example: "Parameter konsisten dengan baseline ALCO. ECL JUNI-2026 final dan immutable."
+
+    SealRejectBody:
+      type: object
+      required: [rejectReason]
+      properties:
+        rejectReason:
+          type: string
+          minLength: 10
+          maxLength: 1000
+          description: Alasan penolakan seal dari ALCO/CFO
+          example: "Parameter LGD pool tipe OBLIGASI perlu direvisi."
+
+    # ── Response bodies ───────────────────────────────────────────────────────
+    CalcRunHeader:
+      type: object
+      description: Header calc_run — dikembalikan di create, cancel, dan GET single
+      required: [id, periodeId, evaluationDate, scope, status, processedCount, errorCount, createdBy, createdAt, updatedAt, rowVersion]
+      properties:
+        id:
+          type: string
+          format: uuid
+        periodeId:
+          type: string
+        evaluationDate:
+          type: string
+          format: date
+        scope:
+          $ref: "#/components/schemas/CalcRunScope"
+        status:
+          $ref: "#/components/schemas/CalcRunStatus"
+        jobId:
+          type: string
+          nullable: true
+          description: ULID dari sys.job. Null jika belum di-start.
+        totalInstrumen:
+          type: integer
+          nullable: true
+          description: Total instrumen dalam scope. Di-set saat start.
+        processedCount:
+          type: integer
+        errorCount:
+          type: integer
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+        cancelledBy:
+          type: string
+          format: uuid
+          nullable: true
+        cancelledAt:
+          type: string
+          format: date-time
+          nullable: true
+        cancelReason:
+          type: string
+          nullable: true
+        createdBy:
+          type: string
+          format: uuid
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        rowVersion:
+          type: integer
+
+    CalcRunSummary:
+      type: object
+      description: Row ringkasan untuk DataTable list
+      required: [id, periodeId, evaluationDate, status, processedCount, errorCount, createdBy, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        periodeId:
+          type: string
+        evaluationDate:
+          type: string
+          format: date
+        status:
+          $ref: "#/components/schemas/CalcRunStatus"
+        processedCount:
+          type: integer
+        errorCount:
+          type: integer
+        sealedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdBy:
+          type: string
+          format: uuid
+        createdAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    CalcRunDetail:
+      allOf:
+        - $ref: "#/components/schemas/CalcRunHeader"
+        - type: object
+          properties:
+            job:
+              $ref: "#/components/schemas/JobProgressSummary"
+              nullable: true
+              description: |
+                Progress job saat ini. Null jika belum di-start atau sudah selesai.
+                Diambil dari sys.job.
+            parameterSnapshotSummary:
+              $ref: "#/components/schemas/ParameterSnapshotSummary"
+              nullable: true
+              description: Ringkasan parameter snapshot (bukan full snapshot — untuk preview)
+            sealInfo:
+              $ref: "#/components/schemas/CalcRunSealInfo"
+              nullable: true
+              description: Informasi seal workflow. Null jika belum di-request.
+
+    CalcRunSealState:
+      type: object
+      description: State seal workflow setelah transisi
+      required: [id, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/CalcRunStatus"
+        sealRequestedBy:
+          type: string
+          format: uuid
+          nullable: true
+        sealRequestedAt:
+          type: string
+          format: date-time
+          nullable: true
+        sealApprovedBy:
+          type: string
+          format: uuid
+          nullable: true
+          description: UUID approver (ALCO atau CFO)
+        sealApprovedAt:
+          type: string
+          format: date-time
+          nullable: true
+        sealedAt:
+          type: string
+          format: date-time
+          nullable: true
+        signatureHashSeal:
+          type: string
+          nullable: true
+          description: "SHA-256(approver_id || calc_run_id || sealed_at || comment) — hex string"
+        sealRejectedBy:
+          type: string
+          format: uuid
+          nullable: true
+        sealRejectedAt:
+          type: string
+          format: date-time
+          nullable: true
+        rejectReason:
+          type: string
+          nullable: true
+
+    CalcRunSealInfo:
+      type: object
+      description: Info seal workflow embedded dalam detail response
+      properties:
+        sealRequestedBy:
+          type: string
+          format: uuid
+          nullable: true
+        sealRequestedAt:
+          type: string
+          format: date-time
+          nullable: true
+        sealApprovedBy:
+          type: string
+          format: uuid
+          nullable: true
+        sealApprovedAt:
+          type: string
+          format: date-time
+          nullable: true
+        sealedAt:
+          type: string
+          format: date-time
+          nullable: true
+        signatureHashSeal:
+          type: string
+          nullable: true
+
+    StartCalcRunResponse:
+      type: object
+      description: Response dari /start — 202 Accepted dengan job tracking info
+      required: [calcRunId, jobId, statusUrl, streamUrl]
+      properties:
+        calcRunId:
+          type: string
+          format: uuid
+        jobId:
+          type: string
+          description: ULID dari sys.job yang baru dibuat
+        statusUrl:
+          type: string
+          description: URL untuk polling job status (GET)
+          example: "/api/v1/jobs/01HXYZ123456789ABCDEF"
+        streamUrl:
+          type: string
+          description: URL untuk SSE stream progress (GET, text/event-stream)
+          example: "/api/v1/jobs/01HXYZ123456789ABCDEF/stream"
+
+    JobProgressSummary:
+      type: object
+      description: Ringkasan progress dari sys.job
+      properties:
+        jobId:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, completed, failed, cancelled]
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+        currentStep:
+          type: string
+          nullable: true
+        estimatedCompletionAt:
+          type: string
+          format: date-time
+          nullable: true
+        canCancel:
+          type: boolean
+        statusUrl:
+          type: string
+        streamUrl:
+          type: string
+
+    ParameterSnapshot:
+      type: object
+      description: |
+        Parameter snapshot frozen at /start time.
+        Full JSONB content dari ecl.calc_run.parameter_snapshot_jsonb.
+        Struktur internal — tidak pernah di-mutate setelah dibekukan.
+      properties:
+        frozenAt:
+          type: string
+          format: date-time
+          description: Timestamp saat snapshot diambil (= started_at)
+        periodeId:
+          type: string
+        evaluationDate:
+          type: string
+          format: date
+        bobotSkenario:
+          type: object
+          description: mst.bobot_skenario snapshot
+          properties:
+            bobotGood:
+              type: number
+              format: double
+              example: 0.25
+            bobotNormal:
+              type: number
+              format: double
+              example: 0.5
+            bobotBad:
+              type: number
+              format: double
+              example: 0.25
+            paramId:
+              type: string
+              format: uuid
+            workflowStatus:
+              type: string
+              example: "APPROVED"
+            approvedBy:
+              type: string
+              format: uuid
+            approvedAt:
+              type: string
+              format: date-time
+        pdPefindoCount:
+          type: integer
+          description: Jumlah baris mst.pd_pefindo APPROVED dalam snapshot
+        lgdBaselCount:
+          type: integer
+          description: Jumlah baris mst.lgd_basel APPROVED dalam snapshot
+        impactPdCount:
+          type: integer
+          description: Jumlah baris mst.impact_pd APPROVED dalam snapshot
+        impactMevPdRows:
+          type: array
+          description: mst.impact_mev_pd snapshot (3 skenario)
+          items:
+            type: object
+            properties:
+              skenario:
+                type: string
+                enum: [GOOD, NORMAL, BAD]
+              impactMultiplier:
+                type: number
+                format: double
+              paramId:
+                type: string
+                format: uuid
+        lpsCoverageRows:
+          type: array
+          description: mst.lps_coverage snapshot berlaku per evaluation_date
+          items:
+            type: object
+            properties:
+              coverageLimitIdr:
+                type: number
+                format: double
+              paramId:
+                type: string
+                format: uuid
+              effectiveFrom:
+                type: string
+                format: date
+              effectiveTo:
+                type: string
+                format: date
+                nullable: true
+        kurs:
+          type: object
+          description: BI JISDOR rate per evaluation_date
+          properties:
+            tanggal:
+              type: string
+              format: date
+            usdIdr:
+              type: number
+              format: double
+            kursCurrencies:
+              type: array
+              description: Semua kurs yang di-snapshot (multi-currency instruments)
+              items:
+                type: object
+                properties:
+                  currencyCode:
+                    type: string
+                    example: "USD"
+                  rateToIdr:
+                    type: number
+                    format: double
+
+    ParameterSnapshotSummary:
+      type: object
+      description: Ringkasan snapshot untuk CalcRunDetail (tidak full)
+      properties:
+        frozenAt:
+          type: string
+          format: date-time
+          nullable: true
+        bobotGood:
+          type: number
+          format: double
+          nullable: true
+        bobotNormal:
+          type: number
+          format: double
+          nullable: true
+        bobotBad:
+          type: number
+          format: double
+          nullable: true
+        parameterCount:
+          type: integer
+          description: Total parameter tables yang di-snapshot
+          nullable: true
+
+    # ── Error schemas (local refs, same structure as _common.yaml) ─────────────
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details, traceId]
+          properties:
+            code:
+              $ref: "#/components/schemas/CalcRunErrorCode"
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  rule:
+                    type: string
+                  message:
+                    type: string
+            traceId:
+              type: string
+
+    CalcRunErrorCode:
+      type: string
+      description: Error codes spesifik untuk calc run M8 (superset dari common error codes)
+      enum:
+        # Generic (dari _common.yaml)
+        - VALIDATION_FAILED
+        - UNAUTHORIZED
+        - FORBIDDEN
+        - SOD_VIOLATION
+        - NOT_FOUND
+        - CONFLICT
+        - IDEMPOTENCY_REPLAY
+        - IDEMPOTENCY_MISMATCH
+        - PERIODE_CLOSED
+        - ECL_PARAM_FROZEN
+        - STEP_UP_REQUIRED
+        - STEP_UP_EXPIRED
+        - RATE_LIMITED
+        - INTERNAL
+        # Calc run spesifik (M8)
+        - CALC_RUN_NOT_FOUND               # 404 — calc_run id tidak ada
+        - CALC_RUN_INVALID_TRANSITION      # 422 — transisi status tidak valid
+        - CALC_RUN_DUPLICATE_IN_PROGRESS   # 409 — sudah ada IN_PROGRESS untuk periode ini
+        - CALC_RUN_PERIODE_ALREADY_SEALED  # 409 — periode sudah memiliki SEALED run
+        - CALC_RUN_PARAMETER_SNAPSHOT_INVALID  # 422 — parameter belum semua APPROVED
+        - CALC_RUN_SEAL_REQUIRES_COMPLETED     # 422 — seal request hanya valid dari COMPLETED
+        - CALC_RUN_SEAL_NOT_REQUESTED          # 422 — approve/reject tapi status bukan SEAL_REQUESTED
+        - CALC_RUN_SEAL_SOD_VIOLATION          # 403 — approver = requester (SoD)
+        - CALC_RUN_SEAL_STEP_UP_REQUIRED       # 403 — step-up MFA wajib untuk seal approve
+        - CALC_RUN_HAS_ERRORS                  # 422 — error_count > 0, tidak bisa di-seal
+        - CALC_RUN_CANCEL_REASON_TOO_SHORT     # 422 — cancel_reason < 30 karakter
+        - CALC_RUN_CANCEL_AFTER_COMPLETED      # 422 — tidak bisa cancel setelah COMPLETED
+        - CALC_RUN_PERIODE_HARD_CLOSED         # 422 — periode hard-closed saat create/start
+        - ECL_PARAM_NOT_FOUND                  # 422 — parameter ECL tidak ditemukan untuk periode
+        - FX_RATE_NOT_FOUND                    # 422 — kurs BI JISDOR tidak tersedia
+
+    PaginationResponse:
+      type: object
+      required: [nextCursor, hasMore]
+      properties:
+        nextCursor:
+          type: string
+          nullable: true
+        hasMore:
+          type: boolean
+        totalEstimate:
+          type: integer
+          nullable: true
+        limit:
+          type: integer
+
+    ResponseMeta:
+      type: object
+      properties:
+        traceId:
+          type: string
+
+  responses:
+    ValidationFailed:
+      description: Validasi field gagal
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+    Unauthorized:
+      description: JWT tidak valid atau expired
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+    Forbidden:
+      description: Permission tidak terpenuhi
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+    NotFound:
+      description: Entity tidak ditemukan
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+    PeriodeClosed:
+      description: Periode buku sudah hard-closed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: PERIODE_CLOSED
+              message: "Periode buku JUNI-2026 sudah hard-closed. Tidak bisa membuat atau start calc run."
+              details: []
+              traceId: "01HXY..."
+
+    RateLimited:
+      description: Too many requests
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
