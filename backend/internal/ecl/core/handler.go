@@ -394,18 +394,27 @@ func (h *Handler) GetRollForward(c *gin.Context) {
 		return
 	}
 
+	// F5 fix: transfer components are *decimal.Decimal (nullable); render nil when not populated.
+	nullableDecStr := func(d *decimal.Decimal) interface{} {
+		if d == nil {
+			return nil
+		}
+		return d.StringFixed(4)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"data": gin.H{
 			"calcRunId":              report.CalcRunID,
 			"openingEclIdr":          report.OpeningECLIDR.StringFixed(4),
-			"newOriginationsIdr":     report.NewOriginationsIDR.StringFixed(4),
-			"derecognitionsIdr":      report.DerecognitionsIDR.StringFixed(4),
-			"transfersToStage2Idr":   report.TransfersToStage2IDR.StringFixed(4),
-			"transfersToStage3Idr":   report.TransfersToStage3IDR.StringFixed(4),
-			"transfersFromStage2Idr": report.TransfersFromStage2IDR.StringFixed(4),
-			"transfersFromStage3Idr": report.TransfersFromStage3IDR.StringFixed(4),
+			"newOriginationsIdr":     nullableDecStr(report.NewOriginationsIDR),
+			"derecognitionsIdr":      nullableDecStr(report.DerecognitionsIDR),
+			"transfersToStage2Idr":   nullableDecStr(report.TransfersToStage2IDR),
+			"transfersToStage3Idr":   nullableDecStr(report.TransfersToStage3IDR),
+			"transfersFromStage2Idr": nullableDecStr(report.TransfersFromStage2IDR),
+			"transfersFromStage3Idr": nullableDecStr(report.TransfersFromStage3IDR),
 			"remeasurementsIdr":      report.RemeasurementsIDR.StringFixed(4),
 			"closingEclIdr":          report.ClosingECLIDR.StringFixed(4),
+			"status":                 string(report.Status),
 			"reconcile": gin.H{
 				"sumCalcResultEcl": report.ReconcileCheck.SumCalcResultECL.StringFixed(4),
 				"closingEcl":       report.ReconcileCheck.ClosingECL.StringFixed(4),

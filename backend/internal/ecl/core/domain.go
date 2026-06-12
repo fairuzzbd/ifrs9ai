@@ -138,6 +138,9 @@ const (
 
 	// CodeECLBulkRunning is returned when a bulk job is already running for calcRunId. HTTP 409.
 	CodeECLBulkRunning = "ECL_BULK_RUNNING"
+
+	// CodeECLStagingLookupError is returned when the staging service returns an unexpected error. HTTP 500.
+	CodeECLStagingLookupError = "ECL_STAGING_LOOKUP_ERROR"
 )
 
 // ─── Scenario values ─────────────────────────────────────────────────────────
@@ -382,20 +385,25 @@ type StageSummaryRow struct {
 
 // RollForwardReport is the CKPN roll-forward reconciliation.
 // Formula (formulas.md): opening + originations − derecognitions ± transfers ± remeasurements = closing.
+//
+// F5 fix: Phase 5 deferred components (NewOriginations, Derecognitions, Transfers) are *decimal.Decimal
+// (nullable). When Status = PARTIAL_PHASE_5_DEFER, these fields are nil and IsReconciled = false.
+// Full decomposition is deferred to Phase 5 (dedicated roll-forward report service).
 type RollForwardReport struct {
 	CalcRunID              uuid.UUID
 	PriorCalcRunID         *uuid.UUID
 	PortofolioID           *uuid.UUID
 	OpeningECLIDR          decimal.Decimal
-	NewOriginationsIDR     decimal.Decimal
-	DerecognitionsIDR      decimal.Decimal
-	TransfersToStage2IDR   decimal.Decimal
-	TransfersToStage3IDR   decimal.Decimal
-	TransfersFromStage2IDR decimal.Decimal
-	TransfersFromStage3IDR decimal.Decimal
-	RemeasurementsIDR      decimal.Decimal
+	NewOriginationsIDR     *decimal.Decimal // nil when Status = PARTIAL_PHASE_5_DEFER
+	DerecognitionsIDR      *decimal.Decimal // nil when Status = PARTIAL_PHASE_5_DEFER
+	TransfersToStage2IDR   *decimal.Decimal // nil when Status = PARTIAL_PHASE_5_DEFER
+	TransfersToStage3IDR   *decimal.Decimal // nil when Status = PARTIAL_PHASE_5_DEFER
+	TransfersFromStage2IDR *decimal.Decimal // nil when Status = PARTIAL_PHASE_5_DEFER
+	TransfersFromStage3IDR *decimal.Decimal // nil when Status = PARTIAL_PHASE_5_DEFER
+	RemeasurementsIDR      decimal.Decimal  // opening → closing delta; always populated
 	ClosingECLIDR          decimal.Decimal
 	ReconcileCheck         RollForwardReconcile
+	Status                 RollForwardStatus // FULL | PARTIAL_PHASE_5_DEFER
 	Notes                  *string
 }
 
@@ -620,3 +628,27 @@ type InstrumenReaderIface interface {
 	// If scope is nil, returns all active non-deleted instruments.
 	ListActiveByScope(ctx context.Context, scope *BulkScope) ([]InstrumenSnapshot, error)
 }
+
+// StagingServiceIface is the M1 staging service interface used by M7.
+// F3 fix: M7 now calls M1 directly instead of probing via M2 GetPD with a dummy periodeID.
+// This eliminates the silent Stage 1 default-on-error architectural fragility.
+type StagingServiceIface interface {
+	// GetCurrentStage returns the current IFRS9 stage for an instrument.
+	// Returns (Stage1, nil) for new instruments with no staging history (ErrNotFound semantics).
+	// Returns (0, error) for unexpected database/infrastructure errors — M7 propagates these.
+	GetCurrentStage(ctx context.Context, instrumenID uuid.UUID) (Stage, error)
+}
+
+// ErrStagingNotFound is the sentinel returned by StagingServiceIface when no history exists.
+// M7 treats this as Stage 1 (new instrument default).
+var ErrStagingNotFound = errDomain(CodeECLStagingNotFound, "no staging history for instrument")
+
+// RollForwardStatus indicates whether roll-forward components are fully populated.
+type RollForwardStatus string
+
+const (
+	// RollForwardStatusFull indicates all components are populated (Phase 5+).
+	RollForwardStatusFull RollForwardStatus = "FULL"
+	// RollForwardStatusPartialPhase5Defer indicates transfer components are nil (Phase 5 deferred).
+	RollForwardStatusPartialPhase5Defer RollForwardStatus = "PARTIAL_PHASE_5_DEFER"
+)
