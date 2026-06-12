@@ -26,6 +26,7 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 
@@ -673,12 +674,63 @@ func main() {
 	// Daily cron (M6-002): NewDriftCronHandler registered on Asynq mux (Phase 5 worker binary).
 	// Decisions: DEC-013, DEC-016, DEC-017, DEC-018.
 	eirDriftRepo := eir.NewDBDriftReportRepo(db)
-	eirDetectionSvc := eir.NewDetectionService(db, eirInstrRepo, eirAmendRepo, eirAuditWriter, logger)
+	// B2 fix: wire document repo into DetectionService so document_category is validated
+	// before creating an amendment proposal from a document upload (M6-001).
+	// docRepo was created earlier (document.NewDBRepository(db)); docRepo satisfies
+	// eir.DocumentTypeRepoIface via its GetDocType method.
+	eirDetectionSvc := eir.NewDetectionService(db, eirInstrRepo, eirAmendRepo, eirAuditWriter, logger).
+		WithDocTypeRepo(docRepo)
 	eirDriftSvc := eir.NewDriftService(db, eirInstrRepo, eirSchedRepo, eirAmendRepo, eirDriftRepo, eir.NewSolver(), eirAuditWriter, logger)
 	eirHandler := eir.NewHandlerM6(eirComputeSvc, eirScheduleSvc, eirAmendSvc, eirBulkSvc, eirDetectionSvc, eirDriftSvc)
 	eir.RegisterRoutes(v1, eirHandler, jwtVerifier, db)
-	// Drift cron handler (used by Asynq mux in Phase 5 worker binary):
-	_ = eir.NewDriftCronHandler(eirDriftSvc, logger)
+
+	// B1 fix: Register DriftCronHandler on Asynq mux + scheduler.
+	// Previously the handler was instantiated then discarded (_ = ...), making the
+	// drift cron feature completely dead.  Now we:
+	//   1. Create an Asynq ServeMux and register both task types.
+	//   2. Create an Asynq Scheduler (19:00 UTC = 02:00 WIB per state-machine §7).
+	//   3. Start the scheduler in a goroutine.
+	//   4. Start the Asynq server in a goroutine (processes tasks from Redis queue).
+	// All of this is skipped gracefully when REDIS_URL is not set (dev mode without Redis).
+	// References: DEC-007 (Asynq), worker_tasks.go §TaskDriftCron schedule "0 19 * * *".
+	driftCronHandler := eir.NewDriftCronHandler(eirDriftSvc, logger)
+	if cfg.RedisURL != "" {
+		asynqRedisOpt := asynq.RedisClientOpt{Addr: cfg.RedisURL}
+
+		// Asynq ServeMux — registers task type → handler function.
+		asynqMux := asynq.NewServeMux()
+		asynqMux.HandleFunc(eir.TaskDriftCron, driftCronHandler.HandleDriftCronTask)
+		asynqMux.HandleFunc(eir.TaskDriftAdHoc, driftCronHandler.HandleDriftAdHocTask)
+		// lpsExpiryWorker will be registered here in Phase 5 worker binary.
+		// asynqMux.HandleFunc(lps.TaskExpiryCheck, lpsExpiryWorker.HandleExpiryCheck)
+
+		// Asynq Server — pulls tasks from Redis queue and dispatches to mux.
+		asynqServer := asynq.NewServer(asynqRedisOpt, asynq.Config{
+			Concurrency: 5,
+		})
+		go func() {
+			if err := asynqServer.Run(asynqMux); err != nil {
+				log.Printf("asynq server stopped: %v", err)
+			}
+		}()
+
+		// Asynq Scheduler — enqueues periodic tasks (cron expressions, UTC).
+		// Location: time.UTC so "0 19 * * *" = 19:00 UTC = 02:00 WIB (state-machine §7).
+		scheduler := asynq.NewScheduler(asynqRedisOpt, &asynq.SchedulerOpts{
+			Location: time.UTC,
+		})
+		if _, err := scheduler.Register("0 19 * * *", asynq.NewTask(eir.TaskDriftCron, nil)); err != nil {
+			log.Fatalf("register drift cron: %v", err)
+		}
+		go func() {
+			if err := scheduler.Run(); err != nil {
+				log.Fatalf("asynq scheduler: %v", err)
+			}
+		}()
+		logger.Info("asynq drift cron registered", "schedule", "0 19 * * * UTC", "task", eir.TaskDriftCron)
+	} else {
+		logger.Warn("REDIS_URL not set — Asynq drift cron NOT registered (dev mode)")
+	}
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,
