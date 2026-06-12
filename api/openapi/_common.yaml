@@ -322,6 +322,22 @@ components:
         - EIR_INSTRUMEN_NOT_FOUND             # 404 — instrumenId not found in mst.instrumen
         - EIR_ALREADY_COMPUTED                # 409 — eir_awal already set; use amendment or forceRecompute
         - EIR_NOT_YET_COMPUTED                # 422 — generate schedule attempted before EIR was computed
+        # Calc Run Orchestration (APP-C, P4-M8)
+        - CALC_RUN_NOT_FOUND               # 404 — calc_run id tidak ada di ecl.calc_run
+        - CALC_RUN_INVALID_TRANSITION      # 422 — transisi status state machine tidak valid
+        - CALC_RUN_DUPLICATE_IN_PROGRESS   # 409 — sudah ada IN_PROGRESS untuk periode yang sama
+        - CALC_RUN_PERIODE_ALREADY_SEALED  # 409 — sudah ada SEALED calc_run untuk periode yang sama
+        - CALC_RUN_PERIODE_HARD_CLOSED     # 422 — periode buku HARD_CLOSED saat create atau start
+        - CALC_RUN_PARAMETER_SNAPSHOT_INVALID  # 422 — satu atau lebih parameter ECL belum APPROVED untuk periode
+        - CALC_RUN_SEAL_REQUIRES_COMPLETED     # 422 — seal/request hanya valid dari status COMPLETED
+        - CALC_RUN_SEAL_NOT_REQUESTED          # 422 — seal/approve atau reject tapi status bukan SEAL_REQUESTED
+        - CALC_RUN_SEAL_SOD_VIOLATION          # 403 — approver = requester (4-eyes SoD)
+        - CALC_RUN_SEAL_STEP_UP_REQUIRED       # 403 — seal/approve dipanggil tanpa step-up MFA valid
+        - CALC_RUN_HAS_ERRORS                  # 422 — seal/request dipanggil tapi error_count > 0
+        - CALC_RUN_CANCEL_REASON_TOO_SHORT     # 422 — cancel_reason < 30 karakter
+        - CALC_RUN_CANCEL_AFTER_COMPLETED      # 422 — tidak bisa cancel setelah COMPLETED/SEALED
+        - FX_RATE_NOT_FOUND                    # 422 — kurs BI JISDOR tidak tersedia untuk evaluation_date
+        - ECL_PARAM_NOT_FOUND                  # 422 — parameter ECL tidak ditemukan atau belum APPROVED
 
     # ---- Timestamps -------------------------------------------------------
     TimestampISO:
