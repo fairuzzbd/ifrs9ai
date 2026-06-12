@@ -35,22 +35,6 @@ import (
 // Handler holds the ECL core HTTP handlers.
 type Handler struct {
 	orchestrator *ECLOrchestrator
-	asynqClient  AsynqClientIface
-}
-
-// AsynqClientIface is the minimal interface for enqueueing Asynq tasks.
-type AsynqClientIface interface {
-	Enqueue(task interface{}) (interface{}, error)
-}
-
-// asynqEnqueuer is the concrete Asynq client wrapper.
-// Injected in main.go via NewAsynqEnqueuer.
-type asynqEnqueuer struct {
-	enqueue func(taskName string, payload []byte) (string, error)
-}
-
-func (a *asynqEnqueuer) Enqueue(task interface{}) (interface{}, error) {
-	return nil, nil
 }
 
 // NewHandler creates a Handler. Panics if orchestrator is nil.
@@ -86,7 +70,11 @@ func (h *Handler) ComputeSingle(c *gin.Context) {
 		return
 	}
 
-	instrID, _ := uuid.Parse(body.InstrumenID)
+	instrID, err := uuid.Parse(body.InstrumenID)
+	if err != nil {
+		respondBadRequest(c, "instrumenId must be a valid UUID")
+		return
+	}
 	evalDate, err := time.Parse("2006-01-02", body.EvaluationDate)
 	if err != nil {
 		respondBadRequest(c, "evaluationDate must be YYYY-MM-DD")
@@ -101,7 +89,11 @@ func (h *Handler) ComputeSingle(c *gin.Context) {
 		ActorID:        claimsUserUUID(c),
 	}
 	if body.CalcRunID != "" {
-		id, _ := uuid.Parse(body.CalcRunID)
+		id, err := uuid.Parse(body.CalcRunID)
+		if err != nil {
+			respondBadRequest(c, "calcRunId must be a valid UUID")
+			return
+		}
 		req.CalcRunID = &id
 	}
 
@@ -117,9 +109,9 @@ func (h *Handler) ComputeSingle(c *gin.Context) {
 // ─── ComputeBulk (POST /ecl/compute/bulk) ────────────────────────────────────
 
 type computeBulkRequest struct {
-	CalcRunID      string      `json:"calcRunId"      binding:"required,uuid"`
-	EvaluationDate string      `json:"evaluationDate" binding:"required"`
-	PeriodeID      string      `json:"periodeId"      binding:"required"`
+	CalcRunID      string        `json:"calcRunId"      binding:"required,uuid"`
+	EvaluationDate string        `json:"evaluationDate" binding:"required"`
+	PeriodeID      string        `json:"periodeId"      binding:"required"`
 	Scope          *bulkScopeDTO `json:"scope"`
 }
 
@@ -144,7 +136,11 @@ func (h *Handler) ComputeBulk(c *gin.Context) {
 		return
 	}
 
-	calcRunID, _ := uuid.Parse(body.CalcRunID)
+	calcRunID, err := uuid.Parse(body.CalcRunID)
+	if err != nil {
+		respondBadRequest(c, "calcRunId must be a valid UUID")
+		return
+	}
 	evalDate, err := time.Parse("2006-01-02", body.EvaluationDate)
 	if err != nil {
 		respondBadRequest(c, "evaluationDate must be YYYY-MM-DD")
@@ -240,8 +236,8 @@ func (h *Handler) ListResults(c *gin.Context) {
 	}
 
 	items := make([]gin.H, 0, len(resp.Items))
-	for _, it := range resp.Items {
-		items = append(items, resultLineToDTO(it))
+	for i := range resp.Items {
+		items = append(items, resultLineToDTO(resp.Items[i]))
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -445,7 +441,11 @@ func (h *Handler) RecomputeAdHoc(c *gin.Context) {
 		return
 	}
 
-	instrID, _ := uuid.Parse(body.InstrumenID)
+	instrID, err := uuid.Parse(body.InstrumenID)
+	if err != nil {
+		respondBadRequest(c, "instrumenId must be a valid UUID")
+		return
+	}
 	evalDate, err := time.Parse("2006-01-02", body.EvaluationDate)
 	if err != nil {
 		respondBadRequest(c, "evaluationDate must be YYYY-MM-DD")
@@ -679,7 +679,7 @@ func respondValidation(c *gin.Context, err error) {
 	})
 }
 
-func respondInternal(c *gin.Context, err error) {
+func respondInternal(c *gin.Context, _ error) { //nolint:unparam // err reserved for future trace correlation
 	c.JSON(http.StatusInternalServerError, gin.H{
 		"error": gin.H{
 			"code":    "INTERNAL",
@@ -747,7 +747,7 @@ func traceID(c *gin.Context) string {
 	return c.GetHeader("X-Trace-Id")
 }
 
-func parseIntQuery(c *gin.Context, key string, defaultVal int) int {
+func parseIntQuery(c *gin.Context, key string, defaultVal int) int { //nolint:unparam // key is a documented param; future callers may use different keys
 	v := c.Query(key)
 	if v == "" {
 		return defaultVal
@@ -760,11 +760,10 @@ func parseIntQuery(c *gin.Context, key string, defaultVal int) int {
 }
 
 func parseInt(s string, out *int) (string, error) {
-	_, err := decimal.NewFromString(s)
+	d, err := decimal.NewFromString(s)
 	if err != nil {
 		return s, err
 	}
-	d, _ := decimal.NewFromString(s)
 	*out = int(d.IntPart())
 	return s, nil
 }

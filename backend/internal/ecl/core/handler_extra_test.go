@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 )
@@ -331,18 +331,18 @@ func TestToComputeResultDTO_AllOptionalFields(t *testing.T) {
 	priorSealed := decimal.NewFromFloat(8_000_000.0)
 
 	r := &ComputeResult{
-		InstrumenID:    uuid.New(),
-		CalcRunID:      &calcRunID,
-		ResultLineID:   &resultLineID,
-		EvaluationDate: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
-		PeriodeID:      "JUNI-2026",
-		Stage:          Stage2,
-		RoutingPath:    RoutingStandard,
-		FlagPOCI:       false,
-		EADIDR:         &ead,
-		ECLWeightedIDR: &ecl,
-		LGDUsed:        &lgd,
-		NetCarryingIDR: &netCarrying,
+		InstrumenID:       uuid.New(),
+		CalcRunID:         &calcRunID,
+		ResultLineID:      &resultLineID,
+		EvaluationDate:    time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+		PeriodeID:         "JUNI-2026",
+		Stage:             Stage2,
+		RoutingPath:       RoutingStandard,
+		FlagPOCI:          false,
+		EADIDR:            &ead,
+		ECLWeightedIDR:    &ecl,
+		LGDUsed:           &lgd,
+		NetCarryingIDR:    &netCarrying,
 		PriorSealedECLIDR: &priorSealed,
 		PDUsedPerScenario: &ScenarioValues{
 			Good:   decimal.NewFromFloat(0.02),

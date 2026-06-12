@@ -142,7 +142,7 @@ WHERE deleted_at IS NULL
 
 // joinStrings joins a slice of strings with a separator.
 // Used for SQL IN-clause placeholder building.
-func joinStrings(ss []string, sep string) string {
+func joinStrings(ss []string, sep string) string { //nolint:unparam // sep is a documented param; future callers may use different separators
 	out := ""
 	for i, s := range ss {
 		if i > 0 {

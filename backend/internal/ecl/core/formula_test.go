@@ -68,14 +68,16 @@ func TestComputeFormulaStage1_KnownScenario(t *testing.T) {
 }
 
 // Stage 3 scenario from M7 story doc §3:
-//   EAD=500_000_000, prior_sealed_ecl=50_000_000
-//   Stage 3: PD = 1.0 for all scenarios, FL not applied
-//   net_carrying = 500M - 50M = 450M
+//
+//	EAD=500_000_000, prior_sealed_ecl=50_000_000
+//	Stage 3: PD = 1.0 for all scenarios, FL not applied
+//	net_carrying = 500M - 50M = 450M
 //
 // Expected:
-//   ECL_good = ECL_normal = ECL_bad = 500M × 1.0 × LGD
-//   ECL_FL_xxx = ECL_xxx (FL not applied)
-//   net_carrying = 450_000_000.0000
+//
+//	ECL_good = ECL_normal = ECL_bad = 500M × 1.0 × LGD
+//	ECL_FL_xxx = ECL_xxx (FL not applied)
+//	net_carrying = 450_000_000.0000
 func TestComputeFormulaStage3_PDForcedOne_NoFL(t *testing.T) {
 	t.Parallel()
 

@@ -12,8 +12,8 @@ import (
 
 	"blips-ifrs9.tugu-re.com/internal/audit"
 	"blips-ifrs9.tugu-re.com/internal/ecl/helpers"
-	"blips-ifrs9.tugu-re.com/internal/ecl/lps"
 	"blips-ifrs9.tugu-re.com/internal/ecl/lookthrough"
+	"blips-ifrs9.tugu-re.com/internal/ecl/lps"
 )
 
 // service.go — ECLOrchestrator: the canonical ECL compute orchestrator (P4-M7).
@@ -194,7 +194,7 @@ func (o *ECLOrchestrator) handleSkipFVTPL(ctx context.Context, req ComputeReques
 		if err != nil {
 			return nil, fmt.Errorf("core.ComputeSingle FVTPL: begin tx: %w", err)
 		}
-		defer func() { _ = tx.Rollback() }()
+		defer rollbackTx(ctx, tx, o.logger)
 
 		txWriter := o.auditWriter.WithTx(tx)
 		if err := txWriter.Write(ctx, audit.Event{
@@ -202,8 +202,8 @@ func (o *ECLOrchestrator) handleSkipFVTPL(ctx context.Context, req ComputeReques
 			EntityType: "mst.instrumen",
 			EntityID:   req.InstrumenID,
 			After: map[string]any{
-				"routing":        "SKIP_FVTPL",
-				"calc_run_id":    req.CalcRunID,
+				"routing":         "SKIP_FVTPL",
+				"calc_run_id":     req.CalcRunID,
 				"evaluation_date": req.EvaluationDate.Format("2006-01-02"),
 			},
 			ActorUserID: req.ActorID.String(),
@@ -220,9 +220,10 @@ func (o *ECLOrchestrator) handleSkipFVTPL(ctx context.Context, req ComputeReques
 
 // ─── POCI deferred ────────────────────────────────────────────────────────────
 
-func (o *ECLOrchestrator) handlePOCI(ctx context.Context, req ComputeRequest, inst *InstrumenSnapshot) (*ComputeResult, error) {
+func (o *ECLOrchestrator) handlePOCI(ctx context.Context, req ComputeRequest, _ *InstrumenSnapshot) (*ComputeResult, error) {
 	// POCI: ecl_weighted_idr = nil (NOT 0 — different accounting treatment).
 	// No persist. Emit warning + audit.
+	// Note: inst parameter reserved for future flag propagation; not used currently.
 	result := &ComputeResult{
 		InstrumenID:    req.InstrumenID,
 		CalcRunID:      req.CalcRunID,
@@ -239,7 +240,7 @@ func (o *ECLOrchestrator) handlePOCI(ctx context.Context, req ComputeRequest, in
 		if err != nil {
 			return nil, fmt.Errorf("core.ComputeSingle POCI: begin tx: %w", err)
 		}
-		defer func() { _ = tx.Rollback() }()
+		defer rollbackTx(ctx, tx, o.logger)
 
 		txWriter := o.auditWriter.WithTx(tx)
 		if err := txWriter.Write(ctx, audit.Event{
@@ -247,10 +248,10 @@ func (o *ECLOrchestrator) handlePOCI(ctx context.Context, req ComputeRequest, in
 			EntityType: "mst.instrumen",
 			EntityID:   req.InstrumenID,
 			After: map[string]any{
-				"routing":        "POCI_DEFERRED",
-				"calc_run_id":    req.CalcRunID,
+				"routing":         "POCI_DEFERRED",
+				"calc_run_id":     req.CalcRunID,
 				"evaluation_date": req.EvaluationDate.Format("2006-01-02"),
-				"warning":        WarnPOCIRequiresFullCAEIR,
+				"warning":         WarnPOCIRequiresFullCAEIR,
 			},
 			ActorUserID: req.ActorID.String(),
 		}); err != nil {
@@ -430,7 +431,7 @@ func (o *ECLOrchestrator) applyFormulaAndPersist(
 	eadIDR decimal.Decimal,
 ) (*ComputeResult, error) {
 	// Collect warnings from M2 helpers.
-	var warnings []string
+	warnings := make([]string, 0, len(pdGoodDetail.Warnings)+len(pdNormalDetail.Warnings)+len(lgdDetail.Warnings))
 	for _, w := range pdGoodDetail.Warnings {
 		warnings = append(warnings, w.Code)
 	}
@@ -520,43 +521,43 @@ func (o *ECLOrchestrator) applyFormulaAndPersist(
 		result.ResultLineID = &lineID
 
 		row := ResultLineRow{
-			ID:             lineID,
-			CalcRunID:      *req.CalcRunID,
-			InstrumenID:    req.InstrumenID,
-			EvaluationDate: req.EvaluationDate,
-			PeriodeID:      req.PeriodeID,
-			Stage:          stage,
-			RoutingPath:    DetermineRouting(inst),
-			EADIDR:         eadIDR,
-			PDGood:         &fr.PDGood,
-			PDNormal:       &fr.PDNormal,
-			PDBad:          &fr.PDBad,
-			LGDUsed:        &lgdUsed,
-			FLGood:         flGood,
-			FLNormal:       flNormal,
-			FLBad:          flBad,
-			ECLGoodIDR:     fr.ECLGoodIDR,
-			ECLNormalIDR:   fr.ECLNormalIDR,
-			ECLBadIDR:      fr.ECLBadIDR,
-			ECLFLGoodIDR:   fr.ECLFLGoodIDR,
-			ECLFLNormalIDR: fr.ECLFLNormalIDR,
-			ECLFLBadIDR:    fr.ECLFLBadIDR,
-			ECLWeightedIDR: &ecl,
-			BobotGood:      bobot.Good,
-			BobotNormal:    bobot.Normal,
-			BobotBad:       bobot.Bad,
+			ID:                lineID,
+			CalcRunID:         *req.CalcRunID,
+			InstrumenID:       req.InstrumenID,
+			EvaluationDate:    req.EvaluationDate,
+			PeriodeID:         req.PeriodeID,
+			Stage:             stage,
+			RoutingPath:       DetermineRouting(inst),
+			EADIDR:            eadIDR,
+			PDGood:            &fr.PDGood,
+			PDNormal:          &fr.PDNormal,
+			PDBad:             &fr.PDBad,
+			LGDUsed:           &lgdUsed,
+			FLGood:            flGood,
+			FLNormal:          flNormal,
+			FLBad:             flBad,
+			ECLGoodIDR:        fr.ECLGoodIDR,
+			ECLNormalIDR:      fr.ECLNormalIDR,
+			ECLBadIDR:         fr.ECLBadIDR,
+			ECLFLGoodIDR:      fr.ECLFLGoodIDR,
+			ECLFLNormalIDR:    fr.ECLFLNormalIDR,
+			ECLFLBadIDR:       fr.ECLFLBadIDR,
+			ECLWeightedIDR:    &ecl,
+			BobotGood:         bobot.Good,
+			BobotNormal:       bobot.Normal,
+			BobotBad:          bobot.Bad,
 			NetCarryingIDR:    fr.NetCarryingIDR,
 			PriorSealedECLIDR: fr.PriorSealedECLIDR,
-			FlagPOCI:       inst.FlagPOCI,
-			Warnings:       warnings,
-			ActorID:        req.ActorID,
+			FlagPOCI:          inst.FlagPOCI,
+			Warnings:          warnings,
+			ActorID:           req.ActorID,
 		}
 
 		tx, err := o.db.BeginTx(ctx, nil)
 		if err != nil {
 			return nil, fmt.Errorf("core.applyFormula persist: begin tx: %w", err)
 		}
-		defer func() { _ = tx.Rollback() }()
+		defer rollbackTx(ctx, tx, o.logger)
 
 		if err := o.resultRepo.InsertResultLine(ctx, tx, row); err != nil {
 			return nil, fmt.Errorf("core.applyFormula persist: insert: %w", err)
@@ -568,13 +569,13 @@ func (o *ECLOrchestrator) applyFormulaAndPersist(
 			EntityType: "ecl.calc_result_line",
 			EntityID:   lineID,
 			After: map[string]any{
-				"instrumen_id":      req.InstrumenID,
-				"calc_run_id":       *req.CalcRunID,
-				"stage":             int(stage),
-				"routing_path":      string(result.RoutingPath),
-				"ecl_weighted_idr":  ecl.StringFixed(4),
-				"evaluation_date":   req.EvaluationDate.Format("2006-01-02"),
-				"warnings":          warnings,
+				"instrumen_id":     req.InstrumenID,
+				"calc_run_id":      *req.CalcRunID,
+				"stage":            int(stage),
+				"routing_path":     string(result.RoutingPath),
+				"ecl_weighted_idr": ecl.StringFixed(4),
+				"evaluation_date":  req.EvaluationDate.Format("2006-01-02"),
+				"warnings":         warnings,
 			},
 			ActorUserID: req.ActorID.String(),
 		}); err != nil {
@@ -600,7 +601,7 @@ func (o *ECLOrchestrator) applyFormulaAndPersist(
 // In practice, the stage is determined from the M1 staging package. M7 calls M2's
 // underlying PDLookupService which reads ecl.stage_history. M7 reads stage from
 // PDDetail.Stage returned by GetPD.
-func (o *ECLOrchestrator) resolveStage(ctx context.Context, instrumenID uuid.UUID) (Stage, error) {
+func (o *ECLOrchestrator) resolveStage(ctx context.Context, instrumenID uuid.UUID) (Stage, error) { //nolint:unparam // error return reserved for future M1 staging service integration
 	// We call GetPD for the NORMAL scenario to get the PDDetail.Stage value.
 	// Stage determines which PD table is used (12M vs lifetime vs 1.0).
 	// This avoids a separate M1 staging service dependency in M7.
@@ -693,13 +694,13 @@ func (o *ECLOrchestrator) GetRollForward(ctx context.Context, req RollForwardReq
 	}
 
 	return &RollForwardReport{
-		CalcRunID:          req.CalcRunID,
-		PriorCalcRunID:     req.PriorCalcRunID,
-		PortofolioID:       req.PortofolioID,
-		OpeningECLIDR:      opening,
-		RemeasurementsIDR:  delta,
-		ClosingECLIDR:      closing,
-		ReconcileCheck:     reconcile,
+		CalcRunID:         req.CalcRunID,
+		PriorCalcRunID:    req.PriorCalcRunID,
+		PortofolioID:      req.PortofolioID,
+		OpeningECLIDR:     opening,
+		RemeasurementsIDR: delta,
+		ClosingECLIDR:     closing,
+		ReconcileCheck:    reconcile,
 	}, nil
 }
 
@@ -749,7 +750,7 @@ func (o *ECLOrchestrator) RecomputeAdHoc(ctx context.Context, req RecomputeAdHoc
 	if err != nil {
 		return nil, fmt.Errorf("core.RecomputeAdHoc: begin tx: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer rollbackTx(ctx, tx, o.logger)
 
 	txWriter := o.auditWriter.WithTx(tx)
 	var eclStr *string
@@ -762,11 +763,11 @@ func (o *ECLOrchestrator) RecomputeAdHoc(ctx context.Context, req RecomputeAdHoc
 		EntityType: "mst.instrumen",
 		EntityID:   req.InstrumenID,
 		After: map[string]any{
-			"routing":             string(recomputed.RoutingPath),
-			"ecl_weighted_idr":   eclStr,
-			"evaluation_date":    req.EvaluationDate.Format("2006-01-02"),
-			"periode_id":         req.PeriodeID,
-			"compare_persisted":  req.ComparePersisted,
+			"routing":           string(recomputed.RoutingPath),
+			"ecl_weighted_idr":  eclStr,
+			"evaluation_date":   req.EvaluationDate.Format("2006-01-02"),
+			"periode_id":        req.PeriodeID,
+			"compare_persisted": req.ComparePersisted,
 		},
 		ActorUserID: req.ActorID.String(),
 	}); err != nil {
@@ -790,9 +791,9 @@ ORDER BY evaluation_date DESC, created_at DESC
 LIMIT 1`
 	var (
 		eclRaw, pdGRaw, pdNRaw, pdBRaw sql.NullString
-		calcRunID                       uuid.UUID
-		sealedAt                        sql.NullTime
-		evalDate                        time.Time
+		calcRunID                      uuid.UUID
+		sealedAt                       sql.NullTime
+		evalDate                       time.Time
 	)
 	err := o.db.QueryRowContext(ctx, q, instrumenID).Scan(
 		&eclRaw, &pdGRaw, &pdNRaw, &pdBRaw, &calcRunID, &sealedAt, &evalDate)
@@ -808,13 +809,25 @@ LIMIT 1`
 		EvaluationDate: evalDate,
 	}
 	if eclRaw.Valid {
-		d, _ := decimal.NewFromString(eclRaw.String)
+		d, err := decimal.NewFromString(eclRaw.String)
+		if err != nil {
+			return nil, fmt.Errorf("core.loadLatestStoredResult: parse ecl_weighted_idr %q: %w", eclRaw.String, err)
+		}
 		stored.ECLWeightedIDR = &d
 	}
 	if pdGRaw.Valid && pdNRaw.Valid && pdBRaw.Valid {
-		g, _ := decimal.NewFromString(pdGRaw.String)
-		n, _ := decimal.NewFromString(pdNRaw.String)
-		b, _ := decimal.NewFromString(pdBRaw.String)
+		g, err := decimal.NewFromString(pdGRaw.String)
+		if err != nil {
+			return nil, fmt.Errorf("core.loadLatestStoredResult: parse pd_used_good %q: %w", pdGRaw.String, err)
+		}
+		n, err := decimal.NewFromString(pdNRaw.String)
+		if err != nil {
+			return nil, fmt.Errorf("core.loadLatestStoredResult: parse pd_used_normal %q: %w", pdNRaw.String, err)
+		}
+		b, err := decimal.NewFromString(pdBRaw.String)
+		if err != nil {
+			return nil, fmt.Errorf("core.loadLatestStoredResult: parse pd_used_bad %q: %w", pdBRaw.String, err)
+		}
 		stored.PDUsed = &ScenarioValues{Good: g, Normal: n, Bad: b}
 	}
 	if sealedAt.Valid {
@@ -825,6 +838,17 @@ LIMIT 1`
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
+
+// rollbackTx rolls back a transaction and logs any rollback error at WARN level.
+// Used in defer to satisfy errcheck without silently discarding rollback failures.
+func rollbackTx(ctx context.Context, tx *sql.Tx, logger *slog.Logger) {
+	if err := tx.Rollback(); err != nil && err != sql.ErrTxDone {
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.WarnContext(ctx, "core: tx rollback error", "error", err)
+	}
+}
 
 // stageToM2 converts core.Stage to helpers.EclStage.
 func stageToM2(s Stage) helpers.EclStage {

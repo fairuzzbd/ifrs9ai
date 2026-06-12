@@ -79,11 +79,11 @@ func ComputeWeightedECL(eclFLGood, eclFLNormal, eclFLBad decimal.Decimal, bobot 
 // All IDR values are NUMERIC(20,4). PD/LGD/FL are NUMERIC(10,8).
 type FormulaResult struct {
 	// Inputs
-	EADIDR decimal.Decimal
-	PDGood decimal.Decimal // NUMERIC(10,8) — base PD (before FL for non-Stage3)
+	EADIDR   decimal.Decimal
+	PDGood   decimal.Decimal // NUMERIC(10,8) — base PD (before FL for non-Stage3)
 	PDNormal decimal.Decimal
-	PDBad  decimal.Decimal
-	LGD    decimal.Decimal // NUMERIC(10,8)
+	PDBad    decimal.Decimal
+	LGD      decimal.Decimal // NUMERIC(10,8)
 
 	// FL multipliers (nil for Stage 3)
 	FLGood   *decimal.Decimal // NUMERIC(10,8)

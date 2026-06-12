@@ -35,23 +35,6 @@ func init() {
 
 // ─── Mock orchestrator for handler tests ─────────────────────────────────────
 
-type mockOrchestrator struct {
-	computeResult    *ComputeResult
-	computeErr       error
-	listResult       *ListResultsResponse
-	listErr          error
-	getResult        *ResultLineRow
-	getResultErr     error
-	portfolioSummary *PortfolioSummary
-	portfolioErr     error
-	rollForward      *RollForwardReport
-	rollForwardErr   error
-	adHocResult      *RecomputeAdHocResult
-	adHocErr         error
-}
-
-// We need a thin wrapper since Handler calls orchestrator methods directly.
-// Replace Handler.orchestrator with a mock interface version.
 // The cleanest approach for handler tests: use a real Handler but with a mock ECLOrchestrator
 // built from a no-op auditWriter + mock services.
 

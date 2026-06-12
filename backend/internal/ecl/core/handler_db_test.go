@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 

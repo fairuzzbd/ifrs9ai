@@ -325,28 +325,28 @@ type BulkScope struct {
 
 // BulkComputeProgress is the progress report for bulk compute jobs.
 type BulkComputeProgress struct {
-	Total           int
-	Processed       int
-	Errors          int
-	SkippedFVTPL    int
-	SkippedPOCI     int
+	Total            int
+	Processed        int
+	Errors           int
+	SkippedFVTPL     int
+	SkippedPOCI      int
 	SkippedDuplicate int
-	CurrentStep     string
+	CurrentStep      string
 }
 
 // ─── BulkComputeResult ───────────────────────────────────────────────────────
 
 // BulkComputeResult is the summary returned after a bulk compute completes.
 type BulkComputeResult struct {
-	CalcRunID          uuid.UUID
-	TotalScanned       int
-	TotalComputed      int
-	TotalSkippedFVTPL  int
-	TotalPOCIDeferred  int
+	CalcRunID             uuid.UUID
+	TotalScanned          int
+	TotalComputed         int
+	TotalSkippedFVTPL     int
+	TotalPOCIDeferred     int
 	TotalSkippedDuplicate int
-	ECLWeightedIDRTotal decimal.Decimal
-	Errors             []BulkComputeError
-	Status             string // "completed" or "completed_with_errors" or "cancelled"
+	ECLWeightedIDRTotal   decimal.Decimal
+	Errors                []BulkComputeError
+	Status                string // "completed" or "completed_with_errors" or "cancelled"
 }
 
 // BulkComputeError records a per-instrument error during bulk compute.
@@ -360,22 +360,22 @@ type BulkComputeError struct {
 
 // PortfolioSummary is the aggregated ECL per stage for a portfolio + calc run.
 type PortfolioSummary struct {
-	PortofolioID       uuid.UUID
-	CalcRunID          uuid.UUID
-	PriorCalcRunID     *uuid.UUID
-	EvaluationDate     time.Time
-	SummaryByStage     []StageSummaryRow
+	PortofolioID        uuid.UUID
+	CalcRunID           uuid.UUID
+	PriorCalcRunID      *uuid.UUID
+	EvaluationDate      time.Time
+	SummaryByStage      []StageSummaryRow
 	ECLWeightedIDRTotal decimal.Decimal
-	Notes              *string
+	Notes               *string
 }
 
 // StageSummaryRow is one row in the portfolio summary (per stage).
 type StageSummaryRow struct {
-	Stage              string // "STAGE_1", "STAGE_2", "STAGE_3", "TOTAL"
-	Count              int
-	EADTotalIDR        decimal.Decimal
+	Stage               string // "STAGE_1", "STAGE_2", "STAGE_3", "TOTAL"
+	Count               int
+	EADTotalIDR         decimal.Decimal
 	ECLWeightedTotalIDR decimal.Decimal
-	DeltaVsPriorIDR    *decimal.Decimal // nil when no prior run
+	DeltaVsPriorIDR     *decimal.Decimal // nil when no prior run
 }
 
 // ─── RollForwardReport ───────────────────────────────────────────────────────
@@ -383,20 +383,20 @@ type StageSummaryRow struct {
 // RollForwardReport is the CKPN roll-forward reconciliation.
 // Formula (formulas.md): opening + originations − derecognitions ± transfers ± remeasurements = closing.
 type RollForwardReport struct {
-	CalcRunID          uuid.UUID
-	PriorCalcRunID     *uuid.UUID
-	PortofolioID       *uuid.UUID
-	OpeningECLIDR      decimal.Decimal
-	NewOriginationsIDR decimal.Decimal
-	DerecognitionsIDR  decimal.Decimal
+	CalcRunID              uuid.UUID
+	PriorCalcRunID         *uuid.UUID
+	PortofolioID           *uuid.UUID
+	OpeningECLIDR          decimal.Decimal
+	NewOriginationsIDR     decimal.Decimal
+	DerecognitionsIDR      decimal.Decimal
 	TransfersToStage2IDR   decimal.Decimal
 	TransfersToStage3IDR   decimal.Decimal
 	TransfersFromStage2IDR decimal.Decimal
 	TransfersFromStage3IDR decimal.Decimal
-	RemeasurementsIDR  decimal.Decimal
-	ClosingECLIDR      decimal.Decimal
-	ReconcileCheck     RollForwardReconcile
-	Notes              *string
+	RemeasurementsIDR      decimal.Decimal
+	ClosingECLIDR          decimal.Decimal
+	ReconcileCheck         RollForwardReconcile
+	Notes                  *string
 }
 
 // RollForwardReconcile checks that closing = Σ(ecl.calc_result_line.ecl_weighted_idr).
@@ -431,11 +431,11 @@ type RollForwardRequest struct {
 
 // RecomputeAdHocRequest is the input for RecomputeAdHoc.
 type RecomputeAdHocRequest struct {
-	InstrumenID     uuid.UUID
-	EvaluationDate  time.Time
-	PeriodeID       string
+	InstrumenID      uuid.UUID
+	EvaluationDate   time.Time
+	PeriodeID        string
 	ComparePersisted bool
-	ActorID         uuid.UUID
+	ActorID          uuid.UUID
 }
 
 // RecomputeAdHocResult is the output of RecomputeAdHoc.
@@ -472,10 +472,10 @@ type ProgressFn func(processed, total int, currentStep string)
 // InstrumenSnapshot is a minimal read-only view from mst.instrumen needed by M7.
 type InstrumenSnapshot struct {
 	ID                uuid.UUID
-	KlasifikasiPsak71 string    // AC | FVOCI | FVTPL | FVOCI_ELECTION
-	TipeInstrumen     string    // OBLIGASI | DEPOSITO | CASH | REKSADANA | SAHAM | etc.
-	Status            string    // AKTIF | MATURED | etc.
-	WorkflowStatus    string    // APPROVED | PENDING | etc.
+	KlasifikasiPsak71 string // AC | FVOCI | FVTPL | FVOCI_ELECTION
+	TipeInstrumen     string // OBLIGASI | DEPOSITO | CASH | REKSADANA | SAHAM | etc.
+	Status            string // AKTIF | MATURED | etc.
+	WorkflowStatus    string // APPROVED | PENDING | etc.
 	FlagPOCI          bool
 	CounterpartyID    uuid.UUID
 	NasabahID         uuid.UUID // filled for DEPOSITO/CASH (counterparty as nasabah)
@@ -567,12 +567,12 @@ type ResultLine struct {
 
 // ListResultsResponse is the paginated response for list results.
 type ListResultsResponse struct {
-	Items          []ResultLine
-	NextCursor     string
-	HasMore        bool
-	TotalEstimate  int
-	AppliedSort    []SortSpec
-	AppliedFilter  map[string]any
+	Items         []ResultLine
+	NextCursor    string
+	HasMore       bool
+	TotalEstimate int
+	AppliedSort   []SortSpec
+	AppliedFilter map[string]any
 }
 
 // ─── TaskPayload ──────────────────────────────────────────────────────────────

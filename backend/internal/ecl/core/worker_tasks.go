@@ -150,13 +150,6 @@ func (o *ECLOrchestrator) ComputeBulk(ctx context.Context, req BulkComputeReques
 	}
 
 	// 3. Fan-out with semaphore.
-	type singleResult struct {
-		instrumenID uuid.UUID
-		routing     RoutingPath
-		ecl         *decimal.Decimal
-		err         error
-	}
-
 	items := make([]bulkComputeItem, total)
 	sem := make(chan struct{}, bulkSemaphoreSize)
 	var wg sync.WaitGroup
@@ -168,7 +161,7 @@ func (o *ECLOrchestrator) ComputeBulk(ctx context.Context, req BulkComputeReques
 	cancelled := false
 	var eclTotal decimal.Decimal
 
-	for i, inst := range instruments {
+	for i := range instruments {
 		// Check cancellation before spawning goroutine.
 		select {
 		case <-ctx.Done():
@@ -181,7 +174,7 @@ func (o *ECLOrchestrator) ComputeBulk(ctx context.Context, req BulkComputeReques
 
 		sem <- struct{}{}
 		wg.Add(1)
-		go func(idx int, instrSnap InstrumenSnapshot) {
+		go func(idx int, instrSnap *InstrumenSnapshot) {
 			defer func() {
 				<-sem
 				wg.Done()
@@ -239,7 +232,7 @@ func (o *ECLOrchestrator) ComputeBulk(ctx context.Context, req BulkComputeReques
 			}
 			reportProgress(progressFn, processed, total)
 			mu.Unlock()
-		}(i, inst)
+		}(i, &instruments[i])
 	}
 	wg.Wait()
 

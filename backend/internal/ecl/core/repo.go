@@ -218,7 +218,7 @@ func (r *CalcResultLineRepo) ListResultLines(ctx context.Context, req ListResult
 				continue
 			}
 			dir := "ASC"
-			if strings.ToUpper(s.Dir) == "DESC" {
+			if strings.EqualFold(s.Dir, "DESC") {
 				dir = "DESC"
 			}
 			parts = append(parts, s.Col+" "+dir)
@@ -230,6 +230,7 @@ func (r *CalcResultLineRepo) ListResultLines(ctx context.Context, req ListResult
 
 	where := strings.Join(conditions, " AND ")
 	args = append(args, limit+1)
+	//nolint:gosec // orderBy and where are built from validated allowlist columns and parameterized values only
 	q := fmt.Sprintf(`
 SELECT id, calc_run_id, instrumen_id, evaluation_date, periode_id, stage, routing_path,
        ead_idr, ecl_weighted_idr, flag_poci, sealed_at, created_at
@@ -268,11 +269,17 @@ LIMIT $%d`, where, orderBy, len(args))
 			FlagPOCI: flagPOCI, CreatedAt: createdAt,
 		}
 		if eadRaw.Valid {
-			d, _ := decimal.NewFromString(eadRaw.String)
+			d, err := decimal.NewFromString(eadRaw.String)
+			if err != nil {
+				return nil, fmt.Errorf("core.ListResultLines: parse ead_idr %q: %w", eadRaw.String, err)
+			}
 			line.EADIDR = &d
 		}
 		if eclRaw.Valid {
-			d, _ := decimal.NewFromString(eclRaw.String)
+			d, err := decimal.NewFromString(eclRaw.String)
+			if err != nil {
+				return nil, fmt.Errorf("core.ListResultLines: parse ecl_weighted_idr %q: %w", eclRaw.String, err)
+			}
 			line.ECLWeightedIDR = &d
 		}
 		if sealedAt.Valid {
@@ -296,9 +303,9 @@ LIMIT $%d`, where, orderBy, len(args))
 	}
 
 	return &ListResultsResponse{
-		Items:      items,
-		NextCursor: nextCursor,
-		HasMore:    hasMore,
+		Items:       items,
+		NextCursor:  nextCursor,
+		HasMore:     hasMore,
 		AppliedSort: req.Sort,
 	}, nil
 }
@@ -337,8 +344,14 @@ ORDER BY stage`
 		if err := rows.Scan(&stageLabel, &cnt, &eadStr, &eclStr); err != nil {
 			return nil, fmt.Errorf("core.GetPortfolioAggregate scan: %w", err)
 		}
-		ead, _ := decimal.NewFromString(eadStr)
-		ecl, _ := decimal.NewFromString(eclStr)
+		ead, err := decimal.NewFromString(eadStr)
+		if err != nil {
+			return nil, fmt.Errorf("core.GetPortfolioAggregate: parse ead_total %q: %w", eadStr, err)
+		}
+		ecl, err := decimal.NewFromString(eclStr)
+		if err != nil {
+			return nil, fmt.Errorf("core.GetPortfolioAggregate: parse ecl_total %q: %w", eclStr, err)
+		}
 		row := StageSummaryRow{
 			Stage: stageLabel, Count: cnt,
 			EADTotalIDR: ead, ECLWeightedTotalIDR: ecl,
@@ -439,14 +452,14 @@ func scanResultLineRow(row *sql.Row) (*ResultLineRow, error) {
 		flGoodRaw, flNormalRaw, flBadRaw sql.NullString
 		eclGood, eclNormal, eclBad,
 		eclFlGood, eclFlNormal, eclFlBad string
-		eclWeightedRaw              sql.NullString
+		eclWeightedRaw                   sql.NullString
 		bobotGood, bobotNormal, bobotBad string
-		netCarryingRaw, priorSealedRaw  sql.NullString
-		flagPOCI                    bool
-		paramSnapshotID             uuid.NullUUID
-		warningsJSON                sql.NullString
-		sealedAt                    sql.NullTime
-		createdAt                   time.Time
+		netCarryingRaw, priorSealedRaw   sql.NullString
+		flagPOCI                         bool
+		paramSnapshotID                  uuid.NullUUID
+		warningsJSON                     sql.NullString
+		sealedAt                         sql.NullTime
+		createdAt                        time.Time
 	)
 
 	err := row.Scan(
@@ -473,75 +486,137 @@ func scanResultLineRow(row *sql.Row) (*ResultLineRow, error) {
 		FlagPOCI: flagPOCI, ActorID: uuid.Nil,
 	}
 
-	ead, _ := decimal.NewFromString(eadRaw)
+	ead, err := decimal.NewFromString(eadRaw)
+	if err != nil {
+		return nil, fmt.Errorf("core.scanResultLineRow: parse ead_idr %q: %w", eadRaw, err)
+	}
 	r.EADIDR = ead
 
 	if pdGoodRaw.Valid {
-		d, _ := decimal.NewFromString(pdGoodRaw.String)
+		d, err := decimal.NewFromString(pdGoodRaw.String)
+		if err != nil {
+			return nil, fmt.Errorf("core.scanResultLineRow: parse pd_used_good %q: %w", pdGoodRaw.String, err)
+		}
 		r.PDGood = &d
 	}
 	if pdNormalRaw.Valid {
-		d, _ := decimal.NewFromString(pdNormalRaw.String)
+		d, err := decimal.NewFromString(pdNormalRaw.String)
+		if err != nil {
+			return nil, fmt.Errorf("core.scanResultLineRow: parse pd_used_normal %q: %w", pdNormalRaw.String, err)
+		}
 		r.PDNormal = &d
 	}
 	if pdBadRaw.Valid {
-		d, _ := decimal.NewFromString(pdBadRaw.String)
+		d, err := decimal.NewFromString(pdBadRaw.String)
+		if err != nil {
+			return nil, fmt.Errorf("core.scanResultLineRow: parse pd_used_bad %q: %w", pdBadRaw.String, err)
+		}
 		r.PDBad = &d
 	}
 	if lgdRaw.Valid {
-		d, _ := decimal.NewFromString(lgdRaw.String)
+		d, err := decimal.NewFromString(lgdRaw.String)
+		if err != nil {
+			return nil, fmt.Errorf("core.scanResultLineRow: parse lgd_used %q: %w", lgdRaw.String, err)
+		}
 		r.LGDUsed = &d
 	}
 	if flGoodRaw.Valid {
-		d, _ := decimal.NewFromString(flGoodRaw.String)
+		d, err := decimal.NewFromString(flGoodRaw.String)
+		if err != nil {
+			return nil, fmt.Errorf("core.scanResultLineRow: parse fl_multiplier_good %q: %w", flGoodRaw.String, err)
+		}
 		r.FLGood = &d
 	}
 	if flNormalRaw.Valid {
-		d, _ := decimal.NewFromString(flNormalRaw.String)
+		d, err := decimal.NewFromString(flNormalRaw.String)
+		if err != nil {
+			return nil, fmt.Errorf("core.scanResultLineRow: parse fl_multiplier_normal %q: %w", flNormalRaw.String, err)
+		}
 		r.FLNormal = &d
 	}
 	if flBadRaw.Valid {
-		d, _ := decimal.NewFromString(flBadRaw.String)
+		d, err := decimal.NewFromString(flBadRaw.String)
+		if err != nil {
+			return nil, fmt.Errorf("core.scanResultLineRow: parse fl_multiplier_bad %q: %w", flBadRaw.String, err)
+		}
 		r.FLBad = &d
 	}
 
-	g, _ := decimal.NewFromString(eclGood)
+	g, err := decimal.NewFromString(eclGood)
+	if err != nil {
+		return nil, fmt.Errorf("core.scanResultLineRow: parse ecl_good_idr %q: %w", eclGood, err)
+	}
 	r.ECLGoodIDR = g
-	n, _ := decimal.NewFromString(eclNormal)
+	n, err := decimal.NewFromString(eclNormal)
+	if err != nil {
+		return nil, fmt.Errorf("core.scanResultLineRow: parse ecl_normal_idr %q: %w", eclNormal, err)
+	}
 	r.ECLNormalIDR = n
-	b, _ := decimal.NewFromString(eclBad)
+	b, err := decimal.NewFromString(eclBad)
+	if err != nil {
+		return nil, fmt.Errorf("core.scanResultLineRow: parse ecl_bad_idr %q: %w", eclBad, err)
+	}
 	r.ECLBadIDR = b
-	fg, _ := decimal.NewFromString(eclFlGood)
+	fg, err := decimal.NewFromString(eclFlGood)
+	if err != nil {
+		return nil, fmt.Errorf("core.scanResultLineRow: parse ecl_fl_good_idr %q: %w", eclFlGood, err)
+	}
 	r.ECLFLGoodIDR = fg
-	fn, _ := decimal.NewFromString(eclFlNormal)
+	fn, err := decimal.NewFromString(eclFlNormal)
+	if err != nil {
+		return nil, fmt.Errorf("core.scanResultLineRow: parse ecl_fl_normal_idr %q: %w", eclFlNormal, err)
+	}
 	r.ECLFLNormalIDR = fn
-	fb, _ := decimal.NewFromString(eclFlBad)
+	fb, err := decimal.NewFromString(eclFlBad)
+	if err != nil {
+		return nil, fmt.Errorf("core.scanResultLineRow: parse ecl_fl_bad_idr %q: %w", eclFlBad, err)
+	}
 	r.ECLFLBadIDR = fb
 
-	bg, _ := decimal.NewFromString(bobotGood)
+	bg, err := decimal.NewFromString(bobotGood)
+	if err != nil {
+		return nil, fmt.Errorf("core.scanResultLineRow: parse bobot_good %q: %w", bobotGood, err)
+	}
 	r.BobotGood = bg
-	bn, _ := decimal.NewFromString(bobotNormal)
+	bn, err := decimal.NewFromString(bobotNormal)
+	if err != nil {
+		return nil, fmt.Errorf("core.scanResultLineRow: parse bobot_normal %q: %w", bobotNormal, err)
+	}
 	r.BobotNormal = bn
-	bb, _ := decimal.NewFromString(bobotBad)
+	bb, err := decimal.NewFromString(bobotBad)
+	if err != nil {
+		return nil, fmt.Errorf("core.scanResultLineRow: parse bobot_bad %q: %w", bobotBad, err)
+	}
 	r.BobotBad = bb
 
 	if eclWeightedRaw.Valid {
-		d, _ := decimal.NewFromString(eclWeightedRaw.String)
+		d, err := decimal.NewFromString(eclWeightedRaw.String)
+		if err != nil {
+			return nil, fmt.Errorf("core.scanResultLineRow: parse ecl_weighted_idr %q: %w", eclWeightedRaw.String, err)
+		}
 		r.ECLWeightedIDR = &d
 	}
 	if netCarryingRaw.Valid {
-		d, _ := decimal.NewFromString(netCarryingRaw.String)
+		d, err := decimal.NewFromString(netCarryingRaw.String)
+		if err != nil {
+			return nil, fmt.Errorf("core.scanResultLineRow: parse net_carrying_idr %q: %w", netCarryingRaw.String, err)
+		}
 		r.NetCarryingIDR = &d
 	}
 	if priorSealedRaw.Valid {
-		d, _ := decimal.NewFromString(priorSealedRaw.String)
+		d, err := decimal.NewFromString(priorSealedRaw.String)
+		if err != nil {
+			return nil, fmt.Errorf("core.scanResultLineRow: parse prior_sealed_ecl_idr %q: %w", priorSealedRaw.String, err)
+		}
 		r.PriorSealedECLIDR = &d
 	}
 	if paramSnapshotID.Valid {
 		r.ParameterSnapshotID = &paramSnapshotID.UUID
 	}
 	if warningsJSON.Valid && warningsJSON.String != "" && warningsJSON.String != "null" {
-		_ = json.Unmarshal([]byte(warningsJSON.String), &r.Warnings)
+		if err := json.Unmarshal([]byte(warningsJSON.String), &r.Warnings); err != nil {
+			return nil, fmt.Errorf("core.scanResultLineRow: parse warnings_json: %w", err)
+		}
 	}
 	return r, nil
 }

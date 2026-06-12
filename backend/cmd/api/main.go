@@ -53,11 +53,11 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
 
+	eclcore "blips-ifrs9.tugu-re.com/internal/ecl/core"
 	"blips-ifrs9.tugu-re.com/internal/ecl/eir"
 	"blips-ifrs9.tugu-re.com/internal/ecl/helpers"
 	"blips-ifrs9.tugu-re.com/internal/ecl/lookthrough"
 	"blips-ifrs9.tugu-re.com/internal/ecl/lps"
-	eclcore "blips-ifrs9.tugu-re.com/internal/ecl/core"
 	"blips-ifrs9.tugu-re.com/internal/ecl/staging"
 )
 
@@ -711,8 +711,8 @@ func main() {
 		db,
 		auditWriter,
 		helpersSvc,
-		lpsAggregatorSvc,   // M3 LPS aggregator
-		ltLookthroughSvc,   // M4 look-through
+		lpsAggregatorSvc, // M3 LPS aggregator
+		ltLookthroughSvc, // M4 look-through
 		eclInstrReader,
 		eclBobotRepo,
 		logger,

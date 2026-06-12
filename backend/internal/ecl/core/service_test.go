@@ -50,9 +50,8 @@ func (m *mockBobotRepo) GetActiveBobot(_ context.Context, _ string) (BobotSnapsh
 }
 
 type mockPDService struct {
-	pdBase     decimal.Decimal
-	flMult     decimal.Decimal
-	stage      helpers.EclStage
+	pdBase decimal.Decimal
+	flMult decimal.Decimal
 }
 
 func (m *mockPDService) GetPD(_ context.Context, _ uuid.UUID, stage helpers.EclStage, scenario helpers.EclScenario, _ string, _ time.Time) (decimal.Decimal, helpers.PDDetail, error) {
@@ -110,10 +109,6 @@ func (m *mockBulkHelperService) BulkLookup(_ context.Context, reqs []helpers.Bul
 	}
 	return results, helpers.BulkSummary{Total: len(reqs)}, nil, nil, nil
 }
-
-type mockAuditWriter struct{}
-
-func (m *mockAuditWriter) WithTx(_ *sql.Tx) *audit.TxWriter { return nil }
 
 type mockLPSAggregator struct {
 	result *lps.PairAggregation
