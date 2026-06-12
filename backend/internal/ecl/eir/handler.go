@@ -36,7 +36,7 @@ import (
 
 // Handler holds all EIR service instances.
 type Handler struct {
-	eirSvc       *EIRService
+	eirSvc       *Service
 	scheduleSvc  *ScheduleService
 	amendmentSvc *AmendmentService
 	bulkSvc      *BulkService
@@ -44,7 +44,7 @@ type Handler struct {
 
 // NewHandler creates an EIR Handler.
 func NewHandler(
-	eirSvc *EIRService,
+	eirSvc *Service,
 	scheduleSvc *ScheduleService,
 	amendmentSvc *AmendmentService,
 	bulkSvc *BulkService,
@@ -101,11 +101,19 @@ func hasMFAVerified(c *gin.Context) bool {
 }
 
 // actorFromContext extracts actor UUID and role from JWT context.
+// Parse errors from JWT middleware-injected values are intentionally ignored:
+// a missing/malformed sub returns uuid.Nil (logged upstream), a missing role returns "".
 func actorFromContext(c *gin.Context) (uuid.UUID, string) {
 	subRaw, _ := c.Get("user_id")
 	roleRaw, _ := c.Get("role")
-	actorID, _ := uuid.Parse(fmt.Sprintf("%v", subRaw))
-	role, _ := roleRaw.(string)
+	actorID, err := uuid.Parse(fmt.Sprintf("%v", subRaw))
+	if err != nil {
+		actorID = uuid.Nil
+	}
+	role, ok := roleRaw.(string)
+	if !ok {
+		role = ""
+	}
 	return actorID, role
 }
 
@@ -152,7 +160,12 @@ func (h *Handler) ComputeEIR(c *gin.Context) {
 		return
 	}
 
-	instrumenID, _ := uuid.Parse(req.InstrumenID)
+	instrumenID, err := uuid.Parse(req.InstrumenID)
+	if err != nil {
+		response.ErrorWithStatus(c, http.StatusBadRequest,
+			domainerrors.CodeValidationFailed, "instrumenId bukan UUID yang valid", nil)
+		return
+	}
 	cfs, err := parseCashflowItems(req.CashflowProjection)
 	if err != nil {
 		response.ErrorWithStatus(c, http.StatusBadRequest,
@@ -168,7 +181,7 @@ func (h *Handler) ComputeEIR(c *gin.Context) {
 		}
 	}
 
-	result, svcErr := h.eirSvc.Compute(c.Request.Context(), EIRComputeRequest{
+	result, svcErr := h.eirSvc.Compute(c.Request.Context(), ComputeRequest{
 		InstrumenID:        instrumenID,
 		CashflowProjection: cfs,
 		CouponRate:         couponRate,
@@ -217,7 +230,12 @@ func (h *Handler) GenerateSchedule(c *gin.Context) {
 		return
 	}
 
-	instrumenID, _ := uuid.Parse(req.InstrumenID)
+	instrumenID, err := uuid.Parse(req.InstrumenID)
+	if err != nil {
+		response.ErrorWithStatus(c, http.StatusBadRequest,
+			domainerrors.CodeValidationFailed, "instrumenId bukan UUID yang valid", nil)
+		return
+	}
 	cfs, err := parseCashflowItems(req.CashflowProjection)
 	if err != nil {
 		response.ErrorWithStatus(c, http.StatusBadRequest,
@@ -345,7 +363,12 @@ func (h *Handler) ProposeAmendment(c *gin.Context) {
 		return
 	}
 
-	instrumenID, _ := uuid.Parse(req.InstrumenID)
+	instrumenID, err := uuid.Parse(req.InstrumenID)
+	if err != nil {
+		response.ErrorWithStatus(c, http.StatusBadRequest,
+			domainerrors.CodeValidationFailed, "instrumenId bukan UUID yang valid", nil)
+		return
+	}
 	tanggal, parseErr := time.Parse("2006-01-02", req.TanggalAmandemen)
 	if parseErr != nil {
 		response.ErrorWithStatus(c, http.StatusBadRequest,
@@ -412,8 +435,8 @@ func (h *Handler) ListAmendments(c *gin.Context) {
 	}
 
 	data := make([]interface{}, len(proposals))
-	for i, p := range proposals {
-		data[i] = proposalToJSON(p)
+	for i := range proposals {
+		data[i] = proposalToJSON(proposals[i])
 	}
 	response.List(c, data, meta, nil, nil)
 }
@@ -575,9 +598,9 @@ func (h *Handler) RejectAmendment(c *gin.Context) {
 
 // bulkRecomputeRequest is the JSON body for POST /ecl/eir/bulk-recompute.
 type bulkRecomputeRequest struct {
-	Scope        string      `json:"scope" binding:"required"`              // ALL_ACTIVE or SUBSET
-	InstrumenIDs []string    `json:"instrumenIds"`                          // required if scope=SUBSET
-	Reason       string      `json:"reason" binding:"required,min=5"`
+	Scope        string   `json:"scope" binding:"required"` // ALL_ACTIVE or SUBSET
+	InstrumenIDs []string `json:"instrumenIds"`             // required if scope=SUBSET
+	Reason       string   `json:"reason" binding:"required,min=5"`
 }
 
 // BulkRecompute handles POST /ecl/eir/bulk-recompute.
@@ -623,13 +646,13 @@ func (h *Handler) BulkRecompute(c *gin.Context) {
 // scheduleRowsToJSON converts []ScheduleRow to []interface{} for response.List.
 func scheduleRowsToJSON(rows []ScheduleRow) []interface{} {
 	data := make([]interface{}, len(rows))
-	for i, row := range rows {
-		data[i] = scheduleRowToJSON(row)
+	for i := range rows {
+		data[i] = scheduleRowToJSON(rows[i])
 	}
 	return data
 }
 
-// scheduleRowToJSON serialises a ScheduleRow (decimal as StringFixed, no float64).
+// scheduleRowToJSON serializes a ScheduleRow (decimal as StringFixed, no float64).
 func scheduleRowToJSON(row ScheduleRow) gin.H {
 	m := gin.H{
 		"id":                 row.ID,
@@ -655,8 +678,8 @@ func scheduleRowToJSON(row ScheduleRow) gin.H {
 	return m
 }
 
-// proposalToJSON serialises EIRAmendmentProposal (decimal as StringFixed, no float64).
-func proposalToJSON(p EIRAmendmentProposal) gin.H {
+// proposalToJSON serializes AmendmentProposal (decimal as StringFixed, no float64).
+func proposalToJSON(p AmendmentProposal) gin.H {
 	m := gin.H{
 		"id":               p.ID,
 		"instrumenId":      p.InstrumenID,

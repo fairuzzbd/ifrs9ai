@@ -1,4 +1,4 @@
-// Package eir implements the EIR Newton-Raphson solver, amortisation schedule
+// Package eir implements the EIR Newton-Raphson solver, amortization schedule
 // builder, amendment re-estimation workflow (4-eyes), and bulk re-compute job
 // for APP-C P4-M5 (Stories APP-C-EIR-001..005).
 //
@@ -242,16 +242,16 @@ type ScheduleRow struct {
 	InstrumenID        uuid.UUID       `db:"instrumen_id"`
 	PeriodeSeq         int             `db:"periode_seq"`
 	TanggalPosting     time.Time       `db:"tanggal_posting"`
-	OpeningCarrying    decimal.Decimal `db:"opening_carrying"`      // NUMERIC(20,4)
-	CashInflow         decimal.Decimal `db:"cash_inflow"`           // NUMERIC(20,4)
-	PendapatanBungaEIR decimal.Decimal `db:"pendapatan_bunga_eir"`  // NUMERIC(20,4)
-	AmortisasiPD       decimal.Decimal `db:"amortisasi_p_d"`        // NUMERIC(20,4)
-	PelunasanPokok     decimal.Decimal `db:"pelunasan_pokok"`       // NUMERIC(20,4)
-	ClosingCarrying    decimal.Decimal `db:"closing_carrying"`      // NUMERIC(20,4)
-	EIRPeriode         decimal.Decimal `db:"eir_periode"`           // NUMERIC(10,8)
+	OpeningCarrying    decimal.Decimal `db:"opening_carrying"`     // NUMERIC(20,4)
+	CashInflow         decimal.Decimal `db:"cash_inflow"`          // NUMERIC(20,4)
+	PendapatanBungaEIR decimal.Decimal `db:"pendapatan_bunga_eir"` // NUMERIC(20,4)
+	AmortisasiPD       decimal.Decimal `db:"amortisasi_p_d"`       // NUMERIC(20,4)
+	PelunasanPokok     decimal.Decimal `db:"pelunasan_pokok"`      // NUMERIC(20,4)
+	ClosingCarrying    decimal.Decimal `db:"closing_carrying"`     // NUMERIC(20,4)
+	EIRPeriode         decimal.Decimal `db:"eir_periode"`          // NUMERIC(10,8)
 	StageSaatPosting   string          `db:"stage_saat_posting"`
 	StatusPosting      string          `db:"status_posting"`
-	RecomputedFromSeq  *int            `db:"recomputed_from_seq"`   // nil = active row; set = superseded
+	RecomputedFromSeq  *int            `db:"recomputed_from_seq"` // nil = active row; set = superseded
 	FlagPOCI           bool            `db:"flag_poci"`
 	// Audit columns (from migration 000026)
 	CreatedAt  time.Time  `db:"created_at"`
@@ -265,7 +265,7 @@ type ScheduleRow struct {
 
 // ─── ComputeResult ────────────────────────────────────────────────────────────
 
-// ComputeResult is the response of EIRService.Compute.
+// ComputeResult is the response of Service.Compute.
 type ComputeResult struct {
 	InstrumenID         uuid.UUID
 	EIRPerPeriod        decimal.Decimal // NUMERIC(10,8) — r per period
@@ -273,8 +273,8 @@ type ComputeResult struct {
 	IterationsUsed      int
 	ConvergenceResidual decimal.Decimal
 	FlagPOCI            bool
-	EIRType             string    // "STANDARD" or "CREDIT_ADJUSTED"
-	Persisted           bool      // true if eir_awal saved to mst.instrumen
+	EIRType             string // "STANDARD" or "CREDIT_ADJUSTED"
+	Persisted           bool   // true if eir_awal saved to mst.instrumen
 	ComputedAt          time.Time
 }
 
@@ -305,11 +305,11 @@ type ScheduleGenerateResult struct {
 type AmendmentStatus string
 
 const (
-	AmendStatusDraft            AmendmentStatus = "DRAFT"
-	AmendStatusPendingReview    AmendmentStatus = "PENDING_REVIEW"
-	AmendStatusPendingApproval  AmendmentStatus = "PENDING_APPROVAL"
-	AmendStatusApproved         AmendmentStatus = "APPROVED"
-	AmendStatusRejected         AmendmentStatus = "REJECTED"
+	AmendStatusDraft           AmendmentStatus = "DRAFT"
+	AmendStatusPendingReview   AmendmentStatus = "PENDING_REVIEW"
+	AmendStatusPendingApproval AmendmentStatus = "PENDING_APPROVAL"
+	AmendStatusApproved        AmendmentStatus = "APPROVED"
+	AmendStatusRejected        AmendmentStatus = "REJECTED"
 )
 
 // IsTerminal returns true for APPROVED or REJECTED (no further transitions allowed).
@@ -317,36 +317,36 @@ func (s AmendmentStatus) IsTerminal() bool {
 	return s == AmendStatusApproved || s == AmendStatusRejected
 }
 
-// EIRAmendmentProposal mirrors ecl.eir_reestimation_log with all columns
+// AmendmentProposal mirrors ecl.eir_reestimation_log with all columns
 // added by migrations 000001 + 000026.
 //
 // DB columns (authoritative): see db/migrations/000001_init_schema.up.sql:1197
 // and db/migrations/000026_eir_schema_fix.up.sql §B.
-type EIRAmendmentProposal struct {
-	ID                   uuid.UUID        // ecl.eir_reestimation_log.id
-	InstrumenID          uuid.UUID        // instrumen_id FK → mst.instrumen
-	TanggalAmandemen     time.Time        // tanggal_re_estimation DATE (business date of contract modification)
-	TanggalReEstimasi    time.Time        // tanggal_re_estimation copy used for audit
-	AlasanAmandemen      string           // stored in modifikasi_terms_json → key "alasan"
-	RevisedCashflowJSON  string           // modifikasi_terms_json as serialised cashflows
-	EIRLama              *decimal.Decimal // eir_sebelum NUMERIC(10,8) — old EIR before amendment
-	EIRBaru              *decimal.Decimal // eir_sesudah NUMERIC(10,8) — new EIR after approval; nil until APPROVED
-	CarryingSebelum      *decimal.Decimal // carrying_sebelum NUMERIC(20,4)
-	CarryingSesudah      *decimal.Decimal // carrying_sesudah NUMERIC(20,4)
-	CatchUpAdjustment    *decimal.Decimal // catch_up_adjustment NUMERIC(20,4)
-	DokumenPendukungID   *uuid.UUID       // dokumen_pendukung_id FK → doc.upload
-	MakerID              *uuid.UUID       // maker_id FK → sec.user
-	ReviewerID           *uuid.UUID       // reviewer_id FK → sec.user (set at Review step)
-	ApproverID           *uuid.UUID       // approver_id FK → sec.user (set at Approve step)
-	Status               AmendmentStatus  // workflow_status
-	ReviewerComment      *string          // reviewer_comment added in migration 000026
-	ApproverComment      *string          // approver_comment added in migration 000026
-	RejectReason         *string          // reject_reason added in migration 000026
-	ReviewerSignatureHash *string         // reviewer_signature_hash added in migration 000026
-	ApproverSignatureHash *string         // approver_signature_hash added in migration 000026
-	ReviewedAt           *time.Time       // derived (not stored directly; latest updated_at when status=PENDING_APPROVAL)
-	ApprovedAt           *time.Time       // approved_at TIMESTAMPTZ
-	RejectedAt           *time.Time       // rejected_at added in migration 000026
+type AmendmentProposal struct {
+	ID                    uuid.UUID        // ecl.eir_reestimation_log.id
+	InstrumenID           uuid.UUID        // instrumen_id FK → mst.instrumen
+	TanggalAmandemen      time.Time        // tanggal_re_estimation DATE (business date of contract modification)
+	TanggalReEstimasi     time.Time        // tanggal_re_estimation copy used for audit
+	AlasanAmandemen       string           // stored in modifikasi_terms_json → key "alasan"
+	RevisedCashflowJSON   string           // modifikasi_terms_json as serialized cashflows
+	EIRLama               *decimal.Decimal // eir_sebelum NUMERIC(10,8) — old EIR before amendment
+	EIRBaru               *decimal.Decimal // eir_sesudah NUMERIC(10,8) — new EIR after approval; nil until APPROVED
+	CarryingSebelum       *decimal.Decimal // carrying_sebelum NUMERIC(20,4)
+	CarryingSesudah       *decimal.Decimal // carrying_sesudah NUMERIC(20,4)
+	CatchUpAdjustment     *decimal.Decimal // catch_up_adjustment NUMERIC(20,4)
+	DokumenPendukungID    *uuid.UUID       // dokumen_pendukung_id FK → doc.upload
+	MakerID               *uuid.UUID       // maker_id FK → sec.user
+	ReviewerID            *uuid.UUID       // reviewer_id FK → sec.user (set at Review step)
+	ApproverID            *uuid.UUID       // approver_id FK → sec.user (set at Approve step)
+	Status                AmendmentStatus  // workflow_status
+	ReviewerComment       *string          // reviewer_comment added in migration 000026
+	ApproverComment       *string          // approver_comment added in migration 000026
+	RejectReason          *string          // reject_reason added in migration 000026
+	ReviewerSignatureHash *string          // reviewer_signature_hash added in migration 000026
+	ApproverSignatureHash *string          // approver_signature_hash added in migration 000026
+	ReviewedAt            *time.Time       // derived (not stored directly; latest updated_at when status=PENDING_APPROVAL)
+	ApprovedAt            *time.Time       // approved_at TIMESTAMPTZ
+	RejectedAt            *time.Time       // rejected_at added in migration 000026
 	// Audit columns (from migration 000026)
 	CreatedAt  time.Time
 	CreatedBy  uuid.UUID
@@ -358,11 +358,11 @@ type EIRAmendmentProposal struct {
 
 // ProposeRequest is the input for AmendmentService.Propose.
 type ProposeRequest struct {
-	InstrumenID                uuid.UUID
-	TanggalAmandemen           time.Time
-	RevisedCashflowProjection  []CashflowItem // revised cashflows after contract modification
-	AlasanAmandemen            string         // reason for amendment (stored in modifikasi_terms_json)
-	DokumenPendukungID         *uuid.UUID     // supporting document reference
+	InstrumenID               uuid.UUID
+	TanggalAmandemen          time.Time
+	RevisedCashflowProjection []CashflowItem // revised cashflows after contract modification
+	AlasanAmandemen           string         // reason for amendment (stored in modifikasi_terms_json)
+	DokumenPendukungID        *uuid.UUID     // supporting document reference
 }
 
 // ReviewRequest is the input for AmendmentService.Review.
@@ -404,7 +404,7 @@ type BulkRecomputeResult struct {
 	DriftCount       int
 	MissingCount     int
 	ErrorCount       int
-	Cancelled        bool
+	Canceled         bool
 	ElapsedMs        int64
 	Drifts           []DriftEntry
 	Missing          []MissingScheduleEntry
@@ -437,15 +437,15 @@ type BulkErrorEntry struct {
 	ErrorMessage  string
 }
 
-// EIRBulkRecomputePayload is the Asynq job payload for TypeEIRBulkRecompute.
-type EIRBulkRecomputePayload struct {
+// BulkRecomputePayload is the Asynq job payload for TypeEIRBulkRecompute.
+type BulkRecomputePayload struct {
 	JobID        string      `json:"job_id"`
 	Scope        BulkScope   `json:"scope"`
 	InstrumenIDs []uuid.UUID `json:"instrumen_ids,omitempty"`
 	PeriodeID    *uuid.UUID  `json:"periode_id,omitempty"`
 	Reason       string      `json:"reason,omitempty"`
 	TenantID     string      `json:"tenant_id"`
-	ActorID      string      `json:"actor_id"` // UUID as string for JSON marshalling
+	ActorID      string      `json:"actor_id"` // UUID as string for JSON marshaling
 }
 
 // ─── InstrumenForEIR ──────────────────────────────────────────────────────────
@@ -513,11 +513,11 @@ func ComputeApproverSignatureHash(proposalID uuid.UUID, approverID uuid.UUID, co
 
 // cashflowItemJSON is the JSON representation of CashflowItem (for JSONB storage).
 type cashflowItemJSON struct {
-	Date      string `json:"date"`      // RFC3339
+	Date      string `json:"date"`       // RFC3339
 	AmountIDR string `json:"amount_idr"` // StringFixed(4)
 }
 
-// marshalCashflows serialises []CashflowItem to a JSON string for storage in modifikasi_terms_json.
+// marshalCashflows serializes []CashflowItem to a JSON string for storage in modifikasi_terms_json.
 func marshalCashflows(cfs []CashflowItem) (string, error) {
 	items := make([]cashflowItemJSON, len(cfs))
 	for i, cf := range cfs {

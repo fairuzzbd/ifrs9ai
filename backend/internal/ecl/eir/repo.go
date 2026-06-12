@@ -48,10 +48,10 @@ func decodeCursorStr(cursor string) (string, error) {
 	return data.ID, nil
 }
 
-// ─── EIRScheduleRepoIface ─────────────────────────────────────────────────────
+// ─── ScheduleRepoIface ─────────────────────────────────────────────────────
 
-// EIRScheduleRepoIface defines operations on ecl.eir_amortization_schedule.
-type EIRScheduleRepoIface interface {
+// ScheduleRepoIface defines operations on ecl.eir_amortization_schedule.
+type ScheduleRepoIface interface {
 	// InsertBatch inserts all schedule rows within tx.
 	InsertBatch(ctx context.Context, tx *sql.Tx, rows []ScheduleRow) error
 
@@ -74,7 +74,7 @@ type EIRScheduleRepoIface interface {
 	List(ctx context.Context, instrumenID uuid.UUID, q listquery.Query, includeSuperseded bool, cursor string, limit int) ([]ScheduleRow, *response.PaginationMeta, error)
 }
 
-// DBEIRScheduleRepo implements EIRScheduleRepoIface against ecl.eir_amortization_schedule.
+// DBEIRScheduleRepo implements ScheduleRepoIface against ecl.eir_amortization_schedule.
 type DBEIRScheduleRepo struct {
 	db *sql.DB
 }
@@ -98,7 +98,8 @@ func (r *DBEIRScheduleRepo) InsertBatch(ctx context.Context, tx *sql.Tx, rows []
 	args := make([]interface{}, 0, len(rows)*17) //nolint:mnd // 17 cols per row
 	idx := 1
 
-	for i, row := range rows {
+	for i := range rows {
+		r := &rows[i]
 		placeholders[i] = fmt.Sprintf(
 			"($%d,$%d,$%d,$%d,$%d::NUMERIC(20,4),$%d::NUMERIC(20,4),$%d::NUMERIC(20,4),$%d::NUMERIC(20,4),$%d::NUMERIC(20,4),$%d::NUMERIC(20,4),$%d::NUMERIC(10,8),$%d,$%d,$%d,$%d,$%d,$%d)",
 			idx, idx+1, idx+2, idx+3, idx+4, idx+5,
@@ -106,34 +107,36 @@ func (r *DBEIRScheduleRepo) InsertBatch(ctx context.Context, tx *sql.Tx, rows []
 			idx+11, idx+12, idx+13, idx+14, idx+15, idx+16,
 		)
 		args = append(args,
-			row.ID,
-			row.InstrumenID,
-			row.PeriodeSeq,
-			row.TanggalPosting,
-			row.OpeningCarrying.StringFixed(4),
-			row.CashInflow.StringFixed(4),
-			row.PendapatanBungaEIR.StringFixed(4),
-			row.AmortisasiPD.StringFixed(4),
-			row.PelunasanPokok.StringFixed(4),
-			row.ClosingCarrying.StringFixed(4),
-			row.EIRPeriode.StringFixed(8),
-			row.StageSaatPosting,
-			row.StatusPosting,
-			row.FlagPOCI,
-			row.CreatedBy,
-			row.UpdatedBy,
-			row.TenantID,
+			r.ID,
+			r.InstrumenID,
+			r.PeriodeSeq,
+			r.TanggalPosting,
+			r.OpeningCarrying.StringFixed(4),
+			r.CashInflow.StringFixed(4),
+			r.PendapatanBungaEIR.StringFixed(4),
+			r.AmortisasiPD.StringFixed(4),
+			r.PelunasanPokok.StringFixed(4),
+			r.ClosingCarrying.StringFixed(4),
+			r.EIRPeriode.StringFixed(8),
+			r.StageSaatPosting,
+			r.StatusPosting,
+			r.FlagPOCI,
+			r.CreatedBy,
+			r.UpdatedBy,
+			r.TenantID,
 		)
 		idx += 17 //nolint:mnd // 17 params per row
 	}
 
-	q := `INSERT INTO ecl.eir_amortization_schedule
+	// placeholders contains only $N positional params — no user input is interpolated.
+	const insertPrefix = `INSERT INTO ecl.eir_amortization_schedule
 		(id, instrumen_id, periode_seq, tanggal_posting,
 		 opening_carrying, cash_inflow, pendapatan_bunga_eir,
 		 amortisasi_p_d, pelunasan_pokok, closing_carrying,
 		 eir_periode, stage_saat_posting, status_posting,
 		 flag_poci, created_by, updated_by, tenant_id)
-		VALUES ` + strings.Join(placeholders, ",")
+		VALUES `
+	q := insertPrefix + strings.Join(placeholders, ",") //nolint:gosec // positional $N params only
 
 	_, err := tx.ExecContext(ctx, q, args...)
 	return err
@@ -243,6 +246,7 @@ func (r *DBEIRScheduleRepo) List(ctx context.Context, instrumenID uuid.UUID, q l
 		orderBy = "s.periode_seq ASC"
 	}
 
+	//nolint:gosec // fullWhere and orderBy contain only validated column names from AllowedColsSchedule whitelist
 	query := fmt.Sprintf(`SELECT id, instrumen_id, periode_seq, tanggal_posting,
 		         opening_carrying::text, cash_inflow::text,
 		         pendapatan_bunga_eir::text, amortisasi_p_d::text,
@@ -294,8 +298,8 @@ func scanScheduleRows(rows *sql.Rows) ([]ScheduleRow, error) {
 		var row ScheduleRow
 		var (
 			openStr, cashStr, pendStr, amortStr, pelStr, closStr, eirStr string
-			deletedAt                                                     *time.Time
-			recomputedFromSeq                                             *int
+			deletedAt                                                    *time.Time
+			recomputedFromSeq                                            *int
 		)
 		if err := rows.Scan(
 			&row.ID, &row.InstrumenID, &row.PeriodeSeq, &row.TanggalPosting,
@@ -474,19 +478,19 @@ func scanInstrumenForEIR(s scanner) (*InstrumenForEIR, error) {
 // AmendmentRepoIface defines CRUD for ecl.eir_reestimation_log.
 type AmendmentRepoIface interface {
 	// Create inserts a new proposal row within tx.
-	Create(ctx context.Context, tx *sql.Tx, proposal *EIRAmendmentProposal) error
+	Create(ctx context.Context, tx *sql.Tx, proposal *AmendmentProposal) error
 
 	// Update updates workflow state columns within tx.
-	Update(ctx context.Context, tx *sql.Tx, proposal *EIRAmendmentProposal) error
+	Update(ctx context.Context, tx *sql.Tx, proposal *AmendmentProposal) error
 
 	// GetByID fetches a proposal by ID.
-	GetByID(ctx context.Context, proposalID uuid.UUID) (*EIRAmendmentProposal, error)
+	GetByID(ctx context.Context, proposalID uuid.UUID) (*AmendmentProposal, error)
 
 	// HasActiveProposal returns true if a DRAFT/PENDING_REVIEW/PENDING_APPROVAL proposal exists.
 	HasActiveProposal(ctx context.Context, instrumenID uuid.UUID) (bool, error)
 
 	// List returns paginated proposals.
-	List(ctx context.Context, q listquery.Query, cursor string, limit int, actorID uuid.UUID, isAdmin bool) ([]EIRAmendmentProposal, *response.PaginationMeta, error)
+	List(ctx context.Context, q listquery.Query, cursor string, limit int, actorID uuid.UUID, isAdmin bool) ([]AmendmentProposal, *response.PaginationMeta, error)
 }
 
 // DBAmendmentRepo implements AmendmentRepoIface against ecl.eir_reestimation_log.
@@ -503,7 +507,7 @@ func NewDBAmendmentRepo(db *sql.DB) *DBAmendmentRepo {
 // DB column name: tanggal_re_estimation (DATE) per init_schema migration.
 // Cashflows stored as JSON in modifikasi_terms_json (JSONB).
 // eir_sebelum maps to EIRLama in the Go struct.
-func (r *DBAmendmentRepo) Create(ctx context.Context, tx *sql.Tx, p *EIRAmendmentProposal) error {
+func (r *DBAmendmentRepo) Create(ctx context.Context, tx *sql.Tx, p *AmendmentProposal) error {
 	var eirSebelumStr string
 	if p.EIRLama != nil {
 		eirSebelumStr = p.EIRLama.StringFixed(8)
@@ -551,7 +555,7 @@ func (r *DBAmendmentRepo) Create(ctx context.Context, tx *sql.Tx, p *EIRAmendmen
 
 // Update updates workflow state columns for a proposal within tx.
 // eir_sesudah maps to EIRBaru; eir_sebelum is never updated (immutable after Create).
-func (r *DBAmendmentRepo) Update(ctx context.Context, tx *sql.Tx, p *EIRAmendmentProposal) error {
+func (r *DBAmendmentRepo) Update(ctx context.Context, tx *sql.Tx, p *AmendmentProposal) error {
 	var eirBaru interface{}
 	if p.EIRBaru != nil {
 		eirBaru = p.EIRBaru.StringFixed(8)
@@ -602,7 +606,7 @@ func (r *DBAmendmentRepo) Update(ctx context.Context, tx *sql.Tx, p *EIRAmendmen
 }
 
 // amendmentCols is the SELECT column list matching scanAmendmentRow.
-// Maps DB columns to EIRAmendmentProposal fields.
+// Maps DB columns to AmendmentProposal fields.
 const amendmentCols = `
 	l.id, l.instrumen_id, l.tanggal_re_estimation,
 	l.modifikasi_terms_json, l.workflow_status,
@@ -615,7 +619,7 @@ const amendmentCols = `
 	l.created_at, l.created_by, l.updated_at, l.updated_by, l.tenant_id, l.row_version`
 
 // GetByID fetches a proposal by ID.
-func (r *DBAmendmentRepo) GetByID(ctx context.Context, proposalID uuid.UUID) (*EIRAmendmentProposal, error) {
+func (r *DBAmendmentRepo) GetByID(ctx context.Context, proposalID uuid.UUID) (*AmendmentProposal, error) {
 	q := `SELECT ` + amendmentCols + `
 		FROM ecl.eir_reestimation_log l
 		WHERE l.id = $1 AND l.deleted_at IS NULL`
@@ -641,7 +645,7 @@ func (r *DBAmendmentRepo) HasActiveProposal(ctx context.Context, instrumenID uui
 }
 
 // List returns paginated proposals ordered by created_at DESC.
-func (r *DBAmendmentRepo) List(ctx context.Context, q listquery.Query, cursor string, limit int, actorID uuid.UUID, isAdmin bool) ([]EIRAmendmentProposal, *response.PaginationMeta, error) {
+func (r *DBAmendmentRepo) List(ctx context.Context, q listquery.Query, cursor string, limit int, actorID uuid.UUID, isAdmin bool) ([]AmendmentProposal, *response.PaginationMeta, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -671,6 +675,7 @@ func (r *DBAmendmentRepo) List(ctx context.Context, q listquery.Query, cursor st
 		orderBy = "l.created_at DESC"
 	}
 
+	//nolint:gosec // fullWhere and orderBy contain only validated column names from AllowedColsAmendment whitelist
 	query := fmt.Sprintf(`SELECT `+amendmentCols+`
 		FROM ecl.eir_reestimation_log l
 		WHERE %s ORDER BY %s LIMIT %d`, fullWhere, orderBy, limit+1)
@@ -681,7 +686,7 @@ func (r *DBAmendmentRepo) List(ctx context.Context, q listquery.Query, cursor st
 	}
 	defer rows.Close() //nolint:errcheck
 
-	var result []EIRAmendmentProposal
+	var result []AmendmentProposal
 	for rows.Next() {
 		p, err := scanAmendmentRow(rows)
 		if err != nil {
@@ -712,21 +717,21 @@ func (r *DBAmendmentRepo) List(ctx context.Context, q listquery.Query, cursor st
 	}, nil
 }
 
-// scanAmendmentRow scans one ecl.eir_reestimation_log row into EIRAmendmentProposal.
+// scanAmendmentRow scans one ecl.eir_reestimation_log row into AmendmentProposal.
 // Column order must match amendmentCols exactly.
-func scanAmendmentRow(s scanner) (*EIRAmendmentProposal, error) {
-	var p EIRAmendmentProposal
+func scanAmendmentRow(s scanner) (*AmendmentProposal, error) {
+	var p AmendmentProposal
 	var (
-		cashflowJSON                                              string
-		eirLamaStr                                                string
-		eirBaruStr, catchUpStr                                    sql.NullString
-		reviewerID, approverID, dokumenID                        *uuid.UUID
-		approvedAt, rejectedAt                                    *time.Time
-		reviewerComment, approverComment, rejectReason           *string
-		reviewerSig, approverSig                                  *string
-		makerIDVal                                                uuid.UUID
-		statusStr                                                 string
-		tanggal                                                   time.Time
+		cashflowJSON                                   string
+		eirLamaStr                                     string
+		eirBaruStr, catchUpStr                         sql.NullString
+		reviewerID, approverID, dokumenID              *uuid.UUID
+		approvedAt, rejectedAt                         *time.Time
+		reviewerComment, approverComment, rejectReason *string
+		reviewerSig, approverSig                       *string
+		makerIDVal                                     uuid.UUID
+		statusStr                                      string
+		tanggal                                        time.Time
 	)
 	if err := s.Scan(
 		&p.ID, &p.InstrumenID, &tanggal,

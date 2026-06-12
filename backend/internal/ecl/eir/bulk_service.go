@@ -26,8 +26,8 @@ import (
 type BulkService struct {
 	db         *sql.DB
 	instrRepo  InstrumenEIRRepoIface
-	schedRepo  EIRScheduleRepoIface
-	solver     *EIRSolver
+	schedRepo  ScheduleRepoIface
+	solver     *Solver
 	jobRepo    JobRepoIface
 	progressFn ProgressFn // injected progress reporter
 	logger     *slog.Logger
@@ -51,7 +51,7 @@ type JobRepoIface interface {
 func NewBulkService(
 	db *sql.DB,
 	instrRepo InstrumenEIRRepoIface,
-	schedRepo EIRScheduleRepoIface,
+	schedRepo ScheduleRepoIface,
 	jobRepo JobRepoIface,
 	progressFn ProgressFn,
 	logger *slog.Logger,
@@ -64,7 +64,7 @@ func NewBulkService(
 		db:         db,
 		instrRepo:  instrRepo,
 		schedRepo:  schedRepo,
-		solver:     NewEIRSolver(),
+		solver:     NewSolver(),
 		jobRepo:    jobRepo,
 		progressFn: pf,
 		logger:     logger,
@@ -92,12 +92,12 @@ func (s *BulkService) Recompute(ctx context.Context, scope BulkScope, jobID stri
 	startTime := time.Now()
 
 	result := BulkRecomputeResult{
-		JobID:     jobID,
-		Scope:     scope,
-		RunAt:     startTime,
-		Drifts:    []DriftEntry{},
-		Missing:   []MissingScheduleEntry{},
-		Errors:    []BulkErrorEntry{},
+		JobID:   jobID,
+		Scope:   scope,
+		RunAt:   startTime,
+		Drifts:  []DriftEntry{},
+		Missing: []MissingScheduleEntry{},
+		Errors:  []BulkErrorEntry{},
 	}
 
 	s.progressFn(ctx, jobID, 0, "Membaca daftar instrumen aktif...")
@@ -108,8 +108,9 @@ func (s *BulkService) Recompute(ctx context.Context, scope BulkScope, jobID stri
 		return result, fmt.Errorf("eir.Recompute: list instruments: %w", err)
 	}
 
-	// Collect all instruments (streaming chan)
-	var instruments []InstrumenForEIR
+	// Collect all instruments (streaming chan).
+	// Pre-alloc at 64 to avoid repeated reallocs; grows as needed.
+	instruments := make([]InstrumenForEIR, 0, 64)
 	for inst := range instrCh {
 		instruments = append(instruments, inst)
 	}
@@ -125,24 +126,28 @@ func (s *BulkService) Recompute(ctx context.Context, scope BulkScope, jobID stri
 
 	s.progressFn(ctx, jobID, 2, fmt.Sprintf("Memproses %d instrumen...", total))
 
-	for i, inst := range instruments {
+	for i := range instruments {
 		// Cancellation check every instrument
 		select {
 		case <-ctx.Done():
-			result.Cancelled = true
+			result.Canceled = true
 			result.ElapsedMs = time.Since(startTime).Milliseconds()
 			return result, ctx.Err()
 		default:
 		}
 
 		// Progress every 1% or every 100 instruments
-		if i%max(total/100, 100) == 0 || i == total-1 {
+		reportInterval := total / 100
+		if reportInterval < 100 {
+			reportInterval = 100
+		}
+		if i%reportInterval == 0 || i == total-1 {
 			pct := 2 + (i * 95 / total) // leave 5% for finalize
-			s.progressFn(ctx, jobID, pct, fmt.Sprintf("Instrument %d dari %d: %s", i+1, total, inst.KodeInstrumen))
+			s.progressFn(ctx, jobID, pct, fmt.Sprintf("Instrument %d dari %d: %s", i+1, total, instruments[i].KodeInstrumen))
 		}
 
 		// Process single instrument (report-only)
-		drift, missing, bulkErr := s.processInstrument(ctx, inst)
+		drift, missing, bulkErr := s.processInstrument(ctx, &instruments[i])
 		if bulkErr != nil {
 			result.Errors = append(result.Errors, *bulkErr)
 			continue
@@ -190,9 +195,10 @@ func (s *BulkService) Recompute(ctx context.Context, scope BulkScope, jobID stri
 }
 
 // processInstrument runs the solver for one instrument and classifies the outcome.
+// Takes a pointer to avoid copying the 336B InstrumenForEIR struct.
 // Returns at most one of: *DriftEntry, *MissingScheduleEntry, *BulkErrorEntry.
 // If EIR matches within driftThreshold → returns (nil, nil, nil).
-func (s *BulkService) processInstrument(ctx context.Context, inst InstrumenForEIR) (*DriftEntry, *MissingScheduleEntry, *BulkErrorEntry) {
+func (s *BulkService) processInstrument(ctx context.Context, inst *InstrumenForEIR) (*DriftEntry, *MissingScheduleEntry, *BulkErrorEntry) {
 	// 1. EIR must exist
 	if inst.EIRAwal == nil {
 		return nil, &MissingScheduleEntry{
@@ -250,12 +256,12 @@ func (s *BulkService) processInstrument(ctx context.Context, inst InstrumenForEI
 	diff := newEIR.Sub(*inst.EIRAwal).Abs()
 	if diff.GreaterThan(driftThreshold) {
 		return &DriftEntry{
-			InstrumenID:    inst.ID,
-			KodeInstrumen:  inst.KodeInstrumen,
-			EIRAwal:        *inst.EIRAwal,
-			EIRRecomputed:  newEIR,
-			AbsDiff:        diff,
-			BasisPoints:    diff.Mul(decimal.NewFromInt(10000)).RoundBank(2),
+			InstrumenID:   inst.ID,
+			KodeInstrumen: inst.KodeInstrumen,
+			EIRAwal:       *inst.EIRAwal,
+			EIRRecomputed: newEIR,
+			AbsDiff:       diff,
+			BasisPoints:   diff.Mul(decimal.NewFromInt(10000)).RoundBank(2),
 		}, nil, nil
 	}
 
@@ -277,21 +283,13 @@ func reconstructCFFromSchedule(rows []ScheduleRow) []CashflowItem {
 		Date:      firstRow.TanggalPosting.AddDate(0, -6, 0),
 		AmountIDR: firstRow.OpeningCarrying.Neg(),
 	}
-	for i, row := range rows {
+	for i := range rows {
 		cfs[i+1] = CashflowItem{
-			Date:      row.TanggalPosting,
-			AmountIDR: row.CashInflow.Add(row.PelunasanPokok),
+			Date:      rows[i].TanggalPosting,
+			AmountIDR: rows[i].CashInflow.Add(rows[i].PelunasanPokok),
 		}
 	}
 	return cfs
-}
-
-// max returns the larger of a and b.
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // ─── Worker task wiring ────────────────────────────────────────────────────────
@@ -299,22 +297,22 @@ func max(a, b int) int {
 // BulkRecomputeTaskType is the Asynq task type name.
 const BulkRecomputeTaskType = "eir:bulk_recompute"
 
-// EIRBulkWorkerHandler wraps BulkService for Asynq.
-type EIRBulkWorkerHandler struct {
+// BulkWorkerHandler wraps BulkService for Asynq.
+type BulkWorkerHandler struct {
 	svc    *BulkService
 	db     *sql.DB
 	logger *slog.Logger
 }
 
-// NewEIRBulkWorkerHandler creates an EIRBulkWorkerHandler.
-func NewEIRBulkWorkerHandler(svc *BulkService, db *sql.DB, logger *slog.Logger) *EIRBulkWorkerHandler {
-	return &EIRBulkWorkerHandler{svc: svc, db: db, logger: logger}
+// NewBulkWorkerHandler creates an BulkWorkerHandler.
+func NewBulkWorkerHandler(svc *BulkService, db *sql.DB, logger *slog.Logger) *BulkWorkerHandler {
+	return &BulkWorkerHandler{svc: svc, db: db, logger: logger}
 }
 
 // ProcessBulkRecomputeTask is the Asynq handler entrypoint.
-// Deserialises EIRBulkRecomputePayload, calls BulkService.Recompute, persists result.
-func (h *EIRBulkWorkerHandler) ProcessBulkRecomputeTask(ctx context.Context, payload []byte) error {
-	var p EIRBulkRecomputePayload
+// Deserialises BulkRecomputePayload, calls BulkService.Recompute, persists result.
+func (h *BulkWorkerHandler) ProcessBulkRecomputeTask(ctx context.Context, payload []byte) error {
+	var p BulkRecomputePayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return fmt.Errorf("eir worker: unmarshal payload: %w", err)
 	}
@@ -325,9 +323,11 @@ func (h *EIRBulkWorkerHandler) ProcessBulkRecomputeTask(ctx context.Context, pay
 	}
 
 	result, err := h.svc.Recompute(ctx, p.Scope, p.JobID, actorID)
-	if err != nil && !result.Cancelled {
+	if err != nil && !result.Canceled {
 		if h.svc.jobRepo != nil {
-			_ = h.svc.jobRepo.Fail(ctx, p.JobID, err.Error())
+			if failErr := h.svc.jobRepo.Fail(ctx, p.JobID, err.Error()); failErr != nil && h.logger != nil {
+				h.logger.WarnContext(ctx, "eir worker: persist job fail status failed", "error", failErr)
+			}
 		}
 		return fmt.Errorf("eir worker: recompute: %w", err)
 	}
@@ -345,7 +345,7 @@ func (h *EIRBulkWorkerHandler) ProcessBulkRecomputeTask(ctx context.Context, pay
 // submitBulkRecomputeJob creates the Asynq payload JSON for a bulk recompute job.
 // Called by handler when POST /api/v1/eir/bulk-recompute is received.
 func submitBulkRecomputeJob(jobID string, scope BulkScope, actorID uuid.UUID) ([]byte, error) {
-	payload := EIRBulkRecomputePayload{
+	payload := BulkRecomputePayload{
 		JobID:   jobID,
 		Scope:   scope,
 		ActorID: actorID.String(),

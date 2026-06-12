@@ -42,9 +42,10 @@ func date(y, m, d int) time.Time {
 
 // obligasiAtDiscount builds cashflow for a 5-year, semiannual coupon bond
 // bought at premium (including transaction costs):
-//   CF[0] = -(1_000_000_000 + 5_000_000) = -1_005_000_000 IDR
-//   CF[1..9] = 1_000_000_000 × 8% / 2 = 40_000_000 IDR  (semiannual coupon)
-//   CF[10] = 40_000_000 + 1_000_000_000 = 1_040_000_000 IDR (last coupon + principal)
+//
+//	CF[0] = -(1_000_000_000 + 5_000_000) = -1_005_000_000 IDR
+//	CF[1..9] = 1_000_000_000 × 8% / 2 = 40_000_000 IDR  (semiannual coupon)
+//	CF[10] = 40_000_000 + 1_000_000_000 = 1_040_000_000 IDR (last coupon + principal)
 //
 // EIR per period should be slightly above 0.04 (because transaction cost creates discount).
 func obligasiAtDiscount() []CashflowItem {
@@ -81,7 +82,7 @@ func depositoNoFee(nominal, kuponPct string, months int) []CashflowItem {
 // ─── Happy path tests ─────────────────────────────────────────────────────────
 
 func TestSolve_ObligasiAtDiscount_Convergent(t *testing.T) {
-	solver := NewEIRSolver()
+	solver := NewSolver()
 	cfs := obligasiAtDiscount()
 	seed := ptrDec("0.04")
 
@@ -124,7 +125,7 @@ func TestSolve_DepositoNoFee_EIREqualsKupon(t *testing.T) {
 	// No transaction costs → EIR in ACT/365 framework should equal annual kupon rate.
 	// The solver uses ACT/365 periods (t in years), so r is the annual effective rate.
 	// For kupon=6% p.a., EIR should be ~0.06 (6% annual).
-	solver := NewEIRSolver()
+	solver := NewSolver()
 	cfs := depositoNoFee("500000000", "0.06", 12)
 	expectedAnnual := mustDec("0.06") // 6% annual
 
@@ -148,7 +149,7 @@ func TestSolve_DepositoNoFee_EIREqualsKupon(t *testing.T) {
 
 func TestSolve_DefaultSeed(t *testing.T) {
 	// Without seed, should use 0.10 and still converge
-	solver := NewEIRSolver()
+	solver := NewSolver()
 	cfs := obligasiAtDiscount()
 
 	eir, detail, err := solver.Solve(cfs, nil)
@@ -166,7 +167,7 @@ func TestSolve_DefaultSeed(t *testing.T) {
 // ─── Error path tests ─────────────────────────────────────────────────────────
 
 func TestSolve_EmptyCashflow(t *testing.T) {
-	solver := NewEIRSolver()
+	solver := NewSolver()
 	_, _, err := solver.Solve([]CashflowItem{}, nil)
 	if err == nil {
 		t.Fatal("expected error for empty cashflow")
@@ -179,7 +180,7 @@ func TestSolve_EmptyCashflow(t *testing.T) {
 }
 
 func TestSolve_SingleCashflow(t *testing.T) {
-	solver := NewEIRSolver()
+	solver := NewSolver()
 	_, _, err := solver.Solve([]CashflowItem{{Date: date(2026, 1, 1), AmountIDR: mustDec("-1000")}}, nil)
 	if err == nil {
 		t.Fatal("expected error for single cashflow")
@@ -191,7 +192,7 @@ func TestSolve_SingleCashflow(t *testing.T) {
 }
 
 func TestSolve_CF0Positive_SignMismatch(t *testing.T) {
-	solver := NewEIRSolver()
+	solver := NewSolver()
 	cfs := []CashflowItem{
 		{Date: date(2026, 1, 1), AmountIDR: mustDec("1000000")},
 		{Date: date(2027, 1, 1), AmountIDR: mustDec("-1050000")},
@@ -209,7 +210,7 @@ func TestSolve_CF0Positive_SignMismatch(t *testing.T) {
 func TestSolve_NonConvergent_MultipleSignChanges(t *testing.T) {
 	// Cashflow with no real positive IRR (all-negative: initial outflow + subsequent outflows).
 	// This forces the solver to non-converge (NPV stays negative for all r > -1).
-	solver := NewEIRSolver()
+	solver := NewSolver()
 	// CF[0] = -1000 outflow, CF[1..10] = -10 (further outflows, no return)
 	// NPV = -1000 - 10/(1+r) - ... never reaches 0 for r in (-1, inf)
 	cfs := make([]CashflowItem, 11)
@@ -240,7 +241,7 @@ func TestSolve_NonConvergent_MultipleSignChanges(t *testing.T) {
 
 func TestSolve_Precision8Decimals(t *testing.T) {
 	// Result must have exactly 8 decimal places (DEC-013, DEC-016)
-	solver := NewEIRSolver()
+	solver := NewSolver()
 	cfs := obligasiAtDiscount()
 	eir, _, err := solver.Solve(cfs, ptrDec("0.04"))
 	if err != nil {
@@ -257,7 +258,7 @@ func TestSolve_Precision8Decimals(t *testing.T) {
 // ─── Benchmark ────────────────────────────────────────────────────────────────
 
 func BenchmarkSolve_Iterations(b *testing.B) {
-	solver := NewEIRSolver()
+	solver := NewSolver()
 	cfs := obligasiAtDiscount()
 	seed := ptrDec("0.04")
 	b.ResetTimer()
@@ -297,4 +298,3 @@ func isDomainErrOneOf(err error, codes ...string) (interface{}, bool) {
 	}
 	return nil, false
 }
-

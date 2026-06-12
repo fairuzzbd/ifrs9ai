@@ -52,8 +52,8 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
 
-	"blips-ifrs9.tugu-re.com/internal/ecl/helpers"
 	"blips-ifrs9.tugu-re.com/internal/ecl/eir"
+	"blips-ifrs9.tugu-re.com/internal/ecl/helpers"
 	"blips-ifrs9.tugu-re.com/internal/ecl/lookthrough"
 	"blips-ifrs9.tugu-re.com/internal/ecl/lps"
 	"blips-ifrs9.tugu-re.com/internal/ecl/staging"
@@ -642,7 +642,7 @@ func main() {
 	// EIR Newton-Raphson + Schedule + Amendment workflow (APP-C-EIR-001..005, P4-M5)
 	// Endpoints (all under /api/v1/ecl/eir/):
 	//   POST  compute                       — NR solve + optional persist (Story 1)
-	//   POST  generate-schedule             — amortisation schedule (Story 2)
+	//   POST  generate-schedule             — amortization schedule (Story 2)
 	//   GET   schedule/:instrumenId         — active schedule DataTable (Story 3)
 	//   GET   schedule/:instrumenId/history — full history (superseded) (Story 3)
 	//   POST  amendments                    — propose amendment (Story 4)
@@ -660,7 +660,7 @@ func main() {
 	eirSchedRepo := eir.NewDBEIRScheduleRepo(db)
 	eirAmendRepo := eir.NewDBAmendmentRepo(db)
 
-	eirComputeSvc := eir.NewEIRService(db, eirInstrRepo, eirAuditWriter, logger)
+	eirComputeSvc := eir.NewService(db, eirInstrRepo, eirAuditWriter, logger)
 	eirScheduleSvc := eir.NewScheduleService(db, eirInstrRepo, eirSchedRepo, eirAuditWriter, logger)
 	eirAmendSvc := eir.NewAmendmentService(db, eirInstrRepo, eirSchedRepo, eirAmendRepo, eirAuditWriter, logger)
 	eirBulkSvc := eir.NewBulkService(db, eirInstrRepo, eirSchedRepo, nil, nil, logger)

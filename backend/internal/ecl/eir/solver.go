@@ -1,6 +1,6 @@
 // Package eir — Newton-Raphson IRR solver.
 //
-// Implements EIRSolver.Solve per DEC-013:
+// Implements Solver.Solve per DEC-013:
 //   - tolerance: 1e-10 (|f(r)| < tol OR |r_new - r_old| < tol)
 //   - max iterations: 100
 //   - seed: couponRate if provided, else 0.10
@@ -46,12 +46,12 @@ var (
 	baseDays = decimal.NewFromInt(365)
 )
 
-// EIRSolver is a pure-function Newton-Raphson IRR solver.
+// Solver is a pure-function Newton-Raphson IRR solver.
 // No DB access — tested in isolation.
-type EIRSolver struct{}
+type Solver struct{}
 
-// NewEIRSolver creates an EIRSolver.
-func NewEIRSolver() *EIRSolver { return &EIRSolver{} }
+// NewSolver creates an Solver.
+func NewSolver() *Solver { return &Solver{} }
 
 // Solve finds the per-period effective interest rate r such that:
 //
@@ -67,7 +67,7 @@ func NewEIRSolver() *EIRSolver { return &EIRSolver{} }
 //
 // Precision: all arithmetic in shopspring/decimal.Decimal — NEVER float64 (DEC-016).
 // Rounding: not applied inside solver; caller applies .RoundBank(8) on the result.
-func (s *EIRSolver) Solve(cashflows []CashflowItem, seed *decimal.Decimal) (decimal.Decimal, SolveDetail, error) {
+func (s *Solver) Solve(cashflows []CashflowItem, seed *decimal.Decimal) (decimal.Decimal, SolveDetail, error) {
 	// ── Cashflow validation ────────────────────────────────────────────────
 	if len(cashflows) < 2 {
 		return zero, SolveDetail{}, ErrEIRCashflowInvalid("Minimal 2 cashflow items diperlukan (CF_0 negatif + setidaknya 1 inflow)")
@@ -80,12 +80,14 @@ func (s *EIRSolver) Solve(cashflows []CashflowItem, seed *decimal.Decimal) (deci
 		// Check for NaN or Inf is implicitly prevented by decimal type
 		_ = cf.AmountIDR
 	}
+	//nolint:gosec // cashflows[0] is safe: len(cashflows) >= 2 is checked two lines above
 	if cashflows[0].AmountIDR.GreaterThanOrEqual(zero) {
 		return zero, SolveDetail{}, ErrEIRCashflowSignMismatch()
 	}
 
 	// ── Build time fractions t_i from CF[0].Date ───────────────────────────
 	// t_i = days(CF[i].Date - CF[0].Date) / 365   (ACT/365)
+	//nolint:gosec // cashflows[0] is safe: len(cashflows) >= 2 is checked above
 	origin := cashflows[0].Date
 	periods := make([]decimal.Decimal, len(cashflows))
 	for i, cf := range cashflows {
@@ -112,11 +114,11 @@ func (s *EIRSolver) Solve(cashflows []CashflowItem, seed *decimal.Decimal) (deci
 		for i, cf := range cashflows {
 			t := periods[i]
 			// (1+r)^t via repeated multiply or exp-log in decimal
-			onePlusR_t := decimalPow(onePlusR, t)
-			if onePlusR_t.IsZero() {
+			onePlusRT := decimalPow(onePlusR, t)
+			if onePlusRT.IsZero() {
 				return zero, detail, ErrEIRDivergent("(1+r)^t равен нулю — cashflow period extreme")
 			}
-			term := cf.AmountIDR.Div(onePlusR_t)
+			term := cf.AmountIDR.Div(onePlusRT)
 			fr = fr.Add(term)
 
 			// derivative term: -t × CF_t / (1+r)^(t+1) = -t × term / (1+r)
@@ -261,7 +263,7 @@ func decimalPow(base, exp decimal.Decimal) decimal.Decimal {
 func decimalLn(x decimal.Decimal) decimal.Decimal {
 	xMinus1 := x.Sub(one)
 	xPlus1 := x.Add(one)
-	z := xMinus1.Div(xPlus1)   // z = (x-1)/(x+1)
+	z := xMinus1.Div(xPlus1) // z = (x-1)/(x+1)
 	z2 := z.Mul(z)
 
 	result := zero

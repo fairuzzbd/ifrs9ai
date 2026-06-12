@@ -83,16 +83,16 @@ func doRequest(r *gin.Engine, method, path string, body interface{}) *httptest.R
 func buildHandler(instrRepo *stubInstrumenRepo, schedRepo *stubScheduleRepo, amendRepo *stubAmendmentRepo, db interface{}) *Handler {
 	auditW := &stubAuditWriter{}
 
-	eirSvc := &EIRService{
+	eirSvc := &Service{
 		instrRepo:   instrRepo,
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: auditW,
 		logger:      testLogger(),
 	}
 	schedSvc := &ScheduleService{
 		instrRepo:   instrRepo,
 		schedRepo:   schedRepo,
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: auditW,
 		logger:      testLogger(),
 	}
@@ -100,7 +100,7 @@ func buildHandler(instrRepo *stubInstrumenRepo, schedRepo *stubScheduleRepo, ame
 		instrRepo:   instrRepo,
 		schedRepo:   schedRepo,
 		amendRepo:   amendRepo,
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: auditW,
 		logger:      testLogger(),
 	}
@@ -555,15 +555,15 @@ func TestScheduleRowToJSON_NoFloat64(t *testing.T) {
 }
 
 func TestProposalToJSON_OptionalFields(t *testing.T) {
-	p := EIRAmendmentProposal{
-		ID:           uuid.New(),
-		InstrumenID:  uuid.New(),
-		Status:       AmendStatusPendingReview,
+	p := AmendmentProposal{
+		ID:               uuid.New(),
+		InstrumenID:      uuid.New(),
+		Status:           AmendStatusPendingReview,
 		TanggalAmandemen: date(2026, 6, 1),
 		AlasanAmandemen:  "test",
-		TenantID:     "TUGURE",
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
+		TenantID:         "TUGURE",
+		CreatedAt:        time.Now(),
+		UpdatedAt:        time.Now(),
 	}
 	m := proposalToJSON(p)
 
@@ -717,13 +717,13 @@ func TestNewAmendmentService_NilAuditWriter_Panics(t *testing.T) {
 	NewAmendmentService(nil, newStubInstrumenRepo(), &stubScheduleRepo{}, newStubAmendmentRepo(), nil, testLogger())
 }
 
-func TestNewEIRService_NilAuditWriter_Panics(t *testing.T) {
+func TestNewService_NilAuditWriter_Panics(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
 			t.Error("expected panic for nil auditWriter")
 		}
 	}()
-	NewEIRService(nil, newStubInstrumenRepo(), nil, testLogger())
+	NewService(nil, newStubInstrumenRepo(), nil, testLogger())
 }
 
 func TestNewScheduleService_NilAuditWriter_Panics(t *testing.T) {

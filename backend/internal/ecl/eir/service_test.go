@@ -1,4 +1,4 @@
-// Package eir — tests for EIRService, ScheduleService, AmendmentService, and domain helpers.
+// Package eir — tests for Service, ScheduleService, AmendmentService, and domain helpers.
 //
 // Tests follow M5 Story acceptance criteria:
 //   - APP-C-EIR-001: Compute (FVTPL reject, POCI mode, persist, duplicate guard)
@@ -93,9 +93,9 @@ type stubScheduleRepo struct {
 
 func (r *stubScheduleRepo) InsertBatch(_ context.Context, _ *sql.Tx, rows []ScheduleRow) error {
 	r.rows = append(r.rows, rows...)
-	for _, row := range rows {
-		if row.PeriodeSeq > r.maxSeq {
-			r.maxSeq = row.PeriodeSeq
+	for i := range rows {
+		if rows[i].PeriodeSeq > r.maxSeq {
+			r.maxSeq = rows[i].PeriodeSeq
 		}
 	}
 	r.hasActive = true
@@ -114,9 +114,9 @@ func (r *stubScheduleRepo) MarkSuperseded(_ context.Context, _ *sql.Tx, _ uuid.U
 
 func (r *stubScheduleRepo) GetActiveByPeriode(_ context.Context, _ uuid.UUID, _ int) ([]ScheduleRow, error) {
 	var active []ScheduleRow
-	for _, row := range r.rows {
-		if row.RecomputedFromSeq == nil {
-			active = append(active, row)
+	for i := range r.rows {
+		if r.rows[i].RecomputedFromSeq == nil {
+			active = append(active, r.rows[i])
 		}
 	}
 	return active, nil
@@ -132,9 +132,9 @@ func (r *stubScheduleRepo) HasActiveRows(_ context.Context, _ uuid.UUID) (bool, 
 
 func (r *stubScheduleRepo) List(_ context.Context, _ uuid.UUID, _ listquery.Query, _ bool, _ string, limit int) ([]ScheduleRow, *response.PaginationMeta, error) {
 	var active []ScheduleRow
-	for _, row := range r.rows {
-		if row.RecomputedFromSeq == nil {
-			active = append(active, row)
+	for i := range r.rows {
+		if r.rows[i].RecomputedFromSeq == nil {
+			active = append(active, r.rows[i])
 		}
 	}
 	hasMore := len(active) > limit
@@ -145,7 +145,7 @@ func (r *stubScheduleRepo) List(_ context.Context, _ uuid.UUID, _ listquery.Quer
 }
 
 type stubAmendmentRepo struct {
-	proposals   map[uuid.UUID]*EIRAmendmentProposal
+	proposals   map[uuid.UUID]*AmendmentProposal
 	activeForID map[uuid.UUID]bool
 	createCalls int
 	updateCalls int
@@ -153,12 +153,12 @@ type stubAmendmentRepo struct {
 
 func newStubAmendmentRepo() *stubAmendmentRepo {
 	return &stubAmendmentRepo{
-		proposals:   make(map[uuid.UUID]*EIRAmendmentProposal),
+		proposals:   make(map[uuid.UUID]*AmendmentProposal),
 		activeForID: make(map[uuid.UUID]bool),
 	}
 }
 
-func (r *stubAmendmentRepo) Create(_ context.Context, _ *sql.Tx, p *EIRAmendmentProposal) error {
+func (r *stubAmendmentRepo) Create(_ context.Context, _ *sql.Tx, p *AmendmentProposal) error {
 	r.createCalls++
 	cp := *p
 	r.proposals[p.ID] = &cp
@@ -166,7 +166,7 @@ func (r *stubAmendmentRepo) Create(_ context.Context, _ *sql.Tx, p *EIRAmendment
 	return nil
 }
 
-func (r *stubAmendmentRepo) Update(_ context.Context, _ *sql.Tx, p *EIRAmendmentProposal) error {
+func (r *stubAmendmentRepo) Update(_ context.Context, _ *sql.Tx, p *AmendmentProposal) error {
 	r.updateCalls++
 	cp := *p
 	r.proposals[p.ID] = &cp
@@ -176,7 +176,7 @@ func (r *stubAmendmentRepo) Update(_ context.Context, _ *sql.Tx, p *EIRAmendment
 	return nil
 }
 
-func (r *stubAmendmentRepo) GetByID(_ context.Context, id uuid.UUID) (*EIRAmendmentProposal, error) {
+func (r *stubAmendmentRepo) GetByID(_ context.Context, id uuid.UUID) (*AmendmentProposal, error) {
 	if p, ok := r.proposals[id]; ok {
 		cp := *p
 		return &cp, nil
@@ -188,8 +188,8 @@ func (r *stubAmendmentRepo) HasActiveProposal(_ context.Context, instrumenID uui
 	return r.activeForID[instrumenID], nil
 }
 
-func (r *stubAmendmentRepo) List(_ context.Context, _ listquery.Query, _ string, limit int, _ uuid.UUID, _ bool) ([]EIRAmendmentProposal, *response.PaginationMeta, error) {
-	var result []EIRAmendmentProposal
+func (r *stubAmendmentRepo) List(_ context.Context, _ listquery.Query, _ string, limit int, _ uuid.UUID, _ bool) ([]AmendmentProposal, *response.PaginationMeta, error) {
+	result := make([]AmendmentProposal, 0, len(r.proposals))
 	for _, p := range r.proposals {
 		result = append(result, *p)
 	}
@@ -239,16 +239,16 @@ func actInstrumen(id uuid.UUID, klasifikasi string, eirAwal *decimal.Decimal) In
 	}
 }
 
-// ─── EIRService tests ─────────────────────────────────────────────────────────
+// ─── Service tests ─────────────────────────────────────────────────────────
 
-func TestEIRService_Compute_FVTPL_Rejected(t *testing.T) {
+func TestService_Compute_FVTPL_Rejected(t *testing.T) {
 	instrRepo := newStubInstrumenRepo()
 	id := uuid.New()
 	instrRepo.put(actInstrumen(id, "FVTPL", nil))
 
-	svc := &EIRService{instrRepo: instrRepo, solver: NewEIRSolver(), auditWriter: &stubAuditWriter{}, logger: testLogger()}
+	svc := &Service{instrRepo: instrRepo, solver: NewSolver(), auditWriter: &stubAuditWriter{}, logger: testLogger()}
 
-	_, err := svc.Compute(context.Background(), EIRComputeRequest{
+	_, err := svc.Compute(context.Background(), ComputeRequest{
 		InstrumenID:        id,
 		CashflowProjection: obligasiAtDiscount2(),
 	}, uuid.New(), "ROLE-RISK")
@@ -256,10 +256,10 @@ func TestEIRService_Compute_FVTPL_Rejected(t *testing.T) {
 	assertDomainErr(t, err, CodeEIRInstrumenFVTPLNoEIR)
 }
 
-func TestEIRService_Compute_InstrumenNotFound(t *testing.T) {
-	svc := &EIRService{instrRepo: newStubInstrumenRepo(), solver: NewEIRSolver(), auditWriter: &stubAuditWriter{}, logger: testLogger()}
+func TestService_Compute_InstrumenNotFound(t *testing.T) {
+	svc := &Service{instrRepo: newStubInstrumenRepo(), solver: NewSolver(), auditWriter: &stubAuditWriter{}, logger: testLogger()}
 
-	_, err := svc.Compute(context.Background(), EIRComputeRequest{
+	_, err := svc.Compute(context.Background(), ComputeRequest{
 		InstrumenID:        uuid.New(),
 		CashflowProjection: obligasiAtDiscount2(),
 	}, uuid.New(), "ROLE-RISK")
@@ -267,15 +267,15 @@ func TestEIRService_Compute_InstrumenNotFound(t *testing.T) {
 	assertDomainErr(t, err, CodeEIRInstrumenNotFound)
 }
 
-func TestEIRService_Compute_AlreadyComputed_GuardFires(t *testing.T) {
+func TestService_Compute_AlreadyComputed_GuardFires(t *testing.T) {
 	instrRepo := newStubInstrumenRepo()
 	id := uuid.New()
 	eirVal := mustDec("0.08")
 	instrRepo.put(actInstrumen(id, "AC", &eirVal))
 
-	svc := &EIRService{instrRepo: instrRepo, solver: NewEIRSolver(), auditWriter: &stubAuditWriter{}, logger: testLogger()}
+	svc := &Service{instrRepo: instrRepo, solver: NewSolver(), auditWriter: &stubAuditWriter{}, logger: testLogger()}
 
-	_, err := svc.Compute(context.Background(), EIRComputeRequest{
+	_, err := svc.Compute(context.Background(), ComputeRequest{
 		InstrumenID:        id,
 		CashflowProjection: obligasiAtDiscount2(),
 		PersistResult:      true,
@@ -285,14 +285,14 @@ func TestEIRService_Compute_AlreadyComputed_GuardFires(t *testing.T) {
 	assertDomainErr(t, err, CodeEIRAlreadyComputed)
 }
 
-func TestEIRService_Compute_PreviewOnly_Success(t *testing.T) {
+func TestService_Compute_PreviewOnly_Success(t *testing.T) {
 	instrRepo := newStubInstrumenRepo()
 	id := uuid.New()
 	instrRepo.put(actInstrumen(id, "AC", nil))
 
-	svc := &EIRService{instrRepo: instrRepo, solver: NewEIRSolver(), auditWriter: &stubAuditWriter{}, logger: testLogger()}
+	svc := &Service{instrRepo: instrRepo, solver: NewSolver(), auditWriter: &stubAuditWriter{}, logger: testLogger()}
 
-	result, err := svc.Compute(context.Background(), EIRComputeRequest{
+	result, err := svc.Compute(context.Background(), ComputeRequest{
 		InstrumenID:        id,
 		CashflowProjection: obligasiAtDiscount2(),
 		PersistResult:      false,
@@ -313,15 +313,15 @@ func TestEIRService_Compute_PreviewOnly_Success(t *testing.T) {
 	t.Logf("Preview EIR: %s", result.EIRPerPeriod.StringFixed(8))
 }
 
-func TestEIRService_Compute_ForceRecompute_Preview(t *testing.T) {
+func TestService_Compute_ForceRecompute_Preview(t *testing.T) {
 	instrRepo := newStubInstrumenRepo()
 	id := uuid.New()
 	eirVal := mustDec("0.08")
 	instrRepo.put(actInstrumen(id, "AC", &eirVal))
 
-	svc := &EIRService{instrRepo: instrRepo, solver: NewEIRSolver(), auditWriter: &stubAuditWriter{}, logger: testLogger()}
+	svc := &Service{instrRepo: instrRepo, solver: NewSolver(), auditWriter: &stubAuditWriter{}, logger: testLogger()}
 
-	result, err := svc.Compute(context.Background(), EIRComputeRequest{
+	result, err := svc.Compute(context.Background(), ComputeRequest{
 		InstrumenID:        id,
 		CashflowProjection: obligasiAtDiscount2(),
 		PersistResult:      false,
@@ -336,16 +336,16 @@ func TestEIRService_Compute_ForceRecompute_Preview(t *testing.T) {
 	}
 }
 
-func TestEIRService_Compute_POCI_Mismatch_Rejected(t *testing.T) {
+func TestService_Compute_POCI_Mismatch_Rejected(t *testing.T) {
 	instrRepo := newStubInstrumenRepo()
 	id := uuid.New()
 	inst := actInstrumen(id, "AC", nil)
 	inst.FlagPOCI = false
 	instrRepo.put(inst)
 
-	svc := &EIRService{instrRepo: instrRepo, solver: NewEIRSolver(), auditWriter: &stubAuditWriter{}, logger: testLogger()}
+	svc := &Service{instrRepo: instrRepo, solver: NewSolver(), auditWriter: &stubAuditWriter{}, logger: testLogger()}
 
-	_, err := svc.Compute(context.Background(), EIRComputeRequest{
+	_, err := svc.Compute(context.Background(), ComputeRequest{
 		InstrumenID:        id,
 		CashflowProjection: obligasiAtDiscount2(),
 		POCIMode:           true,
@@ -354,7 +354,7 @@ func TestEIRService_Compute_POCI_Mismatch_Rejected(t *testing.T) {
 	assertDomainErr(t, err, CodeEIRPOCIRequiresPDAdjustedCF)
 }
 
-func TestEIRService_Compute_PersistResult_CallsAudit(t *testing.T) {
+func TestService_Compute_PersistResult_CallsAudit(t *testing.T) {
 	instrRepo := newStubInstrumenRepo()
 	id := uuid.New()
 	instrRepo.put(actInstrumen(id, "AC", nil))
@@ -365,15 +365,15 @@ func TestEIRService_Compute_PersistResult_CallsAudit(t *testing.T) {
 	mock.ExpectCommit()
 
 	auditW := &stubAuditWriter{}
-	svc := &EIRService{
+	svc := &Service{
 		db:          db,
 		instrRepo:   instrRepo,
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: auditW,
 		logger:      testLogger(),
 	}
 
-	result, err := svc.Compute(context.Background(), EIRComputeRequest{
+	result, err := svc.Compute(context.Background(), ComputeRequest{
 		InstrumenID:        id,
 		CashflowProjection: obligasiAtDiscount2(),
 		PersistResult:      true,
@@ -419,7 +419,7 @@ func TestScheduleService_Generate_Success(t *testing.T) {
 		db:          db,
 		instrRepo:   instrRepo,
 		schedRepo:   schedRepo,
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: auditW,
 		logger:      testLogger(),
 	}
@@ -462,7 +462,7 @@ func TestScheduleService_Generate_DuplicateGuard(t *testing.T) {
 	svc := &ScheduleService{
 		instrRepo:   instrRepo,
 		schedRepo:   &stubScheduleRepo{hasActive: true},
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: &stubAuditWriter{},
 		logger:      testLogger(),
 	}
@@ -483,7 +483,7 @@ func TestScheduleService_Generate_EIRNotComputed_Error(t *testing.T) {
 	svc := &ScheduleService{
 		instrRepo:   instrRepo,
 		schedRepo:   &stubScheduleRepo{},
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: &stubAuditWriter{},
 		logger:      testLogger(),
 	}
@@ -511,7 +511,7 @@ func TestScheduleService_Generate_ForceRegenerate(t *testing.T) {
 		db:          db,
 		instrRepo:   instrRepo,
 		schedRepo:   &stubScheduleRepo{hasActive: true},
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: &stubAuditWriter{},
 		logger:      testLogger(),
 	}
@@ -545,7 +545,7 @@ func TestScheduleService_Generate_Rows_OpeningEqualsAbsCF0(t *testing.T) {
 		db:          db,
 		instrRepo:   instrRepo,
 		schedRepo:   &stubScheduleRepo{},
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: &stubAuditWriter{},
 		logger:      testLogger(),
 	}
@@ -753,9 +753,9 @@ func mustMarshalCF(t *testing.T, cfs []CashflowItem) string {
 	return s
 }
 
-func makeProposal(instrID, makerID uuid.UUID, status AmendmentStatus, cfJSON string) EIRAmendmentProposal {
+func makeProposal(instrID, makerID uuid.UUID, status AmendmentStatus, cfJSON string) AmendmentProposal {
 	eirLama := mustDec("0.08")
-	return EIRAmendmentProposal{
+	return AmendmentProposal{
 		ID:                  uuid.New(),
 		InstrumenID:         instrID,
 		Status:              status,
@@ -793,7 +793,7 @@ func TestAmendmentService_Propose_Success(t *testing.T) {
 		instrRepo:   instrRepo,
 		schedRepo:   &stubScheduleRepo{},
 		amendRepo:   amendRepo,
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: &stubAuditWriter{},
 		logger:      testLogger(),
 	}
@@ -831,7 +831,7 @@ func TestAmendmentService_Propose_NoEIRAwal_Error(t *testing.T) {
 		instrRepo:   instrRepo,
 		schedRepo:   &stubScheduleRepo{},
 		amendRepo:   newStubAmendmentRepo(),
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: &stubAuditWriter{},
 		logger:      testLogger(),
 	}
@@ -859,7 +859,7 @@ func TestAmendmentService_Propose_ActiveExists(t *testing.T) {
 		instrRepo:   instrRepo,
 		schedRepo:   &stubScheduleRepo{},
 		amendRepo:   amendRepo,
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: &stubAuditWriter{},
 		logger:      testLogger(),
 	}
@@ -891,7 +891,7 @@ func TestAmendmentService_Review_SoD_MakerCannotBeReviewer(t *testing.T) {
 		instrRepo:   instrRepo,
 		schedRepo:   &stubScheduleRepo{},
 		amendRepo:   amendRepo,
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: &stubAuditWriter{},
 		logger:      testLogger(),
 	}
@@ -937,7 +937,7 @@ func TestAmendmentService_Review_Success(t *testing.T) {
 		instrRepo:   instrRepo,
 		schedRepo:   &stubScheduleRepo{},
 		amendRepo:   amendRepo,
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: &stubAuditWriter{},
 		logger:      testLogger(),
 	}
@@ -977,7 +977,7 @@ func TestAmendmentService_Approve_MFARequired(t *testing.T) {
 		instrRepo:   instrRepo,
 		schedRepo:   &stubScheduleRepo{},
 		amendRepo:   amendRepo,
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: &stubAuditWriter{},
 		logger:      testLogger(),
 	}
@@ -1007,7 +1007,7 @@ func TestAmendmentService_Approve_SoD_MakerCannotApprove(t *testing.T) {
 		instrRepo:   instrRepo,
 		schedRepo:   &stubScheduleRepo{},
 		amendRepo:   amendRepo,
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: &stubAuditWriter{},
 		logger:      testLogger(),
 	}
@@ -1057,7 +1057,7 @@ func TestAmendmentService_Approve_Success(t *testing.T) {
 		instrRepo:   instrRepo,
 		schedRepo:   schedRepo,
 		amendRepo:   amendRepo,
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: &stubAuditWriter{},
 		logger:      testLogger(),
 	}
@@ -1118,7 +1118,7 @@ func TestAmendmentService_Reject_Success(t *testing.T) {
 		instrRepo:   instrRepo,
 		schedRepo:   &stubScheduleRepo{},
 		amendRepo:   amendRepo,
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: &stubAuditWriter{},
 		logger:      testLogger(),
 	}
@@ -1152,7 +1152,7 @@ func TestAmendmentService_Reject_AlreadyTerminal(t *testing.T) {
 		instrRepo:   instrRepo,
 		schedRepo:   &stubScheduleRepo{},
 		amendRepo:   amendRepo,
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: &stubAuditWriter{},
 		logger:      testLogger(),
 	}
@@ -1204,9 +1204,9 @@ func TestBulkService_Recompute_Empty(t *testing.T) {
 
 func TestIsEIRApplicable(t *testing.T) {
 	cases := []struct {
-		klas    string
-		flag    bool
-		want    bool
+		klas string
+		flag bool
+		want bool
 	}{
 		{"AC", true, true},
 		{"FVOCI", true, true},

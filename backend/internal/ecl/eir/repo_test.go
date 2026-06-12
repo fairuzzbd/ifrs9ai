@@ -333,12 +333,12 @@ func TestDBEIRScheduleRepo_GetActiveByPeriode_WithRow(t *testing.T) {
 		"STAGE_1",
 		"PROYEKSI",
 		false,
-		nil,      // recomputed_from_seq NULL
-		now,      // created_at
-		actor,    // created_by
-		now,      // updated_at
-		actor,    // updated_by
-		nil,      // deleted_at
+		nil,   // recomputed_from_seq NULL
+		now,   // created_at
+		actor, // created_by
+		now,   // updated_at
+		actor, // updated_by
+		nil,   // deleted_at
 		"TUGURE",
 		int64(1),
 	)
@@ -522,7 +522,7 @@ func TestDBInstrumenEIRRepo_GetByID_Found_AC(t *testing.T) {
 			now,               // tanggal_penempatan
 			now,               // tanggal_jatuh_tempo
 			"ACTIVE",
-			nil,               // deleted_at
+			nil, // deleted_at
 			"TUGURE",
 		))
 
@@ -627,7 +627,7 @@ func TestDBAmendmentRepo_Create(t *testing.T) {
 
 	makerID := uuid.New()
 	eirLama := mustDec("0.08000000")
-	proposal := &EIRAmendmentProposal{
+	proposal := &AmendmentProposal{
 		ID:                  uuid.New(),
 		InstrumenID:         uuid.New(),
 		Status:              AmendStatusPendingReview,
@@ -667,7 +667,7 @@ func TestDBAmendmentRepo_Create_NilEIRLama(t *testing.T) {
 	repo := NewDBAmendmentRepo(db)
 
 	makerID := uuid.New()
-	proposal := &EIRAmendmentProposal{
+	proposal := &AmendmentProposal{
 		ID:                  uuid.New(),
 		InstrumenID:         uuid.New(),
 		Status:              AmendStatusPendingReview,
@@ -707,7 +707,7 @@ func TestDBAmendmentRepo_Create_WithCarryingAndDokumen(t *testing.T) {
 	carryingPre := mustDec("990000000.0000")
 	carryingPost := mustDec("985000000.0000")
 
-	proposal := &EIRAmendmentProposal{
+	proposal := &AmendmentProposal{
 		ID:                  uuid.New(),
 		InstrumenID:         uuid.New(),
 		Status:              AmendStatusPendingReview,
@@ -753,7 +753,7 @@ func TestDBAmendmentRepo_Update(t *testing.T) {
 	sig := "sha256:abc123"
 	now := time.Now()
 
-	proposal := &EIRAmendmentProposal{
+	proposal := &AmendmentProposal{
 		ID:                    uuid.New(),
 		InstrumenID:           uuid.New(),
 		Status:                AmendStatusPendingApproval,
@@ -806,7 +806,7 @@ func TestDBAmendmentRepo_Update_Approved_WithEIRBaru(t *testing.T) {
 	sig := "sha256:def456"
 	now := time.Now()
 
-	proposal := &EIRAmendmentProposal{
+	proposal := &AmendmentProposal{
 		ID:                    uuid.New(),
 		InstrumenID:           uuid.New(),
 		Status:                AmendStatusApproved,
@@ -870,19 +870,19 @@ func TestDBAmendmentRepo_GetByID_Found_PendingReview(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(amendmentSelectCols()).AddRow(
 			proposalID,
 			instrID,
-			now,            // tanggal_re_estimation
-			`[]`,           // modifikasi_terms_json
+			now,  // tanggal_re_estimation
+			`[]`, // modifikasi_terms_json
 			"PENDING_REVIEW",
-			"0.08000000",   // eir_sebelum::text
-			nil,            // eir_sesudah (null)
-			nil,            // catch_up_adjustment (null)
-			makerID,        // maker_id
-			nil,            // reviewer_id
-			nil,            // approver_id
-			nil, nil, nil,  // reviewer/approver comment, reject reason
-			nil, nil,       // sig hashes
-			nil, nil,       // approved_at, rejected_at
-			nil,            // dokumen_pendukung_id
+			"0.08000000",  // eir_sebelum::text
+			nil,           // eir_sesudah (null)
+			nil,           // catch_up_adjustment (null)
+			makerID,       // maker_id
+			nil,           // reviewer_id
+			nil,           // approver_id
+			nil, nil, nil, // reviewer/approver comment, reject reason
+			nil, nil, // sig hashes
+			nil, nil, // approved_at, rejected_at
+			nil, // dokumen_pendukung_id
 			now, makerID, now, makerID,
 			"TUGURE",
 			int64(1),
