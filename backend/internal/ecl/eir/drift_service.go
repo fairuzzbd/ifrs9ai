@@ -207,9 +207,40 @@ func (s *DriftService) GenerateReport(ctx context.Context, req DriftGenerateRequ
 		return nil, fmt.Errorf("drift generate: update report: %w", err)
 	}
 
-	// Store entry slices as JSON blobs in the report row for detail endpoint.
-	// Silently skips if columns not present (forward-compat).
-	_ = s.storeDriftEntries(ctx, finishTx, report.ID, driftLow, driftHigh, missingList, errorList) //nolint:errcheck // intentional best-effort
+	// B4 fix: storeDriftEntries must NOT be silently discarded.
+	// If the UPDATE fails the drift report is marked COMPLETED in the DB but its
+	// detail JSON blobs are lost — an orphan audit record.  Instead: propagate the
+	// error, roll back the finishTx, and mark the report FAILED in a new transaction.
+	if err := s.storeDriftEntries(ctx, finishTx, report.ID, driftLow, driftHigh, missingList, errorList); err != nil {
+		_ = finishTx.Rollback() //nolint:errcheck // must roll back before marking FAILED
+		summary := fmt.Sprintf("storeDriftEntries: %v", err)
+		report.Status = DriftStatusFailed
+		report.ErrorSummary = &summary
+
+		failTx, txErr := s.db.BeginTx(ctx, nil)
+		if txErr == nil {
+			// Best-effort FAILED status update; if this also fails we still return an error.
+			if updErr := s.driftRepo.Update(ctx, failTx, report); updErr == nil {
+				// Write FAILED audit in the same tx as the status update.
+				_ = s.auditWriter.Write(ctx, failTx, AuditEvent{ //nolint:errcheck // best-effort audit on failure path
+					ActorUserID: actorID,
+					Action:      "EIR.DRIFT_REPORT_FAILED",
+					EntityType:  "sys.drift_report",
+					EntityID:    report.ID,
+					AfterJSON: map[string]interface{}{
+						"report_id":     report.ID.String(),
+						"status":        string(DriftStatusFailed),
+						"error_summary": summary,
+					},
+					TenantID: req.TenantID,
+				})
+				_ = failTx.Commit() //nolint:errcheck // best-effort commit for FAILED status
+			} else {
+				_ = failTx.Rollback() //nolint:errcheck
+			}
+		}
+		return nil, fmt.Errorf("drift generate: store entries: %w", err)
+	}
 
 	if err := s.auditWriter.Write(ctx, finishTx, AuditEvent{
 		ActorUserID: actorID,
