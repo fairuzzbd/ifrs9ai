@@ -70,10 +70,16 @@ type ECLOrchestrator struct {
 	bobotRepo   BobotRepo
 	resultRepo  *CalcResultLineRepo
 	logger      *slog.Logger
+	// F3 fix: M1 staging service injected directly — eliminates probe-via-M2 pattern.
+	stagingSvc StagingServiceIface
+	// F4 fix: CalcRunSealChecker injected — guards ComputeBulk/ComputeSingle.
+	sealChecker CalcRunSealChecker
 }
 
 // NewOrchestrator creates ECLOrchestrator.
 // Panics if auditWriter is nil (per M3/M4 constructor pattern, DEC-018).
+// stagingSvc and sealChecker may be nil (optional — nil stagingSvc falls back to M2-probe legacy;
+// nil sealChecker disables sealed-run guard, suitable for tests without M8 wired).
 func NewOrchestrator(
 	db *sql.DB,
 	auditWriter *audit.Writer,
@@ -115,13 +121,27 @@ func NewOrchestrator(
 	}
 }
 
+// WithStagingService injects the M1 StagingServiceIface (F3 fix).
+// Call after NewOrchestrator when wiring production dependencies.
+func (o *ECLOrchestrator) WithStagingService(svc StagingServiceIface) *ECLOrchestrator {
+	o.stagingSvc = svc
+	return o
+}
+
+// WithSealChecker injects the CalcRunSealChecker (F4 fix).
+// Call after NewOrchestrator when wiring M8 seal checker.
+func (o *ECLOrchestrator) WithSealChecker(checker CalcRunSealChecker) *ECLOrchestrator {
+	o.sealChecker = checker
+	return o
+}
+
 // ─── ComputeSingle ────────────────────────────────────────────────────────────
 
 // ComputeSingle computes ECL for one instrument.
 //
 // Routing:
 //   - FVTPL / FVOCI_ELECTION → RoutingSkipFVTPL, ecl_weighted = 0, no persist, audit FVTPL_SKIPPED.
-//   - flag_poci = true       → RoutingPOCIDeferred, ecl_weighted = nil, no persist, audit POCI_DEFERRED.
+//   - flag_poci = true       → RoutingPOCIDeferred, computed via STANDARD + warning. F2 fix.
 //   - REKSADANA              → RoutingLookthrough, delegates to M4.
 //   - CASH / DEPOSITO        → RoutingLPS, delegates to M3, ECL on excess only.
 //   - default                → RoutingStandard, M2 PD+LGD+EAD.
@@ -129,7 +149,19 @@ func NewOrchestrator(
 // Stage 3 override: PD = 1.0 (fixed), FL not applied.
 // If req.Persist=true + req.CalcRunID != nil: writes to ecl.calc_result_line in a transaction
 // and writes audit ECL.COMPUTE to aud.audit_log IN THE SAME TRANSACTION.
+// F4 fix: if CalcRunID is set and sealChecker is injected, returns ECL_CALC_RUN_SEALED (423) if sealed.
 func (o *ECLOrchestrator) ComputeSingle(ctx context.Context, req ComputeRequest) (*ComputeResult, error) {
+	// F4 fix: sealed-run guard when CalcRunID is provided.
+	if req.CalcRunID != nil && o.sealChecker != nil {
+		sealed, err := o.sealChecker.IsSealedCalcRun(ctx, *req.CalcRunID)
+		if err != nil {
+			return nil, fmt.Errorf("core.ComputeSingle: seal check: %w", err)
+		}
+		if sealed {
+			return nil, errDomain(CodeECLCalcRunSealed, "calc run is sealed — no recompute allowed")
+		}
+	}
+
 	// 1. Load instrument snapshot.
 	inst, err := o.instrReader.GetByID(ctx, req.InstrumenID)
 	if err != nil {
@@ -218,50 +250,43 @@ func (o *ECLOrchestrator) handleSkipFVTPL(ctx context.Context, req ComputeReques
 	return result, nil
 }
 
-// ─── POCI deferred ────────────────────────────────────────────────────────────
+// ─── POCI path ────────────────────────────────────────────────────────────────
 
-func (o *ECLOrchestrator) handlePOCI(ctx context.Context, req ComputeRequest, _ *InstrumenSnapshot) (*ComputeResult, error) {
-	// POCI: ecl_weighted_idr = nil (NOT 0 — different accounting treatment).
-	// No persist. Emit warning + audit.
-	// Note: inst parameter reserved for future flag propagation; not used currently.
-	result := &ComputeResult{
-		InstrumenID:    req.InstrumenID,
-		CalcRunID:      req.CalcRunID,
-		EvaluationDate: req.EvaluationDate,
-		PeriodeID:      req.PeriodeID,
-		RoutingPath:    RoutingPOCIDeferred,
-		FlagPOCI:       true,
-		ECLWeightedIDR: nil, // explicitly nil, not 0
-		Warnings:       []string{WarnPOCIRequiresFullCAEIR},
+// handlePOCI computes ECL via the STANDARD path for POCI instruments and appends
+// a warning that credit-adjusted EIR is required (Phase 5 defer).
+//
+// F2 fix (MAJOR): Previously returned ECLWeightedIDR=nil with no persist.
+// Scope spec: "ECL still computed via STANDARD path with flag + warning".
+// POCI routing_path column is set to 'POCI_DEFERRED' for audit trail.
+// ECLWeightedIDR is non-nil (computed via STANDARD formula).
+// Credit-adjusted EIR adjustment is deferred to Phase 5 (FSD-APP-C §4.3).
+func (o *ECLOrchestrator) handlePOCI(ctx context.Context, req ComputeRequest, inst *InstrumenSnapshot) (*ComputeResult, error) {
+	// Resolve stage via standard path.
+	stage, err := o.resolveStage(ctx, req.InstrumenID)
+	if err != nil {
+		return nil, err
 	}
 
-	if req.Persist && req.CalcRunID != nil {
-		tx, err := o.db.BeginTx(ctx, nil)
-		if err != nil {
-			return nil, fmt.Errorf("core.ComputeSingle POCI: begin tx: %w", err)
-		}
-		defer rollbackTx(ctx, tx, o.logger)
-
-		txWriter := o.auditWriter.WithTx(tx)
-		if err := txWriter.Write(ctx, audit.Event{
-			Action:     "ECL.POCI_DEFERRED",
-			EntityType: "mst.instrumen",
-			EntityID:   req.InstrumenID,
-			After: map[string]any{
-				"routing":         "POCI_DEFERRED",
-				"calc_run_id":     req.CalcRunID,
-				"evaluation_date": req.EvaluationDate.Format("2006-01-02"),
-				"warning":         WarnPOCIRequiresFullCAEIR,
-			},
-			ActorUserID: req.ActorID.String(),
-		}); err != nil {
-			return nil, fmt.Errorf("core.ComputeSingle POCI: audit: %w", err)
-		}
-
-		if err := tx.Commit(); err != nil {
-			return nil, fmt.Errorf("core.ComputeSingle POCI: commit: %w", err)
-		}
+	bobot, err := o.bobotRepo.GetActiveBobot(ctx, req.PeriodeID)
+	if err != nil {
+		return nil, err
 	}
+	if err := bobot.Validate(); err != nil {
+		return nil, err
+	}
+
+	// Compute via STANDARD formula — inst already loaded.
+	result, err := o.handleStandard(ctx, req, inst, stage, bobot)
+	if err != nil {
+		return nil, fmt.Errorf("core.handlePOCI STANDARD compute: %w", err)
+	}
+
+	// Override routing_path to POCI_DEFERRED for audit column.
+	result.RoutingPath = RoutingPOCIDeferred
+	result.FlagPOCI = true
+	// Append POCI warning — ECL is computed but credit-adjusted EIR not yet applied.
+	result.Warnings = append(result.Warnings, WarnPOCIRequiresFullCAEIR)
+
 	return result, nil
 }
 
@@ -456,13 +481,16 @@ func (o *ECLOrchestrator) applyFormulaAndPersist(
 		}
 	}
 
-	// OQ-M7-4: Use PDBase (pre-FL) for formula. Apply FL multiplier explicitly here.
+	// F1 fix (DEC-010): combined FL multiplier = impact_pd × impact_mev_pd.
+	// Prior bug: only ImpactMevPDMultiplier was used, silently dropping impact_pd factor.
+	// Pattern B (audit decomposition preserved): both multiplier components stored in
+	// fl_multiplier_* columns as the combined product for full audit trail.
 	// Stage 3: FL multipliers are nil (formula.go will skip FL application).
 	var flGood, flNormal, flBad *decimal.Decimal
 	if stage != Stage3 {
-		fg := pdGoodDetail.ImpactMevPDMultiplier
-		fn := pdNormalDetail.ImpactMevPDMultiplier
-		fb := pdBadDetail.ImpactMevPDMultiplier
+		fg := pdGoodDetail.ImpactPDMultiplier.Mul(pdGoodDetail.ImpactMevPDMultiplier).RoundBank(8)
+		fn := pdNormalDetail.ImpactPDMultiplier.Mul(pdNormalDetail.ImpactMevPDMultiplier).RoundBank(8)
+		fb := pdBadDetail.ImpactPDMultiplier.Mul(pdBadDetail.ImpactMevPDMultiplier).RoundBank(8)
 		flGood = &fg
 		flNormal = &fn
 		flBad = &fb
@@ -551,6 +579,7 @@ func (o *ECLOrchestrator) applyFormulaAndPersist(
 			FlagPOCI:          inst.FlagPOCI,
 			Warnings:          warnings,
 			ActorID:           req.ActorID,
+			FormulaVersion:    FormulaVersionM7, // F8 fix: stamp formula version
 		}
 
 		tx, err := o.db.BeginTx(ctx, nil)
@@ -592,26 +621,39 @@ func (o *ECLOrchestrator) applyFormulaAndPersist(
 
 // ─── resolveStage ─────────────────────────────────────────────────────────────
 
-// resolveStage reads the current staging from M2's BatchParams CurrentStages
-// via the BulkHelperService. For single-instrument compute, we call M1 staging via
-// the helpers BulkLookup with one instrument; we extract the stage from BatchParams.
-// Simplified: use helpers.PD.GetPD which internally uses stage_history.
-// The approach here is to call BulkLookup with 1 request and read CurrentStages.
+// resolveStage returns the current IFRS9 stage for an instrument.
 //
-// In practice, the stage is determined from the M1 staging package. M7 calls M2's
-// underlying PDLookupService which reads ecl.stage_history. M7 reads stage from
-// PDDetail.Stage returned by GetPD.
-func (o *ECLOrchestrator) resolveStage(ctx context.Context, instrumenID uuid.UUID) (Stage, error) { //nolint:unparam // error return reserved for future M1 staging service integration
-	// We call GetPD for the NORMAL scenario to get the PDDetail.Stage value.
-	// Stage determines which PD table is used (12M vs lifetime vs 1.0).
-	// This avoids a separate M1 staging service dependency in M7.
-	// The PD lookup reads ecl.stage_history internally and returns PDDetail.Stage.
-	pdVal, pdDetail, err := o.helpers.PD.GetPD(ctx, instrumenID, helpers.Stage1 /* hint, overridden internally */, helpers.ScenarioNormal, "PROBE", time.Now())
+// F3 fix (MAJOR): Previously probed M2 GetPD with dummy periodeID="PROBE" and silently
+// defaulted to Stage 1 on ALL errors — hiding infrastructure failures as staging issues.
+// This fix injects M1 StagingServiceIface directly:
+//   - ErrNotFound (no staging history) → Stage 1 (correct default for new instruments)
+//   - Any other error → propagate as ECL_STAGING_LOOKUP_ERROR (500)
+//
+// Legacy fallback: if stagingSvc not injected (nil), falls back to M2-probe pattern
+// for backward compat during incremental wiring. Production must inject stagingSvc.
+func (o *ECLOrchestrator) resolveStage(ctx context.Context, instrumenID uuid.UUID) (Stage, error) {
+	// F3 fix: use injected M1 staging service when available.
+	if o.stagingSvc != nil {
+		stage, err := o.stagingSvc.GetCurrentStage(ctx, instrumenID)
+		if err != nil {
+			// Check if it is the ErrStagingNotFound sentinel (no history = new instrument).
+			if ce, ok := err.(*coreError); ok && ce.Code() == CodeECLStagingNotFound {
+				return Stage1, nil
+			}
+			// Any other error: propagate — do NOT silently default (F3 requirement).
+			return 0, fmt.Errorf("core.resolveStage: %w: %s",
+				errDomain(CodeECLStagingLookupError, "staging lookup failed"), err.Error())
+		}
+		return stage, nil
+	}
+
+	// Legacy fallback: probe via M2 PDLookupService when stagingSvc not yet wired.
+	// Production deployments MUST inject stagingSvc via WithStagingService().
+	pdVal, pdDetail, err := o.helpers.PD.GetPD(ctx, instrumenID,
+		helpers.Stage1, helpers.ScenarioNormal, "PROBE", time.Now())
 	if err != nil {
-		// If stage_history lookup failed, try stage 1 (default for new instruments).
-		// This is a probe call — we only want Stage from PDDetail.
+		// Legacy: not-found or probe error → Stage 1 default (new instrument).
 		_ = pdVal
-		// If the error is NOT_FOUND for staging, return Stage1 as default.
 		return Stage1, nil
 	}
 	_ = pdVal
@@ -668,6 +710,12 @@ func (o *ECLOrchestrator) GetPortfolioSummary(ctx context.Context, req Portfolio
 
 // GetRollForward returns the CKPN roll-forward report.
 // Formula: opening + originations − derecognitions ± transfers ± remeasurements = closing.
+//
+// F5 fix (MAJOR): transfer decomposition (NewOriginations, Derecognitions, Stage transfers)
+// requires a dedicated Phase 5 report service with per-instrument delta analysis.
+// This method returns Status = PARTIAL_PHASE_5_DEFER with those components set to nil.
+// RemeasurementsIDR = closing − opening (delta) is always populated.
+// IsReconciled = false when any component is nil (PSAK 71 §5.5 disclosure compliance).
 func (o *ECLOrchestrator) GetRollForward(ctx context.Context, req RollForwardRequest) (*RollForwardReport, error) {
 	closing, err := o.resultRepo.GetCalcRunECLTotal(ctx, req.CalcRunID)
 	if err != nil {
@@ -682,15 +730,15 @@ func (o *ECLOrchestrator) GetRollForward(ctx context.Context, req RollForwardReq
 		}
 	}
 
-	// Simplified roll-forward: delta = closing − opening.
-	// Full transfer decomposition is in a dedicated report service (Phase 5).
-	// Per formulas.md: opening + originations − derecognitions ± transfers ± remeasurements = closing.
+	// F5 fix: delta = closing − opening (only guaranteed component in Phase 4).
+	// Transfer decomposition (originations, derecognitions, stage transfers) deferred to Phase 5.
+	// IsReconciled = false — null components prevent reconciliation assertion.
 	delta := closing.Sub(opening)
 	reconcile := RollForwardReconcile{
 		SumCalcResultECL: closing,
 		ClosingECL:       closing,
 		DifferenceIDR:    decimal.Zero,
-		IsReconciled:     true,
+		IsReconciled:     false, // F5: cannot reconcile without all transfer components
 	}
 
 	return &RollForwardReport{
@@ -698,9 +746,17 @@ func (o *ECLOrchestrator) GetRollForward(ctx context.Context, req RollForwardReq
 		PriorCalcRunID:    req.PriorCalcRunID,
 		PortofolioID:      req.PortofolioID,
 		OpeningECLIDR:     opening,
+		// F5: nil components — transfer decomposition deferred to Phase 5
+		NewOriginationsIDR:     nil,
+		DerecognitionsIDR:      nil,
+		TransfersToStage2IDR:   nil,
+		TransfersToStage3IDR:   nil,
+		TransfersFromStage2IDR: nil,
+		TransfersFromStage3IDR: nil,
 		RemeasurementsIDR: delta,
 		ClosingECLIDR:     closing,
 		ReconcileCheck:    reconcile,
+		Status:            RollForwardStatusPartialPhase5Defer,
 	}, nil
 }
 

@@ -9,7 +9,7 @@ import (
 // Formula:
 //
 //	ECL_skenario     = EAD_IDR × PD_skenario × LGD
-//	ECL_FL_skenario  = ECL_skenario × impact_mev_pd[skenario].impact_multiplier
+//	ECL_FL_skenario  = ECL_skenario × (impact_pd[skenario] × impact_mev_pd[skenario])
 //	                   (Stage 3: FL NOT applied — PD fixed 1.0)
 //	ECL_weighted     = Σ(ECL_FL_skenario × bobot_skenario)
 //
@@ -25,13 +25,12 @@ import (
 //   - FL multiplier is NOT applied (set to nil / ignored).
 //   - ECL_FL_skenario = ECL_skenario (no multiplier applied).
 //
-// FL multiplier source: mst.impact_mev_pd[skenario].impact_multiplier ONLY (OQ-M7-4).
-// M2 PDLookupService already applies impact_pd × impact_mev_pd internally;
-// M7 must NOT re-apply. M7 receives PD from M2 which already includes FL.
-// However, to avoid double-multiply, M7 uses PDDetail.PDBase × M7-owned FL multiplier.
-// The design decision is: M7 receives base PD (PDBase) and the FL multiplier from M2
-// and applies them itself — this is the authoritative computation layer.
-// See: docs/state-machines/p4-m7-ecl-core.md §5.4 (OQ-M7-4 resolution).
+// FL multiplier source (F1 fix, DEC-010): combined multiplier = impact_pd × impact_mev_pd.
+// M2 PDLookupService exposes both PDDetail.ImpactPDMultiplier and PDDetail.ImpactMevPDMultiplier
+// separately. M7 is the authoritative computation layer: it receives PDDetail.PDBase (pre-FL)
+// and combines both multipliers here: combined_fl = ImpactPDMultiplier × ImpactMevPDMultiplier.
+// Using only ImpactMevPDMultiplier (the prior bug) silently understated ECL by the impact_pd factor.
+// See: docs/state-machines/p4-m7-ecl-core.md §5.4 (OQ-M7-4 resolution, F1 compliance fix).
 
 // pdOne is the fixed PD for Stage 3 instruments.
 // Stage 3: PD = 1.00000000 (exactly). FL multiplier NOT applied (DEC-010).
