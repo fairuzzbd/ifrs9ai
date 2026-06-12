@@ -132,6 +132,25 @@ const (
 	CodeLookthroughCompositionSoDViolation            Code = "LOOKTHROUGH_COMPOSITION_SOD_VIOLATION"             // SoD violation in composition workflow (HTTP 403)
 	CodeLookthroughBulkTooLarge                       Code = "LOOKTHROUGH_BULK_TOO_LARGE"                        // REKSADANA scope > 10000 instruments (HTTP 413)
 	CodeLookthroughPOCIDeferred                       Code = "LOOKTHROUGH_POCI_DEFERRED"                         // POCI Reksadana deferred to Phase 5 (HTTP 422)
+
+	// P4-M5 EIR Newton-Raphson + Schedule + Amendment codes (APP-C-EIR-001..005).
+	CodeEIRNonConvergent             Code = "EIR_NON_CONVERGENT"              // NR exceeded 100 iterations (HTTP 422)
+	CodeEIRDivergent                 Code = "EIR_DIVERGENT"                   // f'(r)≈0 or residual growing (HTTP 422)
+	CodeEIRCashflowInvalid           Code = "EIR_CASHFLOW_INVALID"            // cashflow null/empty/missing (HTTP 422)
+	CodeEIRCashflowSignMismatch      Code = "EIR_CASHFLOW_SIGN_MISMATCH"      // CF[0] must be negative (HTTP 422)
+	CodeEIRInstrumenFVTPLNoEIR       Code = "EIR_INSTRUMEN_FVTPL_NO_EIR"      // FVTPL/FVOCI_ELECTION (HTTP 422)
+	CodeEIRScheduleNotFound          Code = "EIR_SCHEDULE_NOT_FOUND"          // schedule rows not found (HTTP 404)
+	CodeEIRSchedulePeriodeOutOfRange Code = "EIR_SCHEDULE_PERIODE_OUT_OF_RANGE" // periode beyond maturity (HTTP 422)
+	CodeEIRDuplicateScheduleVersion  Code = "EIR_DUPLICATE_SCHEDULE_VERSION"  // active schedule exists (HTTP 409)
+	CodeEIRPOCIRequiresPDAdjustedCF  Code = "EIR_POCI_REQUIRES_PD_ADJUSTED_CF" // POCI without PD-adj CF (HTTP 422)
+	CodeEIRBulkRecomputeInvalidScope Code = "EIR_BULK_RECOMPUTE_INVALID_SCOPE" // invalid scope (HTTP 400)
+	CodeEIRInstrumenNotFound         Code = "EIR_INSTRUMEN_NOT_FOUND"          // instrument not found (HTTP 404)
+	CodeEIRAlreadyComputed           Code = "EIR_ALREADY_COMPUTED"             // eir_awal already set (HTTP 409)
+	CodeEIRNotYetComputed            Code = "EIR_NOT_YET_COMPUTED"             // eir_awal IS NULL (HTTP 422)
+	CodeEIRAmendNotFound             Code = "EIR_AMEND_NOT_FOUND"              // amendment not found (HTTP 404)
+	CodeEIRAmendActiveExists         Code = "EIR_AMEND_ACTIVE_EXISTS"          // active proposal exists (HTTP 409)
+	CodeEIRAmendInvalidTransition    Code = "EIR_AMEND_INVALID_TRANSITION"     // invalid state transition (HTTP 422)
+	CodeEIRMFAStepUpRequired         Code = "EIR_MFA_STEP_UP_REQUIRED"         // step-up MFA missing (HTTP 403)
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
@@ -211,6 +230,20 @@ func (c Code) HTTPStatus() int {
 		return http.StatusForbidden
 	case CodeLookthroughBulkTooLarge:
 		return http.StatusRequestEntityTooLarge
+	// P4-M5 EIR codes.
+	case CodeEIRNonConvergent, CodeEIRDivergent, CodeEIRCashflowInvalid,
+		CodeEIRCashflowSignMismatch, CodeEIRInstrumenFVTPLNoEIR,
+		CodeEIRSchedulePeriodeOutOfRange, CodeEIRPOCIRequiresPDAdjustedCF,
+		CodeEIRNotYetComputed, CodeEIRAmendInvalidTransition:
+		return http.StatusUnprocessableEntity
+	case CodeEIRScheduleNotFound, CodeEIRInstrumenNotFound, CodeEIRAmendNotFound:
+		return http.StatusNotFound
+	case CodeEIRDuplicateScheduleVersion, CodeEIRAlreadyComputed, CodeEIRAmendActiveExists:
+		return http.StatusConflict
+	case CodeEIRBulkRecomputeInvalidScope:
+		return http.StatusBadRequest
+	case CodeEIRMFAStepUpRequired:
+		return http.StatusForbidden
 	case CodePeriodeClosed, CodeECLParamFrozen:
 		return 423 // Locked
 	case CodeRateLimited:
@@ -364,4 +397,10 @@ func ErrWorkflowInvalidTransition(from, to string) *DomainError {
 		fmt.Sprintf("Transisi dari '%s' ke '%s' tidak valid.", from, to),
 		Detail{Field: "state", Rule: "invalid_transition",
 			Message: fmt.Sprintf("Transition %s → %s tidak valid", from, to)})
+}
+
+// NewDomainError creates a DomainError with any registered Code and a message.
+// Convenience alias for New, allowing callers to import only this package.
+func NewDomainError(code Code, message string) *DomainError {
+	return New(code, message)
 }

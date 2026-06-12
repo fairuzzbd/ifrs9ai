@@ -53,6 +53,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/workflow"
 
 	"blips-ifrs9.tugu-re.com/internal/ecl/helpers"
+	"blips-ifrs9.tugu-re.com/internal/ecl/eir"
 	"blips-ifrs9.tugu-re.com/internal/ecl/lookthrough"
 	"blips-ifrs9.tugu-re.com/internal/ecl/lps"
 	"blips-ifrs9.tugu-re.com/internal/ecl/staging"
@@ -636,6 +637,35 @@ func main() {
 
 	ltCompositionHook := lookthrough.NewCompositionWorkflowHook(ltCompRepo)
 	wfService.RegisterEntityHook(ltCompositionHook.EntityType(), ltCompositionHook)
+
+	// -----------------------------------------------------------------------
+	// EIR Newton-Raphson + Schedule + Amendment workflow (APP-C-EIR-001..005, P4-M5)
+	// Endpoints (all under /api/v1/ecl/eir/):
+	//   POST  compute                       — NR solve + optional persist (Story 1)
+	//   POST  generate-schedule             — amortisation schedule (Story 2)
+	//   GET   schedule/:instrumenId         — active schedule DataTable (Story 3)
+	//   GET   schedule/:instrumenId/history — full history (superseded) (Story 3)
+	//   POST  amendments                    — propose amendment (Story 4)
+	//   GET   amendments                    — list amendments (Story 4)
+	//   GET   amendments/:id                — detail (Story 4)
+	//   POST  amendments/:id/review         — ROLE-RISK review (Story 4)
+	//   POST  amendments/:id/approve        — ROLE-ALCO approve + step-up MFA (Story 4)
+	//   POST  amendments/:id/reject         — reject (Story 4)
+	//   POST  bulk-recompute                — report-only bulk 202+jobId (Story 5)
+	//
+	// Decisions: DEC-013, DEC-016, DEC-017, DEC-018.
+	// -----------------------------------------------------------------------
+	eirAuditWriter := eir.NewAuditWriterAdapter(audit.NewWriter(db))
+	eirInstrRepo := eir.NewDBInstrumenEIRRepo(db)
+	eirSchedRepo := eir.NewDBEIRScheduleRepo(db)
+	eirAmendRepo := eir.NewDBAmendmentRepo(db)
+
+	eirComputeSvc := eir.NewEIRService(db, eirInstrRepo, eirAuditWriter, logger)
+	eirScheduleSvc := eir.NewScheduleService(db, eirInstrRepo, eirSchedRepo, eirAuditWriter, logger)
+	eirAmendSvc := eir.NewAmendmentService(db, eirInstrRepo, eirSchedRepo, eirAmendRepo, eirAuditWriter, logger)
+	eirBulkSvc := eir.NewBulkService(db, eirInstrRepo, eirSchedRepo, nil, nil, logger)
+	eirHandler := eir.NewHandler(eirComputeSvc, eirScheduleSvc, eirAmendSvc, eirBulkSvc)
+	eir.RegisterRoutes(v1, eirHandler, jwtVerifier, db)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,
