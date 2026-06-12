@@ -14,12 +14,34 @@ package eir
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
+
+// DocumentTypeRepoIface is a minimal interface to read doc.document.document_category.
+// Injected into DetectionService for document-type validation (B2 fix).
+// Implementation: document.DBRepository satisfies this via its GetDocType method
+// (or via GetByID; separate thin method avoids importing the full document package).
+type DocumentTypeRepoIface interface {
+	// GetDocType returns the document_category string for the given document UUID.
+	// Returns ("", nil) if the document does not exist (caller treats as NOT_FOUND).
+	GetDocType(ctx context.Context, documentID uuid.UUID) (string, error)
+}
+
+// AllowedAmendmentDocCategories is the set of doc.document.document_category values
+// that may trigger an EIR amendment detection.
+// Per FSD-APP-C §M6-001: only KONTRAK documents (contract amendments) are eligible.
+// The compliance finding originally referenced AMENDMENT_KONTRAK_DEPOSITO /
+// AMENDMENT_KONTRAK_OBLIGASI; those are not DB-level categories — the DB constraint
+// (migration 000006 ck_doc_category) uses 'KONTRAK' for all contract documents.
+var AllowedAmendmentDocCategories = map[string]struct{}{
+	"KONTRAK": {},
+}
 
 // DetectionService implements M6-001 (detect) and M6-005 (cancel).
 // Separation from AmendmentService keeps M5 untouched.
@@ -27,12 +49,14 @@ type DetectionService struct {
 	db          *sql.DB
 	instrRepo   InstrumenEIRRepoIface
 	amendRepo   AmendmentRepoIface
+	docTypeRepo DocumentTypeRepoIface // nil = skip doc-type check (dev/test without doc DB)
 	auditWriter AuditWriterIface
 	logger      *slog.Logger
 }
 
 // NewDetectionService constructs a DetectionService.
 // Panics if auditWriter is nil (audit-in-tx is mandatory per DEC-018).
+// docTypeRepo may be nil only in unit tests; production wiring must pass a real impl.
 func NewDetectionService(
 	db *sql.DB,
 	instrRepo InstrumenEIRRepoIface,
@@ -47,9 +71,18 @@ func NewDetectionService(
 		db:          db,
 		instrRepo:   instrRepo,
 		amendRepo:   amendRepo,
+		docTypeRepo: nil, // set via WithDocTypeRepo for production wiring
 		auditWriter: auditWriter,
 		logger:      logger,
 	}
+}
+
+// WithDocTypeRepo sets the DocumentTypeRepoIface on an existing DetectionService.
+// Called from main.go after the document repo is available.
+// Returns the same pointer so callers can chain: svc.WithDocTypeRepo(docRepo).
+func (s *DetectionService) WithDocTypeRepo(r DocumentTypeRepoIface) *DetectionService {
+	s.docTypeRepo = r
+	return s
 }
 
 // DetectFromDocument creates an amendment proposal triggered by a document upload (M6-001).
@@ -75,7 +108,27 @@ func (s *DetectionService) DetectFromDocument(ctx context.Context, req DetectAme
 				inst.KodeInstrumen, inst.KlasifikasiPsak71))
 	}
 
-	// 2. Guard against concurrent active proposal.
+	// 2. Validate document type (B2 fix).
+	// Only KONTRAK category documents (contract amendments) may trigger detection.
+	// Skip when docTypeRepo is nil (unit-test mode without document DB).
+	if s.docTypeRepo != nil {
+		docCat, docErr := s.docTypeRepo.GetDocType(ctx, req.DocumentID)
+		if docErr != nil {
+			return nil, fmt.Errorf("detection: load document category: %w", docErr)
+		}
+		if docCat == "" {
+			// Document not found.
+			return nil, ErrEIRAmendmentDetectionNoMatch(
+				fmt.Sprintf("document %s tidak ditemukan atau sudah dihapus", req.DocumentID))
+		}
+		if _, allowed := AllowedAmendmentDocCategories[docCat]; !allowed {
+			return nil, ErrEIRAmendmentDetectionNoMatch(
+				fmt.Sprintf("document_category '%s' tidak memenuhi syarat untuk EIR amendment detection. "+
+					"Hanya kategori KONTRAK yang diizinkan.", docCat))
+		}
+	}
+
+	// 3. Guard against concurrent active proposal.
 	hasActive, err := s.amendRepo.HasActiveProposal(ctx, req.InstrumenID)
 	if err != nil {
 		return nil, fmt.Errorf("detection: check active proposal: %w", err)
@@ -86,7 +139,7 @@ func (s *DetectionService) DetectFromDocument(ctx context.Context, req DetectAme
 				". Selesaikan atau batalkan terlebih dahulu.")
 	}
 
-	// 3. Build proposal.
+	// 4. Build proposal.
 	var cashflowJSON string
 	if len(req.OverrideCashflows) > 0 {
 		cashflowJSON, err = marshalCashflows(req.OverrideCashflows)
@@ -112,7 +165,7 @@ func (s *DetectionService) DetectFromDocument(ctx context.Context, req DetectAme
 		TenantID:            req.TenantID,
 	}
 
-	// 4. Persist in tx.
+	// 5. Persist in tx.
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("detection: begin tx: %w", err)
@@ -120,6 +173,25 @@ func (s *DetectionService) DetectFromDocument(ctx context.Context, req DetectAme
 	defer tx.Rollback() //nolint:errcheck
 
 	if err := s.amendRepo.Create(ctx, tx, proposal); err != nil {
+		// B3 fix: if PG returns 23505 (unique_violation) on the partial unique index
+		// uq_eir_reestimation_active_doc_instrumen (added by migration 000028), a
+		// non-terminal proposal for this (document_id, instrumen_id) pair already
+		// exists.  Treat as idempotent: rollback this tx and return the existing proposal.
+		var pgErr *pq.Error
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			_ = tx.Rollback() //nolint:errcheck // already rolling back on unique violation
+			existing, fetchErr := s.amendRepo.GetByDocumentAndInstrumen(ctx, req.DocumentID, req.InstrumenID)
+			if fetchErr != nil || existing == nil {
+				// Fallback if fetch fails — return original insert error.
+				return nil, fmt.Errorf("detection: insert proposal (duplicate): %w", err)
+			}
+			s.logger.Info("eir amendment detect idempotent — returning existing proposal",
+				slog.String("proposal_id", existing.ID.String()),
+				slog.String("document_id", req.DocumentID.String()),
+				slog.String("instrumen_id", req.InstrumenID.String()),
+			)
+			return existing, nil
+		}
 		return nil, fmt.Errorf("detection: insert proposal: %w", err)
 	}
 
