@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
+	"blips-ifrs9.tugu-re.com/internal/auth"
 	domainerrors "blips-ifrs9.tugu-re.com/internal/common/errors"
 )
 
@@ -29,6 +31,8 @@ func init() {
 
 // buildRouter sets up a Gin router with the EIR handler, bypassing JWT middleware.
 // JWT claims are injected directly into Gin context via middleware.
+// When mfaVerified=true a full *auth.Claims with a fresh StepupVerifiedAt (now-1min)
+// is injected so ApproveAmendment's NeedsStepUp() check (DEC-027) passes.
 func buildRouter(h *Handler, perms []string, mfaVerified bool) *gin.Engine {
 	r := gin.New()
 	// Inject auth claims into context (simulates JWT middleware)
@@ -37,6 +41,9 @@ func buildRouter(h *Handler, perms []string, mfaVerified bool) *gin.Engine {
 		c.Set("role", "ROLE-RISK")
 		c.Set("permissions", perms)
 		c.Set("mfa_verified", mfaVerified)
+		// Inject full *auth.Claims so claimsFromGin + NeedsStepUp() works (DEC-027).
+		cl := makeClaims(perms, mfaVerified)
+		c.Set("claims", cl)
 		c.Next()
 	})
 	v1 := r.Group("/api/v1")
@@ -62,6 +69,43 @@ func allPerms() []string {
 		PermEIRAmendPropose, PermEIRAmendReview, PermEIRAmendApprove,
 		PermEIRBulkRecompute,
 	}
+}
+
+// makeClaims builds an *auth.Claims for test injection.
+// When mfaVerified=true, StepupVerifiedAt is set to 1 minute ago (fresh window).
+// When mfaVerified=false, StepupVerifiedAt is nil (NeedsStepUp() == true).
+func makeClaims(perms []string, mfaVerified bool) *auth.Claims {
+	cl := &auth.Claims{
+		Sub:         uuid.New().String(),
+		MFAVerified: mfaVerified,
+		Permissions: perms,
+		Roles:       []string{"ROLE-RISK"},
+		TenantID:    "TUGURE",
+	}
+	if mfaVerified {
+		// Fresh step-up: 1 minute ago — well within the 5-minute DEC-027 window.
+		ts := time.Now().Add(-1 * time.Minute).Unix()
+		cl.StepupVerifiedAt = &ts
+	}
+	return cl
+}
+
+// buildRouterWithClaims is like buildRouter but takes a pre-built *auth.Claims.
+// Use this for precise step-up timestamp control in DEC-027 tests.
+func buildRouterWithClaims(h *Handler, cl *auth.Claims) *gin.Engine {
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set("user_id", cl.Sub)
+		c.Set("role", "ROLE-RISK")
+		c.Set("permissions", cl.Permissions)
+		c.Set("mfa_verified", cl.MFAVerified)
+		c.Set("claims", cl)
+		c.Next()
+	})
+	v1 := r.Group("/api/v1")
+	eirGroup := v1.Group("/ecl/eir")
+	eirGroup.POST("/amendments/:id/approve", h.ApproveAmendment)
+	return r
 }
 
 // doRequest executes an HTTP request against the test router.
@@ -788,5 +832,75 @@ func TestComputeCatchUpAdjustment_PositiveDiff(t *testing.T) {
 
 	if !adjustment.Equal(expected) {
 		t.Errorf("expected %s, got %s", expected.StringFixed(4), adjustment.StringFixed(4))
+	}
+}
+
+// ─── Step-up MFA window tests (DEC-027, F1 compliance fix) ───────────────────
+
+// TestApproveAmendment_StepUpStale_Returns403_StepUpRequired verifies that
+// ApproveAmendment rejects a JWT where stepup_verified_at is 10 minutes ago
+// with 403 STEP_UP_REQUIRED. DEC-027: window is 5 minutes.
+// A 4-hour-old JWT with mfa_verified=true but stale step-up must be rejected.
+func TestApproveAmendment_StepUpStale_Returns403_StepUpRequired(t *testing.T) {
+	h := buildHandler(newStubInstrumenRepo(), &stubScheduleRepo{}, newStubAmendmentRepo(), nil)
+
+	// Claims: mfa_verified=true but step-up was 10 minutes ago — outside 5-min window.
+	staleTs := time.Now().Add(-10 * time.Minute).Unix()
+	cl := &auth.Claims{
+		Sub:              uuid.New().String(),
+		MFAVerified:      true, // JWT claim says verified
+		StepupVerifiedAt: &staleTs,
+		Permissions:      allPerms(),
+		Roles:            []string{"ROLE-ALCO"},
+		TenantID:         "TUGURE",
+	}
+
+	r := buildRouterWithClaims(h, cl)
+	w := doRequest(r, "POST", "/api/v1/ecl/eir/amendments/"+uuid.New().String()+"/approve", map[string]interface{}{
+		"comment":     "attempt approve with stale step-up",
+		"stepUpToken": "stale-token",
+	})
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for stale step-up, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, string(domainerrors.CodeStepUpRequired)) {
+		t.Errorf("expected error code %s in body, got: %s", domainerrors.CodeStepUpRequired, body)
+	}
+}
+
+// TestApproveAmendment_StepUpFresh_Allows verifies that ApproveAmendment proceeds
+// past the MFA gate when stepup_verified_at is within the 5-minute window (DEC-027).
+// The call reaches the service layer and returns 404 (no matching proposal) —
+// proving the step-up check passed.
+func TestApproveAmendment_StepUpFresh_Allows(t *testing.T) {
+	h := buildHandler(newStubInstrumenRepo(), &stubScheduleRepo{}, newStubAmendmentRepo(), nil)
+
+	// Claims: step-up was 1 minute ago — fresh within 5-min window.
+	freshTs := time.Now().Add(-1 * time.Minute).Unix()
+	cl := &auth.Claims{
+		Sub:              uuid.New().String(),
+		MFAVerified:      true,
+		StepupVerifiedAt: &freshTs,
+		Permissions:      allPerms(),
+		Roles:            []string{"ROLE-ALCO"},
+		TenantID:         "TUGURE",
+	}
+
+	r := buildRouterWithClaims(h, cl)
+	// Use a random UUID — proposal won't exist, so service returns 404.
+	// A 404 proves the MFA gate was passed (otherwise we'd get 403).
+	w := doRequest(r, "POST", "/api/v1/ecl/eir/amendments/"+uuid.New().String()+"/approve", map[string]interface{}{
+		"comment":     "approve with fresh step-up",
+		"stepUpToken": "fresh-token",
+	})
+
+	if w.Code == http.StatusForbidden {
+		t.Errorf("fresh step-up must NOT be rejected: got 403 %s", w.Body.String())
+	}
+	// Service returns 404 (proposal not found) — expected.
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 (proposal not found), got %d: %s", w.Code, w.Body.String())
 	}
 }

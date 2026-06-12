@@ -29,6 +29,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
+	"blips-ifrs9.tugu-re.com/internal/auth"
 	domainerrors "blips-ifrs9.tugu-re.com/internal/common/errors"
 	"blips-ifrs9.tugu-re.com/internal/common/listquery"
 	"blips-ifrs9.tugu-re.com/internal/common/response"
@@ -98,6 +99,20 @@ func hasMFAVerified(c *gin.Context) bool {
 		return b
 	}
 	return false
+}
+
+// claimsFromGin retrieves auth.Claims injected by the JWT middleware.
+// The middleware stores the full Claims struct under key "claims" (auth/middleware.go:44).
+// Returns nil if not present (unauthenticated path or test without claims injected).
+func claimsFromGin(c *gin.Context) *auth.Claims {
+	v, exists := c.Get("claims")
+	if !exists {
+		return nil
+	}
+	if cl, ok := v.(*auth.Claims); ok {
+		return cl
+	}
+	return nil
 }
 
 // actorFromContext extracts actor UUID and role from JWT context.
@@ -517,14 +532,19 @@ type approveAmendmentRequest struct {
 }
 
 // ApproveAmendment handles POST /ecl/eir/amendments/{id}/approve.
-// Requires: PermEIRAmendApprove + MFA verified (DEC-027).
+// Requires: PermEIRAmendApprove + fresh step-up MFA within 5 minutes (DEC-027).
+// Uses claims.NeedsStepUp() so a 4-hour-old JWT with mfa_verified=true is rejected
+// unless stepup_verified_at is within the 5-minute window.
 func (h *Handler) ApproveAmendment(c *gin.Context) {
 	if !hasPermission(c, PermEIRAmendApprove) {
 		return
 	}
-	if !hasMFAVerified(c) {
+	// DEC-027: step-up MFA must be fresh (< 5 minutes). Static mfa_verified=true is
+	// insufficient — stepup_verified_at timestamp in JWT claims must be within window.
+	cl := claimsFromGin(c)
+	if cl == nil || cl.NeedsStepUp() {
 		response.ErrorWithStatus(c, http.StatusForbidden,
-			domainerrors.CodeMFARequired, "Action ini membutuhkan MFA terverifikasi.", nil)
+			domainerrors.CodeStepUpRequired, "Approve EIR amendment membutuhkan step-up MFA (< 5 menit). Panggil /auth/step-up terlebih dahulu.", nil)
 		return
 	}
 	actorID, role := actorFromContext(c)

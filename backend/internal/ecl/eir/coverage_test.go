@@ -532,13 +532,18 @@ func TestHandler_ApproveAmendment_Success_200(t *testing.T) {
 }
 
 // buildRouterWithUserID is like buildRouter but allows specifying the actorID.
+// Also injects *auth.Claims (with fresh StepupVerifiedAt when mfaVerified=true)
+// so ApproveAmendment's NeedsStepUp() check (DEC-027) is properly evaluated.
 func buildRouterWithUserID(h *Handler, perms []string, mfaVerified bool, actorID uuid.UUID) *gin.Engine {
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
+		cl := makeClaims(perms, mfaVerified)
+		cl.Sub = actorID.String()
 		c.Set("user_id", actorID.String())
 		c.Set("role", "ROLE-RISK")
 		c.Set("permissions", perms)
 		c.Set("mfa_verified", mfaVerified)
+		c.Set("claims", cl)
 		c.Next()
 	})
 	v1 := r.Group("/api/v1")
