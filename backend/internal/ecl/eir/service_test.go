@@ -196,6 +196,38 @@ func (r *stubAmendmentRepo) List(_ context.Context, _ listquery.Query, _ string,
 	return result, &response.PaginationMeta{Limit: limit}, nil
 }
 
+// Cancel implements AmendmentRepoIface (M6-005 addition).
+func (r *stubAmendmentRepo) Cancel(_ context.Context, _ *sql.Tx, proposalID uuid.UUID, cancelReason string, cancelledBy uuid.UUID) error {
+	if p, ok := r.proposals[proposalID]; ok {
+		p.Status = AmendStatusCancelled
+		p.CancelReason = &cancelReason
+		p.CancelledBy = &cancelledBy
+		r.activeForID[p.InstrumenID] = false
+	}
+	return nil
+}
+
+// ListQueue implements AmendmentRepoIface (M6-004 addition).
+func (r *stubAmendmentRepo) ListQueue(_ context.Context, _ listquery.Query, _ string, limit int) ([]QueueRow, *response.PaginationMeta, error) {
+	rows := make([]QueueRow, 0, len(r.proposals))
+	for _, p := range r.proposals {
+		if p.Status.IsTerminal() {
+			continue
+		}
+		rows = append(rows, QueueRow{
+			AmendmentID:      p.ID,
+			InstrumenID:      p.InstrumenID,
+			Status:           p.Status,
+			TriggerSource:    p.TriggerSource,
+			EIRLama:          p.EIRLama,
+			MakerID:          p.MakerID,
+			TanggalAmandemen: p.TanggalAmandemen,
+			CreatedAt:        p.CreatedAt,
+		})
+	}
+	return rows, &response.PaginationMeta{Limit: limit}, nil
+}
+
 type stubAuditWriter struct{ events []AuditEvent }
 
 func (w *stubAuditWriter) Write(_ context.Context, _ *sql.Tx, evt AuditEvent) error {

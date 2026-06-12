@@ -1645,6 +1645,9 @@ func TestDBAmendmentRepo_List_WithRows(t *testing.T) {
 			makerID,          // updated_by
 			"TUGURE",         // tenant_id
 			int64(1),         // row_version
+			// M6 columns
+			nil, nil, nil, // cancelled_at, cancel_reason, cancelled_by
+			nil, nil, nil, // trigger_source, drift_report_id, document_id
 		)
 
 	mock.ExpectQuery("SELECT").WillReturnRows(rows)

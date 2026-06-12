@@ -119,6 +119,9 @@ linters-settings:
       - variabel       # Bahasa Indonesia — "variable"
       - catalogue      # British English — used in "error catalogue"
       - initialise     # British English — used in comments/docs
+      - cancelled      # Domain constant in BLIPS — PSAK 71 / IFRS 9 status names use British English
+      - Cancelled      # Domain constant — AmendStatusCancelled, "EIR.AMEND_CANCELLED" audit action
+      - CANCELLED      # Domain constant — DB enum / audit action string
 
   # staticcheck: use all checks (SA*, S1*, QF*).
   staticcheck:

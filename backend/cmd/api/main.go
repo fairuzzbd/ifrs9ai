@@ -664,8 +664,21 @@ func main() {
 	eirScheduleSvc := eir.NewScheduleService(db, eirInstrRepo, eirSchedRepo, eirAuditWriter, logger)
 	eirAmendSvc := eir.NewAmendmentService(db, eirInstrRepo, eirSchedRepo, eirAmendRepo, eirAuditWriter, logger)
 	eirBulkSvc := eir.NewBulkService(db, eirInstrRepo, eirSchedRepo, nil, nil, logger)
-	eirHandler := eir.NewHandler(eirComputeSvc, eirScheduleSvc, eirAmendSvc, eirBulkSvc)
+
+	// M6: EIR Amendment Lifecycle — detect from document, daily drift cron,
+	// ad-hoc bulk re-estimation, review queue, cancel/withdraw.
+	// NewHandlerM6 extends M5 handler with detectionSvc + driftSvc.
+	// All routes (M5 + M6) registered via the single RegisterRoutes call below.
+	//
+	// Daily cron (M6-002): NewDriftCronHandler registered on Asynq mux (Phase 5 worker binary).
+	// Decisions: DEC-013, DEC-016, DEC-017, DEC-018.
+	eirDriftRepo := eir.NewDBDriftReportRepo(db)
+	eirDetectionSvc := eir.NewDetectionService(db, eirInstrRepo, eirAmendRepo, eirAuditWriter, logger)
+	eirDriftSvc := eir.NewDriftService(db, eirInstrRepo, eirSchedRepo, eirAmendRepo, eirDriftRepo, eir.NewSolver(), eirAuditWriter, logger)
+	eirHandler := eir.NewHandlerM6(eirComputeSvc, eirScheduleSvc, eirAmendSvc, eirBulkSvc, eirDetectionSvc, eirDriftSvc)
 	eir.RegisterRoutes(v1, eirHandler, jwtVerifier, db)
+	// Drift cron handler (used by Asynq mux in Phase 5 worker binary):
+	_ = eir.NewDriftCronHandler(eirDriftSvc, logger)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ServerPort,

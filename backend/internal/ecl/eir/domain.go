@@ -1,6 +1,6 @@
 // Package eir implements the EIR Newton-Raphson solver, amortization schedule
-// builder, amendment re-estimation workflow (4-eyes), and bulk re-compute job
-// for APP-C P4-M5 (Stories APP-C-EIR-001..005).
+// builder, amendment re-estimation workflow (4-eyes), bulk re-compute job (P4-M5),
+// and amendment lifecycle detection / drift reporting / cancel (P4-M6).
 //
 // Formula (formulas.md §EIR Newton-Raphson, FSD-APP-C §4):
 //
@@ -17,9 +17,9 @@
 // Storage: NUMERIC(10,8) for EIR, NUMERIC(20,4) for IDR amounts (DEC-016).
 //
 // Decisions: DEC-013, DEC-016, DEC-017, DEC-018.
-// Migration: db/migrations/000026_eir_schema_fix.up.sql.
-// Stories: docs/stories/phase-4/M5-eir-solver.md.
-// State machine: docs/state-machines/p4-m5-eir.md.
+// Migrations: db/migrations/000026_eir_schema_fix.up.sql, 000027_drift_report_and_amendment_lifecycle.up.sql.
+// Stories: docs/stories/phase-4/M5-eir-solver.md, M6-eir-amendment-lifecycle.md.
+// State machines: docs/state-machines/p4-m5-eir.md, p4-m6-amendment-lifecycle.md.
 package eir
 
 import (
@@ -310,11 +310,15 @@ const (
 	AmendStatusPendingApproval AmendmentStatus = "PENDING_APPROVAL"
 	AmendStatusApproved        AmendmentStatus = "APPROVED"
 	AmendStatusRejected        AmendmentStatus = "REJECTED"
+	// AmendStatusCancelled: added P4-M6. Maker can cancel DRAFT or PENDING_REVIEW (no reviewer signed).
+	// State machine: docs/state-machines/p4-m6-amendment-lifecycle.md §4.
+	AmendStatusCancelled AmendmentStatus = "CANCELLED"
 )
 
-// IsTerminal returns true for APPROVED or REJECTED (no further transitions allowed).
+// IsTerminal returns true for APPROVED, REJECTED, or CANCELLED (no further transitions allowed).
+// CANCELLED added in P4-M6 (story M6-005).
 func (s AmendmentStatus) IsTerminal() bool {
-	return s == AmendStatusApproved || s == AmendStatusRejected
+	return s == AmendStatusApproved || s == AmendStatusRejected || s == AmendStatusCancelled
 }
 
 // AmendmentProposal mirrors ecl.eir_reestimation_log with all columns
@@ -354,6 +358,13 @@ type AmendmentProposal struct {
 	UpdatedBy  uuid.UUID
 	TenantID   string
 	RowVersion int64
+	// M6 additions (migration 000027)
+	CancelledAt   *time.Time         // cancelled_at TIMESTAMPTZ; nil until CANCELLED
+	CancelReason  *string            // cancel_reason TEXT; min 20 chars
+	CancelledBy   *uuid.UUID         // cancelled_by UUID FK→sec.user
+	TriggerSource AmendTriggerSource // trigger_source: MANUAL|DOCUMENT_UPLOAD|DRIFT_DETECTION_AUTO|PRE_ECL_GATE
+	DriftReportID *uuid.UUID         // drift_report_id FK→sys.drift_report; set for DRIFT_DETECTION_AUTO
+	DocumentID    *uuid.UUID         // document_id FK→doc.document; set for DOCUMENT_UPLOAD
 }
 
 // ProposeRequest is the input for AmendmentService.Propose.
@@ -382,6 +393,250 @@ type ApproveRequest struct {
 type WorkflowAction struct {
 	AmendmentID uuid.UUID
 	Comment     string
+}
+
+// ─── P4-M6 permission constants ───────────────────────────────────────────────
+
+const (
+	// PermEIRAmendDetect: trigger detect-from-document (ROLE-RISK, ROLE-AKUN).
+	PermEIRAmendDetect = "eir.amendment.detect"
+	// PermEIRAmendCancel: cancel own DRAFT / unsigned PENDING_REVIEW (ROLE-AKUN, owner).
+	PermEIRAmendCancel = "eir.amendment.cancel"
+	// PermEIRAmendReviewRead: read the amendment review queue (ROLE-RISK, ROLE-ALCO, ROLE-AUDIT).
+	PermEIRAmendReviewRead = "eir.amendment_review.read"
+	// PermEIRDriftReportRead: read drift reports (ROLE-RISK, ROLE-AUDIT, ROLE-ALCO).
+	PermEIRDriftReportRead = "eir.drift_report.read"
+	// PermEIRAmendUpdateCF: update cashflows on DRAFT amendment (ROLE-AKUN, owner).
+	PermEIRAmendUpdateCF = "eir.amendment.update_cashflows"
+	// PermEIRDriftGenerate: trigger ad-hoc drift generation (ROLE-RISK, ROLE-IT-ADMIN).
+	PermEIRDriftGenerate = "eir.drift_report.generate"
+)
+
+// ─── P4-M6 error codes (matching domain.go CodeEIR* constants) ────────────────
+
+const (
+	// CodeEIRAmendmentDetectionNoMatch: 422 — doc type wrong / proposal active / ineligible.
+	CodeEIRAmendmentDetectionNoMatch = "EIR_AMENDMENT_DETECTION_NO_MATCH"
+	// CodeEIRAmendmentCancelForbidden: 403 — caller not maker, or reviewer already signed.
+	CodeEIRAmendmentCancelForbidden = "EIR_AMENDMENT_CANCEL_FORBIDDEN"
+	// CodeEIRAmendmentCancelReasonShort: 422 — cancelReason < 20 chars (DB CHECK constraint).
+	CodeEIRAmendmentCancelReasonShort = "EIR_AMENDMENT_CANCEL_REASON_TOO_SHORT"
+	// CodeEIRDriftReportNotFound: 404 — sys.drift_report row not found.
+	CodeEIRDriftReportNotFound = "EIR_DRIFT_REPORT_NOT_FOUND"
+	// CodeEIRDriftReportPeriodeOutOfRange: 422 — periode query param out of data range.
+	CodeEIRDriftReportPeriodeOutOfRange = "EIR_DRIFT_REPORT_PERIODE_OUT_OF_RANGE"
+	// CodeEIRDriftGenerationInProgress: 409 — a concurrent drift job is still running.
+	CodeEIRDriftGenerationInProgress = "EIR_DRIFT_GENERATION_IN_PROGRESS"
+	// CodeEIRDriftThresholdInvalid: 422 — sys.parameter threshold row malformed.
+	CodeEIRDriftThresholdInvalid = "EIR_DRIFT_THRESHOLD_INVALID"
+)
+
+// M6 error constructors.
+
+// ErrEIRAmendmentDetectionNoMatch returns 422 EIR_AMENDMENT_DETECTION_NO_MATCH.
+func ErrEIRAmendmentDetectionNoMatch(reason string) *domainerrors.DomainError {
+	return errEIR(CodeEIRAmendmentDetectionNoMatch,
+		"Deteksi amandemen tidak cocok: "+reason)
+}
+
+// ErrEIRAmendmentCancelForbidden returns 403 EIR_AMENDMENT_CANCEL_FORBIDDEN.
+func ErrEIRAmendmentCancelForbidden(reason string) *domainerrors.DomainError {
+	return errEIR(CodeEIRAmendmentCancelForbidden,
+		"Pembatalan tidak diizinkan: "+reason)
+}
+
+// ErrEIRAmendmentCancelReasonShort returns 422 EIR_AMENDMENT_CANCEL_REASON_TOO_SHORT.
+func ErrEIRAmendmentCancelReasonShort() *domainerrors.DomainError {
+	return errEIR(CodeEIRAmendmentCancelReasonShort,
+		"cancelReason minimal 20 karakter (DB CHECK constraint)",
+		domainerrors.Detail{Field: "body.cancelReason", Rule: "min_length", Message: "min 20 karakter"})
+}
+
+// ErrEIRDriftReportNotFound returns 404 EIR_DRIFT_REPORT_NOT_FOUND.
+func ErrEIRDriftReportNotFound(reportID string) *domainerrors.DomainError {
+	return errEIR(CodeEIRDriftReportNotFound,
+		"Drift report tidak ditemukan: "+reportID)
+}
+
+// ErrEIRDriftReportPeriodeOutOfRange returns 422.
+func ErrEIRDriftReportPeriodeOutOfRange(periode string) *domainerrors.DomainError {
+	return errEIR(CodeEIRDriftReportPeriodeOutOfRange,
+		"Periode '"+periode+"' tidak ada dalam data drift report",
+		domainerrors.Detail{Field: "query.periode", Rule: "in_range", Message: "No drift reports for this periode"})
+}
+
+// ErrEIRDriftGenerationInProgress returns 409 EIR_DRIFT_GENERATION_IN_PROGRESS.
+func ErrEIRDriftGenerationInProgress(jobID string) *domainerrors.DomainError {
+	return errEIR(CodeEIRDriftGenerationInProgress,
+		"Drift detection sedang berjalan (job "+jobID+"). Tunggu selesai sebelum trigger yang baru.")
+}
+
+// ErrEIRDriftThresholdInvalid returns 422 EIR_DRIFT_THRESHOLD_INVALID.
+func ErrEIRDriftThresholdInvalid(reason string) *domainerrors.DomainError {
+	return errEIR(CodeEIRDriftThresholdInvalid,
+		"sys.parameter threshold tidak valid: "+reason)
+}
+
+// ─── P4-M6 DriftReport types ──────────────────────────────────────────────────
+
+// DriftTriggerSource values for sys.drift_report.trigger_source.
+// CHECK constraint: ('CRON_DAILY','MANUAL_AD_HOC','PRE_ECL_CALC_RUN').
+// See db/migrations/000027_drift_report_and_amendment_lifecycle.up.sql.
+type DriftTriggerSource string
+
+const (
+	DriftTriggerCronDaily     DriftTriggerSource = "CRON_DAILY"
+	DriftTriggerManualAdHoc   DriftTriggerSource = "MANUAL_AD_HOC"
+	DriftTriggerPreECLCalcRun DriftTriggerSource = "PRE_ECL_CALC_RUN"
+)
+
+// DriftReportStatus values for sys.drift_report.status.
+// CHECK constraint: ('IN_PROGRESS','COMPLETED','FAILED').
+type DriftReportStatus string
+
+const (
+	DriftStatusInProgress DriftReportStatus = "IN_PROGRESS"
+	DriftStatusCompleted  DriftReportStatus = "COMPLETED"
+	DriftStatusFailed     DriftReportStatus = "FAILED"
+)
+
+// DriftSeverity classifies the magnitude of EIR drift.
+// LOW: abs_diff > drift_low_threshold (default 0.0001 = 1bp) — flag only.
+// HIGH: abs_diff > drift_high_threshold (default 0.001 = 10bp) — auto-create proposal.
+type DriftSeverity string
+
+const (
+	DriftSeverityLow  DriftSeverity = "LOW"
+	DriftSeverityHigh DriftSeverity = "HIGH"
+)
+
+// DriftReport mirrors sys.drift_report schema from migration 000027.
+// All decimal fields use shopspring/decimal (never float64).
+type DriftReport struct {
+	ID                   uuid.UUID          `db:"id"`
+	TanggalRun           time.Time          `db:"tanggal_run"` // DATE
+	TriggerSource        DriftTriggerSource `db:"trigger_source"`
+	TriggeredBy          *uuid.UUID         `db:"triggered_by"` // nullable for CRON
+	AsynqJobID           *string            `db:"asynq_job_id"`
+	Status               DriftReportStatus  `db:"status"`
+	StartedAt            *time.Time         `db:"started_at"`
+	CompletedAt          *time.Time         `db:"completed_at"`
+	TotalInstrumen       int                `db:"total_instrumen"`
+	DriftLowCount        int                `db:"drift_low_count"`
+	DriftHighCount       int                `db:"drift_high_count"`
+	MissingScheduleCount int                `db:"missing_schedule_count"`
+	ErrorCount           int                `db:"error_count"`
+	ErrorSummary         *string            `db:"error_summary"`
+	DriftFlagThreshold   decimal.Decimal    `db:"drift_flag_threshold"` // NUMERIC(10,8) default 0.0001
+	DriftHighThreshold   decimal.Decimal    `db:"drift_high_threshold"` // NUMERIC(10,8) default 0.001
+	// Audit columns
+	CreatedAt  time.Time `db:"created_at"`
+	CreatedBy  uuid.UUID `db:"created_by"`
+	UpdatedAt  time.Time `db:"updated_at"`
+	UpdatedBy  uuid.UUID `db:"updated_by"`
+	TenantID   string    `db:"tenant_id"`
+	RowVersion int64     `db:"row_version"`
+}
+
+// DriftReportEntry is one instrument result row for the drift report detail.
+// Stored as drift_entries_json in sys.drift_report or computed in-process.
+type DriftReportEntry struct {
+	InstrumenID     uuid.UUID       `json:"instrumen_id"`
+	KodeInstrumen   string          `json:"kode_instrumen"`
+	EIRAwal         decimal.Decimal `json:"eir_awal"`       // NUMERIC(10,8)
+	EIRRecomputed   decimal.Decimal `json:"eir_recomputed"` // NUMERIC(10,8)
+	AbsDiff         decimal.Decimal `json:"abs_diff"`       // NUMERIC(10,8)
+	BasisPoints     decimal.Decimal `json:"basis_points"`
+	Severity        DriftSeverity   `json:"severity"`
+	ProposalCreated bool            `json:"proposal_created"` // true if HIGH auto-created proposal
+	ProposalID      *uuid.UUID      `json:"proposal_id,omitempty"`
+}
+
+// DriftMissingEntry records an instrument with no active schedule during drift run.
+type DriftMissingEntry struct {
+	InstrumenID   uuid.UUID `json:"instrumen_id"`
+	KodeInstrumen string    `json:"kode_instrumen"`
+	Reason        string    `json:"reason"` // "eir_awal IS NULL" | "No active schedule rows"
+}
+
+// DriftErrorEntry records an instrument that errored during drift run.
+type DriftErrorEntry struct {
+	InstrumenID   uuid.UUID `json:"instrumen_id"`
+	KodeInstrumen string    `json:"kode_instrumen"`
+	ErrorCode     string    `json:"error_code"`
+	ErrorMessage  string    `json:"error_message"`
+}
+
+// DriftReportResult is the fully populated detail for a single drift report,
+// returned by DriftService.GetReport with all embedded entry slices.
+type DriftReportResult struct {
+	Report         DriftReport
+	DriftEntries   []DriftReportEntry
+	MissingEntries []DriftMissingEntry
+	ErrorEntries   []DriftErrorEntry
+}
+
+// DriftGenerateRequest is the input for DriftService.GenerateReport (ad-hoc / pre-ECL trigger).
+type DriftGenerateRequest struct {
+	TriggerSource DriftTriggerSource
+	TriggeredBy   *uuid.UUID // nil for CRON
+	TenantID      string
+}
+
+// AmendTriggerSource for ecl.eir_reestimation_log.trigger_source (M6 column).
+// CHECK constraint: ('MANUAL','DOCUMENT_UPLOAD','DRIFT_DETECTION_AUTO','PRE_ECL_GATE').
+// See migration 000027.
+type AmendTriggerSource string
+
+const (
+	AmendTriggerManual             AmendTriggerSource = "MANUAL"
+	AmendTriggerDocumentUpload     AmendTriggerSource = "DOCUMENT_UPLOAD"
+	AmendTriggerDriftDetectionAuto AmendTriggerSource = "DRIFT_DETECTION_AUTO"
+	AmendTriggerPreECLGate         AmendTriggerSource = "PRE_ECL_GATE"
+)
+
+// DetectAmendmentRequest is the input for DetectionService.DetectFromDocument (M6-001).
+type DetectAmendmentRequest struct {
+	DocumentID  uuid.UUID // doc.document.id (uploaded contract amendment PDF/XLSX)
+	InstrumenID uuid.UUID // target instrument
+	ActorID     uuid.UUID
+	TenantID    string
+	// Optional overrides from document parsing (doc type check done by service).
+	AlasanDetected    string
+	OverrideCashflows []CashflowItem // if document contains parsed cashflows
+}
+
+// CancelAmendmentRequest is the input for DetectionService.CancelAmendment (M6-005).
+type CancelAmendmentRequest struct {
+	AmendmentID  uuid.UUID
+	CancelReason string // min 20 chars per DB CHECK
+	ActorID      uuid.UUID
+	TenantID     string
+}
+
+// UpdateCashflowsRequest is the input for DetectionService.UpdateCashflows (M6-003 PATCH).
+type UpdateCashflowsRequest struct {
+	AmendmentID      uuid.UUID
+	RevisedCashflows []CashflowItem
+	ActorID          uuid.UUID
+	TenantID         string
+}
+
+// QueueRow is a lightweight row returned by the amendment review queue list endpoint.
+type QueueRow struct {
+	AmendmentID      uuid.UUID
+	InstrumenID      uuid.UUID
+	KodeInstrumen    string
+	Status           AmendmentStatus
+	TriggerSource    AmendTriggerSource
+	AbsDiff          *decimal.Decimal // nil if not yet recomputed
+	EIRLama          *decimal.Decimal
+	DriftReportID    *uuid.UUID
+	DocumentID       *uuid.UUID
+	MakerID          *uuid.UUID
+	ReviewerID       *uuid.UUID
+	TanggalAmandemen time.Time
+	CreatedAt        time.Time
 }
 
 // ─── Bulk types ───────────────────────────────────────────────────────────────
@@ -483,6 +738,19 @@ var AllowedColsSchedule = []string{
 var AllowedColsAmendment = []string{
 	"created_at", "tanggal_re_estimation", "workflow_status",
 	"eir_sebelum", "eir_sesudah", "instrumen_id",
+}
+
+// AllowedColsQueue are the allowed sort/filter columns for the amendment review queue (M6-004).
+var AllowedColsQueue = []string{
+	"created_at", "tanggal_re_estimation", "workflow_status",
+	"trigger_source", "instrumen_id", "abs_diff", "drift_report_id",
+}
+
+// AllowedColsDriftReport are the allowed sort/filter columns for the drift report list (M6-002).
+var AllowedColsDriftReport = []string{
+	"tanggal_run", "trigger_source", "status",
+	"drift_high_count", "drift_low_count", "total_instrumen",
+	"created_at",
 }
 
 // ─── Signature hash ───────────────────────────────────────────────────────────
