@@ -1,4 +1,4 @@
-// Package eir — EIRService orchestrates the Newton-Raphson solver, schedule
+// Package eir — Service orchestrates the Newton-Raphson solver, schedule
 // generation + persistence, and amendment re-estimation workflow.
 //
 // Precision: all IDR arithmetic uses shopspring/decimal (DEC-016 — never float64).
@@ -69,37 +69,37 @@ func (a *AuditWriterAdapter) Write(ctx context.Context, tx *sql.Tx, evt AuditEve
 
 // ─── Compute request / response ───────────────────────────────────────────────
 
-// EIRComputeRequest is the input for EIRService.Compute.
-type EIRComputeRequest struct {
-	InstrumenID      uuid.UUID
+// ComputeRequest is the input for Service.Compute.
+type ComputeRequest struct {
+	InstrumenID        uuid.UUID
 	CashflowProjection []CashflowItem
-	CouponRate       *decimal.Decimal // seed for solver; nil → 0.10
-	PersistResult    bool             // if true, save eir_awal + audit
-	ForceRecompute   bool             // bypass EIR_ALREADY_COMPUTED guard
-	POCIMode         bool             // true = PD-adjusted cashflow
+	CouponRate         *decimal.Decimal // seed for solver; nil → 0.10
+	PersistResult      bool             // if true, save eir_awal + audit
+	ForceRecompute     bool             // bypass EIR_ALREADY_COMPUTED guard
+	POCIMode           bool             // true = PD-adjusted cashflow
 }
 
-// ─── EIRService ───────────────────────────────────────────────────────────────
+// ─── Service ───────────────────────────────────────────────────────────────
 
-// EIRService orchestrates EIR computation (Story 1: APP-C-EIR-001).
-type EIRService struct {
+// Service orchestrates EIR computation (Story 1: APP-C-EIR-001).
+type Service struct {
 	db          *sql.DB
 	instrRepo   InstrumenEIRRepoIface
-	solver      *EIRSolver
+	solver      *Solver
 	auditWriter AuditWriterIface
 	logger      *slog.Logger
 }
 
-// NewEIRService creates an EIRService.
+// NewService creates an Service.
 // Panics if auditWriter is nil (DEC-018 compliance guard).
-func NewEIRService(db *sql.DB, instrRepo InstrumenEIRRepoIface, auditWriter AuditWriterIface, logger *slog.Logger) *EIRService {
+func NewService(db *sql.DB, instrRepo InstrumenEIRRepoIface, auditWriter AuditWriterIface, logger *slog.Logger) *Service {
 	if auditWriter == nil {
-		panic("eir.NewEIRService: auditWriter must not be nil (DEC-018)")
+		panic("eir.NewService: auditWriter must not be nil (DEC-018)")
 	}
-	return &EIRService{
+	return &Service{
 		db:          db,
 		instrRepo:   instrRepo,
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: auditWriter,
 		logger:      logger,
 	}
@@ -110,7 +110,7 @@ func NewEIRService(db *sql.DB, instrRepo InstrumenEIRRepoIface, auditWriter Audi
 //
 // Precision: solver returns RoundBank(8); annual equivalent computed in decimal (DEC-016).
 // Audit: EIR.COMPUTE (success) or EIR.COMPUTE_FAILED written in-transaction when PersistResult=true.
-func (s *EIRService) Compute(ctx context.Context, req EIRComputeRequest, actorID uuid.UUID, actorRole string) (ComputeResult, error) {
+func (s *Service) Compute(ctx context.Context, req ComputeRequest, actorID uuid.UUID, actorRole string) (ComputeResult, error) {
 	// 1. Load instrument
 	inst, err := s.instrRepo.GetByID(ctx, req.InstrumenID)
 	if err != nil {
@@ -166,8 +166,9 @@ func (s *EIRService) Compute(ctx context.Context, req EIRComputeRequest, actorID
 		defer rollbackTx(ctx, tx, s.logger)
 
 		if solveErr != nil {
-			// Write EIR.COMPUTE_FAILED audit even on solver failure
-			_ = s.auditWriter.Write(ctx, tx, AuditEvent{
+			// Write EIR.COMPUTE_FAILED audit even on solver failure.
+			// Audit failure aborts tx; wrap and return to caller (DEC-018).
+			if auditErr := s.auditWriter.Write(ctx, tx, AuditEvent{
 				ActorUserID: actorID,
 				ActorRole:   actorRole,
 				Action:      "EIR.COMPUTE_FAILED",
@@ -176,8 +177,12 @@ func (s *EIRService) Compute(ctx context.Context, req EIRComputeRequest, actorID
 				BeforeJSON:  map[string]any{"eir_awal": nil},
 				AfterJSON:   map[string]any{"error": solveErr.Error()},
 				TenantID:    inst.TenantID,
-			})
-			_ = tx.Commit()
+			}); auditErr != nil {
+				return ComputeResult{}, fmt.Errorf("eir.Compute: audit write (failed): %w", auditErr)
+			}
+			if commitErr := tx.Commit(); commitErr != nil {
+				return ComputeResult{}, fmt.Errorf("eir.Compute: commit (failed audit): %w", commitErr)
+			}
 			return ComputeResult{}, solveErr
 		}
 
@@ -258,18 +263,18 @@ func rollbackTx(ctx context.Context, tx *sql.Tx, logger *slog.Logger) {
 
 // GenerateScheduleRequest is the input for ScheduleService.Generate.
 type GenerateScheduleRequest struct {
-	InstrumenID      uuid.UUID
+	InstrumenID        uuid.UUID
 	CashflowProjection []CashflowItem
-	ForceRegenerate  bool
+	ForceRegenerate    bool
 }
 
-// ScheduleService handles amortisation schedule generation and lookup.
+// ScheduleService handles amortization schedule generation and lookup.
 // Implements APP-C-EIR-002 (generate) and APP-C-EIR-003 (read/DataTable).
 type ScheduleService struct {
 	db          *sql.DB
 	instrRepo   InstrumenEIRRepoIface
-	schedRepo   EIRScheduleRepoIface
-	solver      *EIRSolver
+	schedRepo   ScheduleRepoIface
+	solver      *Solver
 	auditWriter AuditWriterIface
 	logger      *slog.Logger
 }
@@ -279,7 +284,7 @@ type ScheduleService struct {
 func NewScheduleService(
 	db *sql.DB,
 	instrRepo InstrumenEIRRepoIface,
-	schedRepo EIRScheduleRepoIface,
+	schedRepo ScheduleRepoIface,
 	auditWriter AuditWriterIface,
 	logger *slog.Logger,
 ) *ScheduleService {
@@ -290,13 +295,13 @@ func NewScheduleService(
 		db:          db,
 		instrRepo:   instrRepo,
 		schedRepo:   schedRepo,
-		solver:      NewEIRSolver(),
+		solver:      NewSolver(),
 		auditWriter: auditWriter,
 		logger:      logger,
 	}
 }
 
-// Generate builds and persists an amortisation schedule from origination to maturity.
+// Generate builds and persists an amortization schedule from origination to maturity.
 // Formula (state-machine doc §2, formulas.md §EIR):
 //
 //	opening_carrying_1 = nominal + biaya_transaksi_capitalized
@@ -363,9 +368,9 @@ func (s *ScheduleService) Generate(ctx context.Context, req GenerateScheduleRequ
 		EntityType:  "mst.instrumen",
 		EntityID:    req.InstrumenID,
 		AfterJSON: map[string]any{
-			"total_rows":      len(rows),
-			"eir_per_period":  eirPerPeriod.StringFixed(8),
-			"closing_delta":   closingDelta.StringFixed(4),
+			"total_rows":     len(rows),
+			"eir_per_period": eirPerPeriod.StringFixed(8),
+			"closing_delta":  closingDelta.StringFixed(4),
 		},
 		TenantID: inst.TenantID,
 	}); err != nil {
@@ -377,8 +382,8 @@ func (s *ScheduleService) Generate(ctx context.Context, req GenerateScheduleRequ
 	}
 
 	// Log warning if closing delta > IDR 1 (per state machine doc §2)
-	one_idr := decimal.NewFromFloat(1.0)
-	if closingDelta.GreaterThan(one_idr) {
+	oneIdr := decimal.NewFromFloat(1.0)
+	if closingDelta.GreaterThan(oneIdr) {
 		if s.logger != nil {
 			s.logger.WarnContext(ctx, "eir.Generate: closing carrying delta > IDR 1",
 				"instrumen_id", req.InstrumenID,
@@ -398,7 +403,7 @@ func (s *ScheduleService) Generate(ctx context.Context, req GenerateScheduleRequ
 	}, nil
 }
 
-// buildScheduleRows constructs the amortisation schedule rows from cashflow data.
+// buildScheduleRows constructs the amortization schedule rows from cashflow data.
 // Formula per state-machine doc §2. All amounts rounded HALF_EVEN to 4 dp (DEC-016).
 //
 // The cashflow projection provides:
@@ -438,14 +443,10 @@ func buildScheduleRows(instrumenID uuid.UUID, eirPerPeriod decimal.Decimal, cfs 
 		var pelunasan decimal.Decimal
 		isLast := i == len(cfs)-1
 		if isLast {
-			// Remove principal component from cash inflow
-			couponLast := cashInflow.Sub(nominal)
-			if couponLast.LessThan(zero) {
-				// CF last might be principal + coupon or just principal
-				pelunasan = nominal
-			} else {
-				pelunasan = nominal
-			}
+			// pelunasan_pokok = nominal on the last period (bullet bond).
+			// Regardless of whether CF includes coupon + principal or just principal,
+			// the principal repayment is always the full nominal amount.
+			pelunasan = nominal
 		}
 
 		// closing_carrying = opening + amortisasi - pelunasan  [HALF_EVEN 4dp]
