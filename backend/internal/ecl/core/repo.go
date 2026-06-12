@@ -39,7 +39,14 @@ func NewCalcResultLineRepo(db *sql.DB) *CalcResultLineRepo {
 // InsertResultLine inserts one ecl.calc_result_line row within the given transaction.
 // The row must not already exist (UNIQUE: calc_run_id + instrumen_id).
 // No float64. All decimals serialized as text for numeric columns.
+// F8 fix: includes formula_version column (migration 000030).
 func (r *CalcResultLineRepo) InsertResultLine(ctx context.Context, tx *sql.Tx, row ResultLineRow) error {
+	// Default formula version if not set.
+	fv := row.FormulaVersion
+	if fv == "" {
+		fv = FormulaVersionM7
+	}
+
 	q := `
 INSERT INTO ecl.calc_result_line (
 	id, calc_run_id, instrumen_id, evaluation_date, periode_id, stage, routing_path,
@@ -53,6 +60,7 @@ INSERT INTO ecl.calc_result_line (
 	bobot_good, bobot_normal, bobot_bad,
 	net_carrying_idr, prior_sealed_ecl_idr,
 	flag_poci, parameter_snapshot_id, warnings_json,
+	formula_version,
 	created_by, updated_by, tenant_id
 ) VALUES (
 	$1,$2,$3,$4,$5,$6,$7,
@@ -66,7 +74,8 @@ INSERT INTO ecl.calc_result_line (
 	$23,$24,$25,
 	$26,$27,
 	$28,$29,$30,
-	$31,$31,'TUGURE'
+	$31,
+	$32,$32,'TUGURE'
 )`
 
 	warningsJSON, err := marshalWarnings(row.Warnings)
@@ -105,6 +114,7 @@ INSERT INTO ecl.calc_result_line (
 		row.FlagPOCI,
 		row.ParameterSnapshotID,
 		warningsJSON,
+		fv,
 		row.ActorID,
 	)
 	return err
@@ -148,6 +158,7 @@ LIMIT 1`
 
 // GetResultLine returns one ecl.calc_result_line by (calcRunID, instrumenID).
 // Returns nil, nil when not found.
+// F8 fix: includes formula_version column (migration 000030).
 func (r *CalcResultLineRepo) GetResultLine(ctx context.Context, calcRunID, instrumenID uuid.UUID) (*ResultLineRow, error) {
 	q := `
 SELECT id, calc_run_id, instrumen_id, evaluation_date, periode_id, stage, routing_path,
@@ -157,7 +168,8 @@ SELECT id, calc_run_id, instrumen_id, evaluation_date, periode_id, stage, routin
        ecl_fl_good_idr, ecl_fl_normal_idr, ecl_fl_bad_idr,
        ecl_weighted_idr, bobot_good, bobot_normal, bobot_bad,
        net_carrying_idr, prior_sealed_ecl_idr, flag_poci, parameter_snapshot_id,
-       warnings_json, sealed_at, created_at
+       warnings_json, sealed_at, created_at,
+       COALESCE(formula_version, 'M7-v1.0') AS formula_version
 FROM ecl.calc_result_line
 WHERE calc_run_id = $1 AND instrumen_id = $2 AND deleted_at IS NULL
 LIMIT 1`
@@ -399,10 +411,14 @@ func (r *CalcResultLineRepo) ExistsResultLine(ctx context.Context, calcRunID, in
 	return exists, err
 }
 
+// FormulaVersionM7 is the default formula version tag stored in calc_result_line.formula_version.
+// Updated on every algorithm change so historical rows identify the version used.
+const FormulaVersionM7 = "M7-v1.0"
+
 // ─── ResultLineRow — full DB row for insert ─────────────────────────────────
 
 // ResultLineRow is the full set of fields for one ecl.calc_result_line insert.
-// Follows the migration schema from 000029.
+// Follows the migration schema from 000029 + 000030 (formula_version column).
 type ResultLineRow struct {
 	ID                  uuid.UUID
 	CalcRunID           uuid.UUID
@@ -435,6 +451,9 @@ type ResultLineRow struct {
 	ParameterSnapshotID *uuid.UUID
 	Warnings            []string
 	ActorID             uuid.UUID
+	// FormulaVersion identifies the ECL formula version used (F8 fix, migration 000030).
+	// Default: FormulaVersionM7 ("M7-v1.0"). Stored for audit trail + regression detection.
+	FormulaVersion string
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -460,6 +479,7 @@ func scanResultLineRow(row *sql.Row) (*ResultLineRow, error) {
 		warningsJSON                     sql.NullString
 		sealedAt                         sql.NullTime
 		createdAt                        time.Time
+		formulaVersion                   string // F8 fix: formula_version column (migration 000030)
 	)
 
 	err := row.Scan(
@@ -471,6 +491,7 @@ func scanResultLineRow(row *sql.Row) (*ResultLineRow, error) {
 		&eclWeightedRaw, &bobotGood, &bobotNormal, &bobotBad,
 		&netCarryingRaw, &priorSealedRaw, &flagPOCI, &paramSnapshotID,
 		&warningsJSON, &sealedAt, &createdAt,
+		&formulaVersion,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -484,6 +505,7 @@ func scanResultLineRow(row *sql.Row) (*ResultLineRow, error) {
 		EvaluationDate: evalDate, PeriodeID: periodeID,
 		Stage: Stage(stage), RoutingPath: RoutingPath(routingPath),
 		FlagPOCI: flagPOCI, ActorID: uuid.Nil,
+		FormulaVersion: formulaVersion,
 	}
 
 	ead, err := decimal.NewFromString(eadRaw)
