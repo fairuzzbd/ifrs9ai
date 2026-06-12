@@ -1,0 +1,1752 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-C ECL Core Calculation Engine (P4-M7)
+  version: "1.0.0"
+  description: |
+    ECL computation endpoints: single-instrumen synchronous compute, bulk async
+    compute (Asynq 202+jobId), result read (DataTable), portfolio aggregation,
+    roll-forward reconciliation, and ad-hoc recompute debug.
+
+    Story set: APP-C-ECL-M7-001..006
+    FSD: FSD-APP-C-ECL-EIR-v1.0.docx §3 (staging + ECL formula), §4 (EIR + net carrying)
+    SoW_v1.4.docx §4 (formula kanonik)
+    BRD §8.2 (ECL Computation Requirements)
+
+    ## Depends on (harus MERGED sebelum M7)
+    - P4-M1: StagingService.GetCurrentStage()  — ecl.stage_history
+    - P4-M2: PD/LGD/EAD helpers               — mst.pd_pefindo, mst.lgd_basel, mst.impact_mev_pd
+    - P4-M3: LPSService.AggregateExcess()      — mst.lps_coverage
+    - P4-M4: LookThroughService.Compute()      — mst.fund_composition, ecl.lookthrough_underlying
+    - P4-M5: EIRService.GetActiveSchedule()    — ecl.eir_amortization_schedule
+    - P4-M6: amendment lifecycle               — ecl.eir_reestimation_log (catch-up via M5 interface)
+
+    ## Routing decision
+    FVTPL / FVOCI_ELECTION → SKIP_FVTPL (no ecl.calc_header row written)
+    REKSADANA              → LOOKTHROUGH (delegate to M4 LookThroughService)
+    CASH / DEPOSITO        → LPS (delegate to M3 LPSService, ECL on excess only)
+    POCI (any)             → POCI_DEFERRED (flag + warning, no ECL row, Phase 5)
+    Default                → STANDARD (M2 PD/LGD/EAD helpers)
+
+    ## Formula kanonik (DEC-010)
+    ECL_skenario     = EAD × PD_skenario × LGD
+    ECL_FL_skenario  = ECL_skenario × impact_pd.impact_multiplier[skenario]
+                       (Stage 3: FL multiplier NOT applied — PD fixed 1.0)
+    ECL_weighted     = Σ(ECL_FL_skenario × bobot_skenario)
+    FL multiplier source: mst.impact_mev_pd[skenario].impact_multiplier ONLY
+    Bobot source: mst.bobot_skenario (active per periode), default 0.25/0.50/0.25
+    Stage 3 net carrying: gross − prior_sealed_ecl_per_instrument
+                          (first-ever run: gross, no prior sealed ECL)
+
+    ## POCI stub (M7-006, Phase 5 defer)
+    flag_poci=TRUE → ecl_weighted_idr=NULL (not 0 — semantics differ)
+    routing_path="POCI_DEFERRED", warnings=["ECL_POCI_REQUIRES_FULL_CREDIT_ADJUSTED_EIR"]
+    No ecl.calc_header row written. Audit ECL.POCI_DEFERRED.
+
+    ## Precision (DEC-016)
+    IDR amounts: NUMERIC(20,4). PD/LGD/EIR: NUMERIC(10,8). FX: NUMERIC(20,8).
+    No float64. shopspring/decimal throughout.
+
+    ## UX §1 compliance
+    All GET list endpoints: sort + cursor pagination + filter + export.
+    All POST mutating endpoints: Idempotency-Key required (DEC-021).
+    Bulk compute: 202 + jobId + SSE stream (UX §3).
+
+    ## review-required
+    Seluruh file ini memerlukan BLOCKING gate dari `ifrs9-compliance-reviewer`
+    sebelum merge: formula, Stage 3 net carrying, FL multiplier semantik, POCI stub.
+
+    ## Pending open questions (BLOCKING sebelum ecl-eir-engineer mulai)
+    OQ-M7-3: Stage 3 net carrying source — MAX(ecl_fl_idr) sealed confirmed?
+    OQ-M7-4: FL multiplier semantik (mst.impact_mev_pd[skenario] flat, no double-multiply)
+
+    ## Permissions
+    ecl.compute                  — ROLE-RISK (preview/ad-hoc), internal Asynq worker
+    ecl.result.read              — ROLE-RISK, ROLE-AUDIT, ROLE-AKUN, ROLE-AKUN-CTL, ROLE-CFO
+    ecl.portfolio_aggregate.read — ROLE-RISK, ROLE-CFO, ROLE-AUDIT
+    ecl.result.export            — ROLE-RISK, ROLE-AKUN-CTL, ROLE-CFO, ROLE-AUDIT
+    ecl.recompute_adhoc          — ROLE-RISK
+
+    ## Audit events
+    ECL.COMPUTE_PREVIEW, ECL.RESULT_PERSISTED, ECL.COMPUTE_STARTED,
+    ECL.COMPUTE_COMPLETED, ECL.COMPUTE_DUPLICATE_SKIP, ECL.POCI_DEFERRED,
+    ECL.POCI_FLAG_MISMATCH, ECL.RECOMPUTE_AD_HOC, ECL.RESULT_EXPORT,
+    ECL.PORTFOLIO_AGGREGATE_READ, ECL.PORTFOLIO_AGGREGATE_EXPORT
+
+    ## Migration
+    data-modeler: migration 000029 (ecl_calc_header_schema_fix)
+    — see state machine doc for full column spec.
+
+servers:
+  - url: /api/v1
+    description: BLIPS REST API v1
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: ecl-compute
+    description: |
+      ECL computation — single synchronous + bulk async.
+      Stories APP-C-ECL-M7-001, M7-002.
+  - name: ecl-results
+    description: |
+      ECL result read: per-instrumen DataTable + breakdown, portfolio summary,
+      roll-forward reconciliation.
+      Stories APP-C-ECL-M7-003, M7-004.
+  - name: ecl-recompute
+    description: |
+      Ad-hoc recompute debug endpoint (preview mode, no persist).
+      Story APP-C-ECL-M7-005.
+  - name: ecl-jobs
+    description: |
+      Bulk job status (reuse pattern from M2/M3).
+      Story APP-C-ECL-M7-002.
+
+paths:
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/compute — Single instrumen synchronous ECL compute (M7-001)
+  # ---------------------------------------------------------------------------
+  /ecl/compute:
+    post:
+      operationId: computeECLSingle
+      tags: [ecl-compute]
+      summary: Hitung ECL untuk satu instrumen (synchronous preview)
+      description: |
+        Menjalankan ECL computation untuk satu instrumen secara synchronous.
+        Default: preview mode (tidak persist ke ecl.calc_header).
+        Worker mode (calcRunId di-supply + persist=true): persist atomic ke
+        ecl.calc_header + ecl.calc_detail_skenario.
+
+        Routing:
+        - FVTPL / FVOCI_ELECTION → SKIP_FVTPL, ecl_weighted_idr=0, no persist
+        - REKSADANA               → LOOKTHROUGH via M4 LookThroughService
+        - CASH / DEPOSITO         → LPS via M3 LPSService (excess only)
+        - flag_poci=TRUE          → POCI_DEFERRED, ecl_weighted_idr=null
+        - default                 → STANDARD via M2 PD/LGD/EAD helpers
+
+        Stage 3 overrides: PD forced to 1.0 for all scenarios, FL multiplier NOT applied.
+        Net carrying = gross_carrying_idr − prior_sealed_ecl_idr (0 if first run).
+
+        Permission: ecl.compute
+        Audit: ECL.COMPUTE_PREVIEW (preview mode) atau ECL.RESULT_PERSISTED (worker mode)
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ComputeSingleRequest'
+            examples:
+              obligasi_ac_stage1:
+                summary: OBLIGASI AC Stage 1, STANDARD routing
+                value:
+                  instrumenId: "a1b2c3d4-0001-0000-0000-000000000001"
+                  evaluationDate: "2026-06-30"
+                  periodeId: "JUNI-2026"
+              deposito_lps:
+                summary: DEPOSITO LPS routing
+                value:
+                  instrumenId: "a1b2c3d4-0010-0000-0000-000000000001"
+                  evaluationDate: "2026-06-30"
+                  periodeId: "JUNI-2026"
+                  scenario: "ALL"
+              worker_persist:
+                summary: Worker mode dengan persist
+                value:
+                  instrumenId: "a1b2c3d4-0001-0000-0000-000000000001"
+                  evaluationDate: "2026-06-30"
+                  periodeId: "JUNI-2026"
+                  calcRunId: "b1c2d3e4-0001-0000-0000-000000000001"
+                  persist: true
+      responses:
+        "200":
+          description: ECL computation result (preview mode atau worker mode)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ComputeSingleResponse'
+              examples:
+                standard_stage1:
+                  summary: STANDARD routing, Stage 1, semua skenario
+                  value:
+                    data:
+                      instrumenId: "a1b2c3d4-0001-0000-0000-000000000001"
+                      calcRunId: null
+                      evaluationDate: "2026-06-30"
+                      periodeId: "JUNI-2026"
+                      stage: "STAGE_1"
+                      routingPath: "STANDARD"
+                      flagPoci: false
+                      eadIdr: 1000000000.0000
+                      pdUsedPerScenario:
+                        good: 0.01600000
+                        normal: 0.02000000
+                        bad: 0.03000000
+                      lgdUsed: 0.45000000
+                      flMultiplierPerScenario:
+                        good: 0.80000000
+                        normal: 1.00000000
+                        bad: 1.50000000
+                      bobotScenarioSnapshot:
+                        good: 0.25000000
+                        normal: 0.50000000
+                        bad: 0.25000000
+                      eclPerScenarioIdr:
+                        good: 7200000.0000
+                        normal: 9000000.0000
+                        bad: 13500000.0000
+                      eclFlPerScenarioIdr:
+                        good: 5760000.0000
+                        normal: 9000000.0000
+                        bad: 20250000.0000
+                      eclWeightedIdr: 11002500.0000
+                      netCarryingIdr: null
+                      parameterSnapshotId: "c1d2e3f4-0001-0000-0000-000000000001"
+                      warnings: []
+                    meta:
+                      traceId: "trace-abc-001"
+                poci_stub:
+                  summary: POCI instrumen — defer Phase 5
+                  value:
+                    data:
+                      instrumenId: "a1b2c3d4-POCI-0000-0000-000000000001"
+                      stage: "STAGE_3"
+                      routingPath: "POCI_DEFERRED"
+                      flagPoci: true
+                      eclWeightedIdr: null
+                      warnings: ["ECL_POCI_REQUIRES_FULL_CREDIT_ADJUSTED_EIR"]
+                    meta:
+                      traceId: "trace-abc-002"
+        "400":
+          $ref: '#/components/responses/ValidationFailed'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          description: |
+            Duplicate result — calc_run_id + instrumen_id already persisted (worker mode).
+            Error code: CONFLICT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        "422":
+          description: |
+            Business rule validation failure. Error codes:
+            ECL_STAGING_NOT_FOUND — no stage record, call M1 first
+            ECL_PARAMETER_INACTIVE — bobot/pd/lgd/FL not approved for periode
+            ECL_INSTRUMEN_NOT_ELIGIBLE — FVTPL/POCI without valid path
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        "423":
+          description: |
+            ECL_CALC_RUN_SEALED — cannot recompute on sealed calc run.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/compute/bulk — Bulk async ECL compute (Asynq) (M7-002)
+  # ---------------------------------------------------------------------------
+  /ecl/compute/bulk:
+    post:
+      operationId: computeECLBulk
+      tags: [ecl-compute]
+      summary: Bulk ECL compute untuk satu calc run (async Asynq job)
+      description: |
+        Memulai Asynq job untuk menghitung ECL seluruh instrumen aktif dalam scope.
+        Returns 202 Accepted dengan jobId. Status via SSE stream (UX §3).
+
+        Idempotent per calcRunId: jika instrumen sudah punya result untuk calcRunId
+        yang sama, di-skip (CONFLICT per instrumen, bulk lanjut).
+
+        Performance SLA: ≤ 30 detik untuk 1.000 instrumen (P95).
+        Batch internal: 100 instrumen per batch. Progress setiap 100 instrumen
+        atau setiap 10 detik.
+
+        Scope:
+        - omit scope → semua instrumen aktif (tidak FVTPL/POCI)
+        - portofolioIds → subset portofolio
+        - instrumenIds → subset instrumen spesifik
+
+        FVTPL → SKIP (no row, dicatat di job result total_skipped_fvtpl)
+        POCI  → SKIP dengan flag (dicatat di total_poci_deferred)
+        Partial error → job status "completed_with_errors", bulk lanjut
+
+        Permission: ecl.compute (internal engine, dipanggil dari M8 worker context)
+        Audit: ECL.COMPUTE_STARTED, ECL.COMPUTE_COMPLETED, ECL.RESULT_PERSISTED (per batch)
+
+        Long-running UX §3: progress di Redis pub/sub + SSE stream.
+        Caller (M8) wajib wrapping dengan JobProgressPanel di frontend.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ComputeBulkRequest'
+            examples:
+              all_active:
+                summary: Semua instrumen aktif
+                value:
+                  calcRunId: "b1c2d3e4-0001-0000-0000-000000000001"
+                  evaluationDate: "2026-06-30"
+                  periodeId: "JUNI-2026"
+              subset_portofolio:
+                summary: Subset portofolio
+                value:
+                  calcRunId: "b1c2d3e4-0002-0000-0000-000000000001"
+                  evaluationDate: "2026-06-30"
+                  periodeId: "JUNI-2026"
+                  scope:
+                    portofolioIds:
+                      - "ptf-aaa-001"
+                      - "ptf-bbb-002"
+      responses:
+        "202":
+          description: Bulk job diterima — lihat statusUrl + streamUrl untuk progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobAcceptedResponse'
+              example:
+                data:
+                  jobId: "job_01HXYZ_ECL_BULK"
+                  type: "ECL_BULK_COMPUTE"
+                  statusUrl: "/api/v1/ecl/jobs/job_01HXYZ_ECL_BULK"
+                  streamUrl: "/api/v1/ecl/jobs/job_01HXYZ_ECL_BULK/stream"
+                meta:
+                  traceId: "trace-def-001"
+        "400":
+          $ref: '#/components/responses/ValidationFailed'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "409":
+          description: |
+            calcRunId + periodeId sudah punya hasil completed (idempotency replay).
+            Error code: CONFLICT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        "413":
+          description: |
+            ECL_BULK_TOO_LARGE — scope mengandung > 10.000 instrumen per call.
+            Batasi dengan portofolioIds atau instrumenIds.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        "422":
+          description: |
+            ECL_PARAMETER_INACTIVE — bobot/pd/lgd not approved for periodeId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        "423":
+          description: |
+            ECL_CALC_RUN_SEALED — calcRunId sudah sealed, cannot recompute.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/results/{calcRunId} — List result lines DataTable (M7-003)
+  # ---------------------------------------------------------------------------
+  /ecl/results/{calcRunId}:
+    get:
+      operationId: listECLResults
+      tags: [ecl-results]
+      summary: List ECL result lines untuk satu calc run (DataTable UX §1)
+      description: |
+        Mengembalikan list ecl.calc_header rows untuk calcRunId tertentu.
+        Support sort + cursor pagination + filter + export (UX §1 mandatory).
+
+        Allowed sort columns: evaluation_date, instrumen_id, stage, routing_path,
+          ecl_weighted_idr, ead_idr, flag_poci, created_at
+        Allowed filter columns: stage, routing_path, flag_poci, instrumen_id,
+          portofolio_id (join via mst.instrumen)
+
+        Export: inline CSV/XLSX jika ≤ 10.000 rows; async (202+jobId) jika > 10.000.
+        Export audit: ECL.RESULT_EXPORT per action.
+
+        Permission: ecl.result.read
+        ROLE-AUDIT: cross-portfolio tanpa filter tambahan.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: calcRunId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Q'
+        - name: "filter[stage]"
+          in: query
+          schema:
+            type: string
+            enum: [STAGE_1, STAGE_2, STAGE_3]
+        - name: "filter[routing_path]"
+          in: query
+          schema:
+            type: string
+            enum: [STANDARD, LPS, LOOKTHROUGH, SKIP_FVTPL, POCI_DEFERRED]
+        - name: "filter[flag_poci]"
+          in: query
+          schema:
+            type: boolean
+        - name: "filter[instrumen_id]"
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: "filter[portofolio_id]"
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: export
+          in: query
+          description: |
+            Jika "csv" atau "xlsx": kembalikan file inline (≤ 10k rows).
+            Untuk > 10k rows, backend auto-switch ke async 202+jobId.
+          schema:
+            type: string
+            enum: [csv, xlsx]
+      responses:
+        "200":
+          description: List ECL result lines dengan pagination
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ECLResultListResponse'
+        "202":
+          description: Export async — > 10.000 rows, async job submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobAcceptedResponse'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/results/{calcRunId}/instrumen/{instrumenId} — Single result (M7-003)
+  # ---------------------------------------------------------------------------
+  /ecl/results/{calcRunId}/instrumen/{instrumenId}:
+    get:
+      operationId: getECLResultDetail
+      tags: [ecl-results]
+      summary: Detail ECL result satu instrumen — header + breakdown per skenario
+      description: |
+        Mengembalikan ecl.calc_header + ecl.calc_detail_skenario (3 baris: GOOD/NORMAL/BAD)
+        untuk satu instrumen dalam satu calc run.
+
+        Permission: ecl.result.read
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: calcRunId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: instrumenId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: ECL result detail lengkap
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ECLResultDetailResponse'
+              example:
+                data:
+                  header:
+                    instrumenId: "a1b2c3d4-0001-0000-0000-000000000001"
+                    calcRunId: "b1c2d3e4-0001-0000-0000-000000000001"
+                    evaluationDate: "2026-06-30"
+                    periodeId: "JUNI-2026"
+                    stage: "STAGE_1"
+                    routingPath: "STANDARD"
+                    eadIdr: 1000000000.0000
+                    pdUsedNormal: 0.02000000
+                    lgdUsed: 0.45000000
+                    eclWeightedIdr: 11002500.0000
+                    netCarryingIdr: null
+                    flagPoci: false
+                    sealedAt: null
+                    bobotScenarioSnapshot:
+                      good: 0.25000000
+                      normal: 0.50000000
+                      bad: 0.25000000
+                    warnings: []
+                  detailSkenario:
+                    - skenario: "GOOD"
+                      pdSkenario: 0.01600000
+                      flMultiplier: 0.80000000
+                      eclSkenarioIdr: 7200000.0000
+                      eclFlIdr: 5760000.0000
+                      eadSkenarioIdr: 1000000000.0000
+                    - skenario: "NORMAL"
+                      pdSkenario: 0.02000000
+                      flMultiplier: 1.00000000
+                      eclSkenarioIdr: 9000000.0000
+                      eclFlIdr: 9000000.0000
+                      eadSkenarioIdr: 1000000000.0000
+                    - skenario: "BAD"
+                      pdSkenario: 0.03000000
+                      flMultiplier: 1.50000000
+                      eclSkenarioIdr: 13500000.0000
+                      eclFlIdr: 20250000.0000
+                      eadSkenarioIdr: 1000000000.0000
+                meta:
+                  traceId: "trace-ghi-001"
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/results/{calcRunId}/portofolio/{portofolioId}/summary — Portfolio (M7-004)
+  # ---------------------------------------------------------------------------
+  /ecl/results/{calcRunId}/portofolio/{portofolioId}/summary:
+    get:
+      operationId: getPortfolioSummary
+      tags: [ecl-results]
+      summary: Ringkasan ECL per stage per portofolio + delta vs prior run
+      description: |
+        Agregasi ECL dari ecl.calc_header per stage untuk satu portofolio + calc run.
+        Menghitung delta vs prior calc run (jika priorCalcRunId tersedia atau auto-detected
+        sebagai calc run terbaru dengan status COMPLETED/SEALED untuk periode sebelumnya).
+
+        Performance SLA: ≤ 500ms (computed query dari ecl.calc_header).
+        Read-only — tidak ada mutasi.
+
+        Export: CSV/XLSX via ?export=csv (inline jika ≤ 10k rows).
+
+        Permission: ecl.portfolio_aggregate.read
+        Audit: ECL.PORTFOLIO_AGGREGATE_READ (setiap panggilan)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: calcRunId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: portofolioId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: priorCalcRunId
+          in: query
+          description: |
+            Calc run periode sebelumnya untuk delta comparison.
+            Jika omitted, server auto-detect calc run COMPLETED/SEALED terbaru
+            untuk periodeId − 1 bulan dari portofolio yang sama.
+          schema:
+            type: string
+            format: uuid
+        - name: export
+          in: query
+          schema:
+            type: string
+            enum: [csv, xlsx]
+      responses:
+        "200":
+          description: Portfolio ECL summary per stage + delta
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortfolioSummaryResponse'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "422":
+          description: |
+            ECL_PRIOR_RUN_NOT_FOUND — priorCalcRunId tidak ditemukan atau
+            tidak ada prior run untuk auto-detect.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/results/{calcRunId}/roll-forward — Roll-forward reconciliation (M7-004)
+  # ---------------------------------------------------------------------------
+  /ecl/results/{calcRunId}/roll-forward:
+    get:
+      operationId: getECLRollForward
+      tags: [ecl-results]
+      summary: Roll-forward CKPN reconciliation — opening + movements = closing
+      description: |
+        Menghitung roll-forward ECL (CKPN):
+        opening + originations − derecognitions ± stage_transfers ± remeasurements = closing
+
+        Reconcile check: |closing − Σ(ecl.calc_header.ecl_weighted_idr)| < IDR 1.0000
+
+        Sumber data lifecycle (Phase 4 approximation — lihat OQ-M7-6):
+        - originations    = instrumen di calc_run ini tapi tidak di priorCalcRunId
+        - derecognitions  = instrumen di priorCalcRunId tapi tidak di calc_run ini
+        - transfers       = instrumen yang berubah stage antara dua run
+        - remeasurements  = perubahan ECL tanpa stage transfer
+
+        Jika priorCalcRunId tidak tersedia: opening = 0, semua instrumen = originations.
+
+        Permission: ecl.portfolio_aggregate.read
+        Audit: ECL.PORTFOLIO_AGGREGATE_READ
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: calcRunId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: priorCalcRunId
+          in: query
+          description: |
+            Wajib jika ada periode sebelumnya. Jika omitted dan prior run ada,
+            server auto-detect (sama seperti /summary).
+          schema:
+            type: string
+            format: uuid
+        - name: portofolioId
+          in: query
+          description: Filter roll-forward untuk satu portofolio. Jika omitted = semua.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Roll-forward CKPN
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RollForwardResponse'
+              example:
+                data:
+                  calcRunId: "b1c2d3e4-0001-0000-0000-000000000001"
+                  priorCalcRunId: "b1c2d3e4-0000-0000-0000-000000000001"
+                  portofolioId: null
+                  rollForward:
+                    openingEclIdr: 9500000.0000
+                    newOriginationsIdr: 1200000.0000
+                    derecognitionsIdr: 300000.0000
+                    transfersToStage2Idr: 450000.0000
+                    transfersToStage3Idr: 120000.0000
+                    transfersFromStage2Idr: 80000.0000
+                    transfersFromStage3Idr: 0.0000
+                    remeasurementsIdr: 32500.0000
+                    closingEclIdr: 11002500.0000
+                  reconcileCheck:
+                    sumCalcHeaderEcl: 11002500.0000
+                    closingEcl: 11002500.0000
+                    differenceIdr: 0.0000
+                    isReconciled: true
+                  notes: null
+                meta:
+                  traceId: "trace-jkl-001"
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "422":
+          description: ECL_PRIOR_RUN_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/recompute/ad-hoc — Ad-hoc recompute debug (M7-005)
+  # ---------------------------------------------------------------------------
+  /ecl/recompute/ad-hoc:
+    post:
+      operationId: recomputeECLAdHoc
+      tags: [ecl-recompute]
+      summary: Recompute ECL ad-hoc untuk debug — preview only, tidak persist
+      description: |
+        Menjalankan ECLEngine.ComputeSingle() on-the-fly untuk instrumen yang dipilih
+        (preview mode — tidak persist ke ecl.calc_header).
+        Mengembalikan perbandingan side-by-side: data.recomputed vs data.stored.
+        Jika belum ada stored result: data.stored = null, data.delta = null.
+        Jika stored result dari sealed run: warning + delta tetap dihitung.
+        Jika instrumen POCI: ecl_weighted_idr = null, routing_path = POCI_DEFERRED.
+
+        Selalu audit event ECL.RECOMPUTE_AD_HOC — regulatory drill-down trail.
+
+        Permission: ecl.recompute_adhoc (ROLE-RISK only)
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecomputeAdHocRequest'
+            examples:
+              compare_stored:
+                summary: Recompute + compare dengan stored
+                value:
+                  instrumenId: "a1b2c3d4-0001-0000-0000-000000000001"
+                  evaluationDate: "2026-06-30"
+                  periodeId: "JUNI-2026"
+                  comparePersisted: true
+              no_compare:
+                summary: Recompute saja tanpa compare
+                value:
+                  instrumenId: "a1b2c3d4-0001-0000-0000-000000000001"
+                  evaluationDate: "2026-06-30"
+                  periodeId: "JUNI-2026"
+                  comparePersisted: false
+      responses:
+        "200":
+          description: Recompute result + comparison
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecomputeAdHocResponse'
+              examples:
+                with_delta:
+                  summary: Ada delta vs stored
+                  value:
+                    data:
+                      instrumenId: "a1b2c3d4-0001-0000-0000-000000000001"
+                      recomputed:
+                        eclWeightedIdr: 12500000.0000
+                        pdUsed:
+                          normal: 0.02500000
+                        routingPath: "STANDARD"
+                        warnings: []
+                      stored:
+                        eclWeightedIdr: 11002500.0000
+                        pdUsed:
+                          normal: 0.02000000
+                        calcRunId: "b1c2d3e4-0001-0000-0000-000000000001"
+                        sealedAt: null
+                      delta:
+                        eclWeightedDeltaIdr: 1497500.0000
+                        isSealedComparison: false
+                    meta:
+                      traceId: "trace-mno-001"
+                poci:
+                  summary: POCI instrumen
+                  value:
+                    data:
+                      instrumenId: "a1b2c3d4-POCI-0000-0000-000000000001"
+                      recomputed:
+                        eclWeightedIdr: null
+                        routingPath: "POCI_DEFERRED"
+                        warnings: ["ECL_POCI_REQUIRES_FULL_CREDIT_ADJUSTED_EIR"]
+                      stored: null
+                      delta: null
+                    meta:
+                      traceId: "trace-pqr-001"
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "422":
+          description: |
+            ECL_STAGING_NOT_FOUND, ECL_PARAMETER_INACTIVE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/jobs/{jobId} — Bulk job status (M7-002)
+  # ---------------------------------------------------------------------------
+  /ecl/jobs/{jobId}:
+    get:
+      operationId: getECLJobStatus
+      tags: [ecl-jobs]
+      summary: Status bulk ECL compute job (reuse UX §3 pattern)
+      description: |
+        Mengembalikan status, progress, currentStep, ETA, result/error
+        untuk Asynq bulk ECL job.
+
+        Poll interval: setiap 2 detik (fallback dari SSE stream).
+        SSE stream: GET /ecl/jobs/{jobId}/stream (Content-Type: text/event-stream).
+
+        Permission: ecl.compute (ROLE-RISK) atau job owner
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Job status lengkap
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ECLJobStatusResponse'
+              example:
+                data:
+                  jobId: "job_01HXYZ_ECL_BULK"
+                  type: "ECL_BULK_COMPUTE"
+                  status: "running"
+                  progress: 47
+                  currentStep: "Menghitung Stage 2 instruments (470 dari 1000)"
+                  startedAt: "2026-06-02T10:30:00+07:00"
+                  estimatedCompletionAt: "2026-06-02T10:35:00+07:00"
+                  result: null
+                  error: null
+                  canCancel: true
+                  createdBy: "risk-user-uuid"
+                meta:
+                  traceId: "trace-stu-001"
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/jobs/{jobId}/stream — SSE stream untuk bulk job (M7-002)
+  # ---------------------------------------------------------------------------
+  /ecl/jobs/{jobId}/stream:
+    get:
+      operationId: streamECLJobProgress
+      tags: [ecl-jobs]
+      summary: SSE stream progress bulk ECL job (UX §3)
+      description: |
+        Server-Sent Events stream untuk real-time progress update.
+        Event types: progress, completed, failed, cancelled, close.
+
+        Fallback: polling /ecl/jobs/{jobId} setiap 2 detik jika SSE error.
+
+        Permission: ecl.compute (owner atau ROLE-RISK)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  event: progress
+                  data: {"progress":47,"currentStep":"Menghitung Stage 2 instruments..."}
+
+                  event: completed
+                  data: {"result":{"calcRunId":"...","totalEclWeightedIdr":11002500.0000,"totalComputed":995,"totalSkippedFvtpl":5,"totalPociDeferred":3}}
+
+                  event: failed
+                  data: {"error":{"code":"ECL_PARAMETER_INACTIVE","message":"..."}}
+
+                  event: close
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/jobs/{jobId}/cancel — Cancel bulk job (M7-002)
+  # ---------------------------------------------------------------------------
+  /ecl/jobs/{jobId}/cancel:
+    post:
+      operationId: cancelECLBulkJob
+      tags: [ecl-jobs]
+      summary: Cancel bulk ECL compute job yang sedang berjalan
+      description: |
+        Mengirim signal cancel ke Asynq worker (ctx.Done()).
+        Rows yang sudah di-commit TIDAK di-rollback.
+        Job result.totalComputed akan berisi jumlah partial yang sudah selesai.
+
+        Permission: ecl.compute (ROLE-RISK, hanya owner)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        "200":
+          description: Job cancel diterima
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      status:
+                        type: string
+                        example: cancelled
+                  meta:
+                    $ref: '#/components/schemas/Meta'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          description: Job sudah selesai atau cancelled, tidak bisa cancel lagi.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+# ===========================================================================
+# Components
+# ===========================================================================
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: UUID v4 untuk mencegah double-submit (DEC-021)
+      schema:
+        type: string
+        format: uuid
+        example: "550e8400-e29b-41d4-a716-446655440000"
+
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque base64 cursor dari pagination.nextCursor sebelumnya
+      schema:
+        type: string
+
+    Limit:
+      name: limit
+      in: query
+      description: Jumlah rows per halaman (default 50, max 200)
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+
+    Sort:
+      name: sort
+      in: query
+      description: |
+        Multi-column sort: "col1:asc,col2:desc". Max 3 kolom.
+        Allowed: evaluation_date, instrumen_id, stage, routing_path,
+                 ecl_weighted_idr, ead_idr, flag_poci, created_at
+      schema:
+        type: string
+        example: "evaluation_date:desc,ecl_weighted_idr:desc"
+
+    Q:
+      name: q
+      in: query
+      description: Global text search
+      schema:
+        type: string
+
+  schemas:
+
+    # -------------------------------------------------------------------------
+    # Request schemas
+    # -------------------------------------------------------------------------
+
+    ComputeSingleRequest:
+      type: object
+      required: [instrumenId, evaluationDate, periodeId]
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+          description: UUID instrumen dari mst.instrumen
+        evaluationDate:
+          type: string
+          format: date
+          description: Tanggal evaluasi ECL (ISO 8601 date-only)
+          example: "2026-06-30"
+        periodeId:
+          type: string
+          description: ID periode buku aktif (dari sys.periode)
+          example: "JUNI-2026"
+        calcRunId:
+          type: string
+          format: uuid
+          description: |
+            UUID calc run (M8). Jika diisi + persist=true → worker mode (persist ke DB).
+            Jika kosong → preview mode.
+          nullable: true
+        scenario:
+          type: string
+          enum: [ALL, GOOD, NORMAL, BAD]
+          default: ALL
+          description: Skenario yang dihitung. Default ALL (3 skenario sekaligus).
+        persist:
+          type: boolean
+          default: false
+          description: |
+            true = worker mode (persist ke ecl.calc_header). Butuh calcRunId.
+            false = preview mode (tidak persist).
+
+    ComputeBulkRequest:
+      type: object
+      required: [calcRunId, evaluationDate, periodeId]
+      properties:
+        calcRunId:
+          type: string
+          format: uuid
+          description: UUID calc run yang di-manage oleh M8
+        evaluationDate:
+          type: string
+          format: date
+          example: "2026-06-30"
+        periodeId:
+          type: string
+          example: "JUNI-2026"
+        scope:
+          type: object
+          description: |
+            Scope subset. Jika omitted → semua instrumen aktif tidak FVTPL/POCI.
+          properties:
+            portofolioIds:
+              type: array
+              items:
+                type: string
+                format: uuid
+              description: Subset portofolio
+            instrumenIds:
+              type: array
+              items:
+                type: string
+                format: uuid
+              description: Subset instrumen spesifik (max 10.000, else ECL_BULK_TOO_LARGE)
+
+    RecomputeAdHocRequest:
+      type: object
+      required: [instrumenId, evaluationDate, periodeId]
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+        evaluationDate:
+          type: string
+          format: date
+          example: "2026-06-30"
+        periodeId:
+          type: string
+          example: "JUNI-2026"
+        comparePersisted:
+          type: boolean
+          default: true
+          description: |
+            true = ambil stored result dari ecl.calc_header terbaru (per instrumenId + periodeId)
+                   dan kembalikan delta.
+            false = hanya kembalikan recomputed (data.stored = null, data.delta = null).
+
+    # -------------------------------------------------------------------------
+    # Response schemas
+    # -------------------------------------------------------------------------
+
+    EclResultSnapshot:
+      type: object
+      description: Snapshot ECL computation result (shared oleh compute + recompute)
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+        calcRunId:
+          type: string
+          format: uuid
+          nullable: true
+        evaluationDate:
+          type: string
+          format: date
+        periodeId:
+          type: string
+        stage:
+          type: string
+          enum: [STAGE_1, STAGE_2, STAGE_3]
+        routingPath:
+          type: string
+          enum: [STANDARD, LPS, LOOKTHROUGH, SKIP_FVTPL, POCI_DEFERRED]
+        flagPoci:
+          type: boolean
+        eadIdr:
+          type: number
+          format: decimal
+          description: "EAD IDR. NUMERIC(20,4). Untuk LPS routing: excess only."
+          nullable: true
+        pdUsedPerScenario:
+          type: object
+          nullable: true
+          properties:
+            good:
+              type: number
+              format: decimal
+              description: "NUMERIC(10,8)"
+            normal:
+              type: number
+              format: decimal
+            bad:
+              type: number
+              format: decimal
+          description: "Stage 3: semua = 1.00000000"
+        lgdUsed:
+          type: number
+          format: decimal
+          description: "NUMERIC(10,8)"
+          nullable: true
+        flMultiplierPerScenario:
+          type: object
+          nullable: true
+          description: "Stage 3: null (FL not applied)"
+          properties:
+            good:
+              type: number
+              format: decimal
+            normal:
+              type: number
+              format: decimal
+            bad:
+              type: number
+              format: decimal
+        bobotScenarioSnapshot:
+          type: object
+          nullable: true
+          description: Snapshot bobot dari mst.bobot_skenario saat compute
+          properties:
+            good:
+              type: number
+              format: decimal
+              description: "NUMERIC(7,4), default 0.2500"
+            normal:
+              type: number
+              format: decimal
+            bad:
+              type: number
+              format: decimal
+        eclPerScenarioIdr:
+          type: object
+          nullable: true
+          description: "ECL sebelum FL multiplier. NUMERIC(20,4)."
+          properties:
+            good:
+              type: number
+              format: decimal
+            normal:
+              type: number
+              format: decimal
+            bad:
+              type: number
+              format: decimal
+        eclFlPerScenarioIdr:
+          type: object
+          nullable: true
+          description: "ECL setelah FL multiplier. NUMERIC(20,4). Stage 3: sama dengan eclPerScenario."
+          properties:
+            good:
+              type: number
+              format: decimal
+            normal:
+              type: number
+              format: decimal
+            bad:
+              type: number
+              format: decimal
+        eclWeightedIdr:
+          type: number
+          format: decimal
+          description: "Σ(ECL_FL × bobot). NUMERIC(20,4). POCI: null."
+          nullable: true
+        netCarryingIdr:
+          type: number
+          format: decimal
+          description: "Stage 3 only: gross_carrying − prior_sealed_ecl. NUMERIC(20,4). null jika Stage 1/2."
+          nullable: true
+        parameterSnapshotId:
+          type: string
+          format: uuid
+          nullable: true
+        warnings:
+          type: array
+          items:
+            type: string
+            enum:
+              - ECL_POCI_REQUIRES_FULL_CREDIT_ADJUSTED_EIR
+              - FVTPL_SKIP
+              - STAGE_3_NET_CARRYING_FIRST_RUN
+              - PRIOR_SEALED_ECL_NOT_FOUND
+
+    ComputeSingleResponse:
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/EclResultSnapshot'
+        meta:
+          $ref: '#/components/schemas/Meta'
+
+    JobAcceptedResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          required: [jobId, type, statusUrl, streamUrl]
+          properties:
+            jobId:
+              type: string
+            type:
+              type: string
+              example: "ECL_BULK_COMPUTE"
+            statusUrl:
+              type: string
+              example: "/api/v1/ecl/jobs/job_01HXYZ"
+            streamUrl:
+              type: string
+              example: "/api/v1/ecl/jobs/job_01HXYZ/stream"
+        meta:
+          $ref: '#/components/schemas/Meta'
+
+    ECLResultLineItem:
+      type: object
+      description: Summary row di DataTable list (tanpa detail skenario)
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: ecl.calc_result_line.id (migration 000029)
+        instrumenId:
+          type: string
+          format: uuid
+        calcRunId:
+          type: string
+          format: uuid
+        evaluationDate:
+          type: string
+          format: date
+        periodeId:
+          type: string
+        stage:
+          type: string
+          enum: [STAGE_1, STAGE_2, STAGE_3]
+        routingPath:
+          type: string
+          enum: [STANDARD, LPS, LOOKTHROUGH, SKIP_FVTPL, POCI_DEFERRED]
+        eadIdr:
+          type: number
+          format: decimal
+          nullable: true
+        eclWeightedIdr:
+          type: number
+          format: decimal
+          nullable: true
+        flagPoci:
+          type: boolean
+        sealedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    ECLResultListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ECLResultLineItem'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+        appliedSort:
+          type: array
+          items:
+            type: object
+            properties:
+              col:
+                type: string
+              dir:
+                type: string
+                enum: [asc, desc]
+        appliedFilter:
+          type: object
+          additionalProperties: true
+        meta:
+          $ref: '#/components/schemas/Meta'
+
+    EclDetailSkenario:
+      type: object
+      properties:
+        skenario:
+          type: string
+          enum: [GOOD, NORMAL, BAD]
+        pdSkenario:
+          type: number
+          format: decimal
+          description: "NUMERIC(10,8). Stage 3: 1.00000000"
+        bobot:
+          type: number
+          format: decimal
+          description: "NUMERIC(7,4) snapshot"
+        flMultiplier:
+          type: number
+          format: decimal
+          description: "NUMERIC(10,8). Stage 3: null (FL not applied)"
+          nullable: true
+        eclSkenarioIdr:
+          type: number
+          format: decimal
+          description: "EAD × PD × LGD. NUMERIC(20,4)"
+        eclFlIdr:
+          type: number
+          format: decimal
+          description: "ECL_skenario × FL_multiplier. NUMERIC(20,4). Stage 3 = eclSkenarioIdr."
+        eadSkenarioIdr:
+          type: number
+          format: decimal
+          description: "NUMERIC(20,4)"
+
+    ECLResultDetailResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            header:
+              $ref: '#/components/schemas/EclResultSnapshot'
+            detailSkenario:
+              type: array
+              items:
+                $ref: '#/components/schemas/EclDetailSkenario'
+              minItems: 3
+              maxItems: 3
+        meta:
+          $ref: '#/components/schemas/Meta'
+
+    StageSummaryRow:
+      type: object
+      properties:
+        stage:
+          type: string
+          enum: [STAGE_1, STAGE_2, STAGE_3, TOTAL]
+        count:
+          type: integer
+        eadTotalIdr:
+          type: number
+          format: decimal
+          description: "NUMERIC(20,4)"
+        eclWeightedTotalIdr:
+          type: number
+          format: decimal
+          description: "NUMERIC(20,4)"
+        deltaVsPriorIdr:
+          type: number
+          format: decimal
+          description: "eclWeightedTotalIdr − prior. null jika tidak ada prior run."
+          nullable: true
+
+    PortfolioSummaryResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            portofolioId:
+              type: string
+              format: uuid
+            calcRunId:
+              type: string
+              format: uuid
+            priorCalcRunId:
+              type: string
+              format: uuid
+              nullable: true
+            evaluationDate:
+              type: string
+              format: date
+            summaryByStage:
+              type: array
+              items:
+                $ref: '#/components/schemas/StageSummaryRow'
+            eclWeightedTotalIdr:
+              type: number
+              format: decimal
+            notes:
+              type: string
+              nullable: true
+        meta:
+          $ref: '#/components/schemas/Meta'
+
+    RollForwardDetail:
+      type: object
+      properties:
+        openingEclIdr:
+          type: number
+          format: decimal
+          description: "ECL closing periode sebelumnya (dari priorCalcRunId). 0 jika pertama."
+        newOriginationsIdr:
+          type: number
+          format: decimal
+          description: "ECL instrumen yang ada di calcRunId tapi tidak ada di priorCalcRunId"
+        derecognitionsIdr:
+          type: number
+          format: decimal
+          description: "ECL instrumen yang ada di priorCalcRunId tapi tidak ada di calcRunId"
+        transfersToStage2Idr:
+          type: number
+          format: decimal
+          description: "ECL increment dari instrumen yang berubah Stage 1 → Stage 2"
+        transfersToStage3Idr:
+          type: number
+          format: decimal
+          description: "ECL increment dari instrumen yang berubah Stage 2 → Stage 3"
+        transfersFromStage2Idr:
+          type: number
+          format: decimal
+          description: "ECL decrement dari instrumen cure Stage 2 → Stage 1"
+        transfersFromStage3Idr:
+          type: number
+          format: decimal
+          description: "ECL decrement dari instrumen cure Stage 3 → Stage 2"
+        remeasurementsIdr:
+          type: number
+          format: decimal
+          description: "Perubahan ECL tanpa transfer stage (remeasurement)"
+        closingEclIdr:
+          type: number
+          format: decimal
+          description: "= Σ(ecl.calc_header.ecl_weighted_idr) untuk calcRunId"
+
+    RollForwardReconcile:
+      type: object
+      properties:
+        sumCalcHeaderEcl:
+          type: number
+          format: decimal
+        closingEcl:
+          type: number
+          format: decimal
+        differenceIdr:
+          type: number
+          format: decimal
+          description: "|closing − Σcalc_header|. Must be < 1.0000"
+        isReconciled:
+          type: boolean
+          description: "differenceIdr < IDR 1.0000"
+
+    RollForwardResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            calcRunId:
+              type: string
+              format: uuid
+            priorCalcRunId:
+              type: string
+              format: uuid
+              nullable: true
+            portofolioId:
+              type: string
+              format: uuid
+              nullable: true
+            rollForward:
+              $ref: '#/components/schemas/RollForwardDetail'
+            reconcileCheck:
+              $ref: '#/components/schemas/RollForwardReconcile'
+            notes:
+              type: string
+              nullable: true
+              description: |
+                "Tidak ada calc run sebelumnya. Opening = 0 (periode pertama)." jika first run.
+        meta:
+          $ref: '#/components/schemas/Meta'
+
+    RecomputeAdHocStoredResult:
+      type: object
+      description: Stored result dari ecl.calc_header terbaru
+      properties:
+        eclWeightedIdr:
+          type: number
+          format: decimal
+          nullable: true
+        pdUsed:
+          type: object
+          properties:
+            good:
+              type: number
+              format: decimal
+            normal:
+              type: number
+              format: decimal
+            bad:
+              type: number
+              format: decimal
+        calcRunId:
+          type: string
+          format: uuid
+        sealedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    RecomputeAdHocDelta:
+      type: object
+      properties:
+        eclWeightedDeltaIdr:
+          type: number
+          format: decimal
+          description: "recomputed.eclWeightedIdr − stored.eclWeightedIdr"
+        isSealedComparison:
+          type: boolean
+          description: "true jika stored berasal dari sealed calc run"
+
+    RecomputeAdHocResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            instrumenId:
+              type: string
+              format: uuid
+            recomputed:
+              $ref: '#/components/schemas/EclResultSnapshot'
+            stored:
+              $ref: '#/components/schemas/RecomputeAdHocStoredResult'
+              nullable: true
+            delta:
+              $ref: '#/components/schemas/RecomputeAdHocDelta'
+              nullable: true
+        meta:
+          $ref: '#/components/schemas/Meta'
+
+    ECLJobStatusResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          required: [jobId, type, status]
+          properties:
+            jobId:
+              type: string
+            type:
+              type: string
+              enum: [ECL_BULK_COMPUTE]
+            status:
+              type: string
+              enum: [queued, running, completed, completed_with_errors, failed, cancelled]
+            progress:
+              type: integer
+              minimum: 0
+              maximum: 100
+            currentStep:
+              type: string
+              nullable: true
+            startedAt:
+              type: string
+              format: date-time
+              nullable: true
+            estimatedCompletionAt:
+              type: string
+              format: date-time
+              nullable: true
+            result:
+              type: object
+              nullable: true
+              description: Populated saat completed/completed_with_errors
+              properties:
+                calcRunId:
+                  type: string
+                  format: uuid
+                totalScanned:
+                  type: integer
+                totalComputed:
+                  type: integer
+                totalSkippedFvtpl:
+                  type: integer
+                totalPociDeferred:
+                  type: integer
+                totalSkippedDuplicate:
+                  type: integer
+                eclWeightedIdrTotal:
+                  type: number
+                  format: decimal
+                  description: "Aggregate Σ(ecl_weighted_idr). NUMERIC(20,4)."
+                errors:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      instrumenId:
+                        type: string
+                        format: uuid
+                      errorCode:
+                        type: string
+                      errorMessage:
+                        type: string
+            error:
+              type: object
+              nullable: true
+              description: Populated saat failed
+              properties:
+                code:
+                  type: string
+                message:
+                  type: string
+            canCancel:
+              type: boolean
+            createdBy:
+              type: string
+              format: uuid
+        meta:
+          $ref: '#/components/schemas/Meta'
+
+    # -------------------------------------------------------------------------
+    # Shared schemas
+    # -------------------------------------------------------------------------
+
+    Pagination:
+      type: object
+      properties:
+        nextCursor:
+          type: string
+          nullable: true
+        hasMore:
+          type: boolean
+        totalEstimate:
+          type: integer
+        limit:
+          type: integer
+
+    Meta:
+      type: object
+      properties:
+        traceId:
+          type: string
+
+    ErrorEnvelope:
+      type: object
+      properties:
+        error:
+          type: object
+          required: [code, message, traceId]
+          properties:
+            code:
+              type: string
+              enum:
+                - ECL_INSTRUMEN_NOT_FOUND
+                - ECL_INSTRUMEN_NOT_ELIGIBLE
+                - ECL_STAGING_NOT_FOUND
+                - ECL_PARAMETER_INACTIVE
+                - ECL_POCI_FULL_CAEIR_DEFERRED
+                - ECL_BULK_TOO_LARGE
+                - ECL_CALC_RUN_SEALED
+                - ECL_PRIOR_RUN_NOT_FOUND
+                - ECL_PARAM_NOT_FOUND
+                - ECL_BULK_RUNNING
+                - CONFLICT
+                - FORBIDDEN
+                - NOT_FOUND
+                - VALIDATION_FAILED
+                - IDEMPOTENCY_REPLAY
+                - IDEMPOTENCY_MISMATCH
+                - INTERNAL
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  rule:
+                    type: string
+            traceId:
+              type: string
+
+  responses:
+
+    ValidationFailed:
+      description: Validasi gagal (field-level atau cross-field)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error:
+              code: "VALIDATION_FAILED"
+              message: "Field evaluationDate harus berformat ISO 8601 (YYYY-MM-DD)"
+              details:
+                - field: "evaluationDate"
+                  rule: "format:date"
+              traceId: "trace-val-001"
+
+    Forbidden:
+      description: Permission tidak terpenuhi
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error:
+              code: "FORBIDDEN"
+              message: "Permission ecl.compute tidak terpenuhi."
+              details: []
+              traceId: "trace-forbidden-001"
+
+    NotFound:
+      description: Entity tidak ditemukan
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error:
+              code: "ECL_INSTRUMEN_NOT_FOUND"
+              message: "Instrumen tidak ditemukan atau sudah dihapus."
+              details: []
+              traceId: "trace-nf-001"
