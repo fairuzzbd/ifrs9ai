@@ -198,7 +198,7 @@ func TestECL_Underestimation_RegressionGuard(t *testing.T) {
 }
 
 // mockPDServiceDual is a PD service that explicitly sets both FL multiplier fields.
-// Used by F1 tests to verify combined impact_pd × impact_mev_pd behaviour.
+// Used by F1 tests to verify combined impact_pd × impact_mev_pd behavior.
 type mockPDServiceDual struct {
 	pdBase    decimal.Decimal
 	impactPD  decimal.Decimal

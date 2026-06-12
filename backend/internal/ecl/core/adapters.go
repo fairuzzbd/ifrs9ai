@@ -167,9 +167,9 @@ func joinStrings(ss []string, sep string) string { //nolint:unparam // sep is a 
 // AllowDefaultFallback flag enables explicit fallback for seeded/test environments only,
 // with a log warning and the WarnBobotDefaultFallbackUsed code to callers.
 type DBBobotRepo struct {
-	db                  *sql.DB
-	AllowDefaultFallback bool   // if true, returns default bobot when 0 rows found (with warning)
-	logger              *slog.Logger
+	db                   *sql.DB
+	AllowDefaultFallback bool // if true, returns default bobot when 0 rows found (with warning)
+	logger               *slog.Logger
 }
 
 // NewDBBobotRepo creates a DBBobotRepo. Panics if db is nil.

@@ -742,10 +742,10 @@ func (o *ECLOrchestrator) GetRollForward(ctx context.Context, req RollForwardReq
 	}
 
 	return &RollForwardReport{
-		CalcRunID:         req.CalcRunID,
-		PriorCalcRunID:    req.PriorCalcRunID,
-		PortofolioID:      req.PortofolioID,
-		OpeningECLIDR:     opening,
+		CalcRunID:      req.CalcRunID,
+		PriorCalcRunID: req.PriorCalcRunID,
+		PortofolioID:   req.PortofolioID,
+		OpeningECLIDR:  opening,
 		// F5: nil components — transfer decomposition deferred to Phase 5
 		NewOriginationsIDR:     nil,
 		DerecognitionsIDR:      nil,
@@ -753,10 +753,10 @@ func (o *ECLOrchestrator) GetRollForward(ctx context.Context, req RollForwardReq
 		TransfersToStage3IDR:   nil,
 		TransfersFromStage2IDR: nil,
 		TransfersFromStage3IDR: nil,
-		RemeasurementsIDR: delta,
-		ClosingECLIDR:     closing,
-		ReconcileCheck:    reconcile,
-		Status:            RollForwardStatusPartialPhase5Defer,
+		RemeasurementsIDR:      delta,
+		ClosingECLIDR:          closing,
+		ReconcileCheck:         reconcile,
+		Status:                 RollForwardStatusPartialPhase5Defer,
 	}, nil
 }
 
