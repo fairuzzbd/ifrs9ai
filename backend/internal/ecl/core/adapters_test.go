@@ -5,6 +5,7 @@ package core
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
@@ -242,7 +243,9 @@ func TestDBBobotRepo_GetActiveBobot_Found(t *testing.T) {
 	}
 }
 
-func TestDBBobotRepo_GetActiveBobot_FallbackOnNoRows(t *testing.T) {
+// TestDBBobotRepo_GetActiveBobot_ErrorOnIncompleteRows verifies F6 fix:
+// incomplete rows (< 3) without AllowDefaultFallback returns ECL_PARAM_NOT_FOUND error.
+func TestDBBobotRepo_GetActiveBobot_ErrorOnIncompleteRows(t *testing.T) {
 	t.Parallel()
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -250,7 +253,7 @@ func TestDBBobotRepo_GetActiveBobot_FallbackOnNoRows(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	// Only 2 rows returned (incomplete set) → fallback to defaults.
+	// Only 2 rows returned (incomplete set) → error (F6 fix).
 	cols := []string{"skenario", "bobot"}
 	mock.ExpectQuery(`SELECT skenario, bobot`).
 		WithArgs("JUNI-2026").
@@ -259,9 +262,40 @@ func TestDBBobotRepo_GetActiveBobot_FallbackOnNoRows(t *testing.T) {
 			AddRow("BAD", "0.3000"))
 
 	repo := NewDBBobotRepo(db)
+	_, err = repo.GetActiveBobot(context.Background(), "JUNI-2026")
+	if err == nil {
+		t.Fatal("F6 fix: GetActiveBobot with incomplete rows (2/3) should return error, got nil")
+	}
+	// Verify it's the expected ECL_PARAM_NOT_FOUND code.
+	// Error may be wrapped, so use errors.As.
+	var ce *coreError
+	if !errors.As(err, &ce) {
+		t.Errorf("F6 fix: expected *coreError (possibly wrapped), got %T: %v", err, err)
+	} else if ce.Code() != CodeECLParamNotFound {
+		t.Errorf("F6 fix: expected code %s, got %s", CodeECLParamNotFound, ce.Code())
+	}
+}
+
+// TestDBBobotRepo_GetActiveBobot_AllowFallbackOnNoRows verifies explicit fallback
+// works when AllowDefaultFallback=true (seed/test environments).
+func TestDBBobotRepo_GetActiveBobot_AllowFallbackOnNoRows(t *testing.T) {
+	t.Parallel()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	cols := []string{"skenario", "bobot"}
+	mock.ExpectQuery(`SELECT skenario, bobot`).
+		WithArgs("JUNI-2026").
+		WillReturnRows(sqlmock.NewRows(cols)) // empty rows
+
+	repo := NewDBBobotRepo(db)
+	repo.AllowDefaultFallback = true // explicit test/seed environment flag
 	bobot, err := repo.GetActiveBobot(context.Background(), "JUNI-2026")
 	if err != nil {
-		t.Fatalf("GetActiveBobot fallback: %v", err)
+		t.Fatalf("GetActiveBobot allowed fallback: unexpected error: %v", err)
 	}
 	// Must fall back to DEC-010 defaults.
 	if !bobot.Good.Equal(decimal.NewFromFloat(0.25)) {
@@ -272,7 +306,9 @@ func TestDBBobotRepo_GetActiveBobot_FallbackOnNoRows(t *testing.T) {
 	}
 }
 
-func TestDBBobotRepo_GetActiveBobot_FallbackOnDBError(t *testing.T) {
+// TestDBBobotRepo_GetActiveBobot_ErrorOnDBError verifies F6 fix:
+// DB error now returns error (not silent fallback).
+func TestDBBobotRepo_GetActiveBobot_ErrorOnDBError(t *testing.T) {
 	t.Parallel()
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -280,19 +316,15 @@ func TestDBBobotRepo_GetActiveBobot_FallbackOnDBError(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	// DB error → fallback to defaults (non-fatal for bobot lookup).
+	// DB error → error (F6 fix: not silent fallback).
 	mock.ExpectQuery(`SELECT skenario, bobot`).
 		WithArgs("JUNI-2026").
 		WillReturnError(sql.ErrConnDone)
 
 	repo := NewDBBobotRepo(db)
-	bobot, err := repo.GetActiveBobot(context.Background(), "JUNI-2026")
-	if err != nil {
-		t.Fatalf("GetActiveBobot DB error: expected nil error (fallback), got %v", err)
-	}
-	// Must fall back to DEC-010 defaults.
-	if !bobot.Good.Equal(decimal.NewFromFloat(0.25)) {
-		t.Errorf("Good DB error fallback: want 0.25, got %s", bobot.Good)
+	_, err = repo.GetActiveBobot(context.Background(), "JUNI-2026")
+	if err == nil {
+		t.Fatal("F6 fix: DB error should propagate as error, not silently fallback")
 	}
 }
 

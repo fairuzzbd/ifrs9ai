@@ -167,9 +167,24 @@ func TestHandler_ComputeSingle_POCI_200_NullECL(t *testing.T) {
 	if data["routingPath"] != "POCI_DEFERRED" {
 		t.Errorf("routingPath: want POCI_DEFERRED, got %v", data["routingPath"])
 	}
-	// POCI: eclWeightedIdr key should be absent (nil/omitted).
-	if _, hasKey := data["eclWeightedIdr"]; hasKey {
-		t.Errorf("POCI: eclWeightedIdr should be absent from response (nil), got %v", data["eclWeightedIdr"])
+	// F2 fix: POCI now computes via STANDARD path — eclWeightedIdr must be present and non-null.
+	eclVal, hasKey := data["eclWeightedIdr"]
+	if !hasKey {
+		t.Errorf("POCI: eclWeightedIdr must be present in response (F2 fix: computed via STANDARD)")
+	} else if eclVal == nil {
+		t.Errorf("POCI: eclWeightedIdr must be non-nil (F2 fix: ECL computed, credit-adjusted EIR deferred)")
+	}
+	// POCI warning must be present.
+	warnings, _ := data["warnings"].([]interface{})
+	foundWarn := false
+	for _, w := range warnings {
+		if w == WarnPOCIRequiresFullCAEIR {
+			foundWarn = true
+			break
+		}
+	}
+	if !foundWarn {
+		t.Errorf("POCI: expected warning %s in response, got %v", WarnPOCIRequiresFullCAEIR, data["warnings"])
 	}
 }
 

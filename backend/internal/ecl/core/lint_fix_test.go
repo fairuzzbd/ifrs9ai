@@ -71,6 +71,7 @@ func TestGetResultLine_BadDecimal(t *testing.T) {
 		"ecl_weighted_idr", "bobot_good", "bobot_normal", "bobot_bad",
 		"net_carrying_idr", "prior_sealed_ecl_idr", "flag_poci", "parameter_snapshot_id",
 		"warnings_json", "sealed_at", "created_at",
+		"formula_version", // F8 fix
 	}
 
 	rows := sqlmock.NewRows(cols).AddRow(
@@ -83,6 +84,7 @@ func TestGetResultLine_BadDecimal(t *testing.T) {
 		nil, "0.2500", "0.5000", "0.2500",
 		nil, nil, false, nil,
 		nil, nil, createdAt,
+		FormulaVersionM7,
 	)
 
 	mock.ExpectQuery(`SELECT id, calc_run_id`).
@@ -115,6 +117,7 @@ func TestGetResultLine_BadJSON(t *testing.T) {
 		"ecl_weighted_idr", "bobot_good", "bobot_normal", "bobot_bad",
 		"net_carrying_idr", "prior_sealed_ecl_idr", "flag_poci", "parameter_snapshot_id",
 		"warnings_json", "sealed_at", "created_at",
+		"formula_version", // F8 fix
 	}
 
 	rows := sqlmock.NewRows(cols).AddRow(
@@ -128,6 +131,7 @@ func TestGetResultLine_BadJSON(t *testing.T) {
 		nil, nil, false, nil,
 		"{not-valid-json}", // bad warnings_json → triggers json.Unmarshal error
 		nil, createdAt,
+		FormulaVersionM7,
 	)
 
 	mock.ExpectQuery(`SELECT id, calc_run_id`).

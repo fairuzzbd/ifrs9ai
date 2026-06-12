@@ -211,8 +211,33 @@ func TestComputeSingle_POCI_PersistTrue_AuditTx(t *testing.T) {
 		},
 	}
 
+	// F2 fix: POCI now computes via STANDARD path, so persist=true generates:
+	// 1. BEGIN tx
+	// 2. INSERT ecl.calc_result_line (32 args: $1-$31 data + $32 actor)
+	// 3. INSERT aud.audit_log (15 args)
+	// 4. COMMIT
 	mock.ExpectBegin()
-	mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO ecl.calc_result_line").
+		WithArgs(
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+		).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO aud.audit_log").
+		WithArgs(
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(),
+		).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
 	orch := &ECLOrchestrator{
@@ -241,9 +266,20 @@ func TestComputeSingle_POCI_PersistTrue_AuditTx(t *testing.T) {
 	if result.RoutingPath != RoutingPOCIDeferred {
 		t.Errorf("routing: want POCI_DEFERRED, got %s", result.RoutingPath)
 	}
-	// POCI: ECLWeightedIDR = nil (NOT 0).
-	if result.ECLWeightedIDR != nil {
-		t.Errorf("POCI: ECLWeightedIDR must be nil, got %s", result.ECLWeightedIDR)
+	// F2 fix: POCI computes via STANDARD → ECLWeightedIDR is non-nil (computed ECL).
+	if result.ECLWeightedIDR == nil {
+		t.Error("F2 fix: POCI ECLWeightedIDR must be non-nil (computed via STANDARD path)")
+	}
+	// Verify POCI warning is present.
+	found := false
+	for _, w := range result.Warnings {
+		if w == WarnPOCIRequiresFullCAEIR {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("F2 fix: expected warning %s in POCI result, got %v", WarnPOCIRequiresFullCAEIR, result.Warnings)
 	}
 }
 

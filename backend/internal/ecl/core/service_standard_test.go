@@ -177,10 +177,13 @@ type mockPDServiceStage struct {
 }
 
 func (m *mockPDServiceStage) GetPD(_ context.Context, _ uuid.UUID, _ helpers.EclStage, _ helpers.EclScenario, _ string, _ time.Time) (decimal.Decimal, helpers.PDDetail, error) {
+	// ImpactPDMultiplier defaults to 1.0 so combined FL = 1.0 × flMult = flMult.
+	// F1 fix: combined FL = ImpactPDMultiplier × ImpactMevPDMultiplier.
 	return m.pdBase.Mul(m.flMult), helpers.PDDetail{
 		Stage:                 m.stage,
 		PD:                    m.pdBase.Mul(m.flMult),
 		PDBase:                m.pdBase,
+		ImpactPDMultiplier:    decimal.NewFromInt(1),
 		ImpactMevPDMultiplier: m.flMult,
 	}, nil
 }

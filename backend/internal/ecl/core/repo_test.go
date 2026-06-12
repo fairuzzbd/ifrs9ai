@@ -93,6 +93,7 @@ func TestInsertResultLine_OK(t *testing.T) {
 	defer db.Close()
 
 	mock.ExpectBegin()
+	// $1-$32: 30 data cols + formula_version ($31) + actor_id ($32). F8.
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO ecl.calc_result_line")).
 		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
@@ -102,7 +103,7 @@ func TestInsertResultLine_OK(t *testing.T) {
 			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
-			sqlmock.AnyArg(), sqlmock.AnyArg()).
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
@@ -130,6 +131,7 @@ func TestInsertResultLine_POCI_NilECL(t *testing.T) {
 	defer db.Close()
 
 	mock.ExpectBegin()
+	// $1-$32: 30 data cols + formula_version ($31) + actor_id ($32). F8.
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO ecl.calc_result_line")).
 		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
@@ -139,7 +141,7 @@ func TestInsertResultLine_POCI_NilECL(t *testing.T) {
 			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
-			sqlmock.AnyArg(), sqlmock.AnyArg()).
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	repo := NewCalcResultLineRepo(db)
@@ -232,6 +234,7 @@ func TestGetResultLine_Found(t *testing.T) {
 		"ecl_weighted_idr", "bobot_good", "bobot_normal", "bobot_bad",
 		"net_carrying_idr", "prior_sealed_ecl_idr", "flag_poci", "parameter_snapshot_id",
 		"warnings_json", "sealed_at", "created_at",
+		"formula_version", // F8 fix: migration 000030
 	}
 
 	rows := sqlmock.NewRows(cols).AddRow(
@@ -243,6 +246,7 @@ func TestGetResultLine_Found(t *testing.T) {
 		"8200000.0000", "0.2500", "0.5000", "0.2500",
 		nil, nil, false, nil,
 		"[]", nil, createdAt,
+		FormulaVersionM7, // F8 fix
 	)
 
 	mock.ExpectQuery(`SELECT id, calc_run_id`).

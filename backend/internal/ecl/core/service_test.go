@@ -56,18 +56,23 @@ type mockPDService struct {
 
 func (m *mockPDService) GetPD(_ context.Context, _ uuid.UUID, stage helpers.EclStage, scenario helpers.EclScenario, _ string, _ time.Time) (decimal.Decimal, helpers.PDDetail, error) {
 	pd := m.pdBase
-	mult := m.flMult
+	mevMult := m.flMult
+	// ImpactPDMultiplier defaults to 1.0 (neutral) so combined = 1.0 × mevMult = mevMult.
+	// F1 fix: combined FL = ImpactPDMultiplier × ImpactMevPDMultiplier.
+	impactPD := decimal.NewFromInt(1)
 	// Stage 3: PD = 1.0 returned from M2, but M7 will override internally.
 	if stage == helpers.Stage3 {
 		pd = decimal.NewFromInt(1)
-		mult = decimal.Zero
+		mevMult = decimal.Zero
+		impactPD = decimal.Zero
 	}
-	return pd.Mul(mult), helpers.PDDetail{
+	return pd.Mul(mevMult), helpers.PDDetail{
 		Stage:                 stage,
 		Scenario:              scenario,
-		PD:                    pd.Mul(mult),
+		PD:                    pd.Mul(mevMult),
 		PDBase:                pd,
-		ImpactMevPDMultiplier: mult,
+		ImpactPDMultiplier:    impactPD,
+		ImpactMevPDMultiplier: mevMult,
 	}, nil
 }
 
@@ -228,8 +233,10 @@ func TestComputeSingle_FVTPL_SkipNoRow(t *testing.T) {
 	}
 }
 
-// TestComputeSingle_POCI_NilECL verifies POCI routing returns ECL=nil (not 0).
-func TestComputeSingle_POCI_NilECL(t *testing.T) {
+// TestComputeSingle_POCI_ComputesViaStandardPath_WithWarning verifies F2 fix:
+// POCI instruments now compute via STANDARD path and return ECL > 0 with warning.
+// Prior behavior (ECLWeightedIDR = nil, no compute) was non-compliant with scope spec.
+func TestComputeSingle_POCI_ComputesViaStandardPath_WithWarning(t *testing.T) {
 	t.Parallel()
 
 	instrID := uuid.New()
@@ -259,17 +266,18 @@ func TestComputeSingle_POCI_NilECL(t *testing.T) {
 		t.Fatalf("POCI compute: unexpected error: %v", err)
 	}
 
+	// F2 fix: routing_path = POCI_DEFERRED (audit column), but computed via STANDARD.
 	if result.RoutingPath != RoutingPOCIDeferred {
 		t.Errorf("routing: want %s, got %s", RoutingPOCIDeferred, result.RoutingPath)
 	}
-	// POCI: ECLWeightedIDR MUST be nil (not 0 — different semantics).
-	if result.ECLWeightedIDR != nil {
-		t.Errorf("POCI: ECLWeightedIDR must be nil, got %s", result.ECLWeightedIDR)
+	// F2 fix: ECLWeightedIDR must be non-nil (computed via STANDARD; credit-adjusted EIR deferred).
+	if result.ECLWeightedIDR == nil {
+		t.Error("POCI F2 fix: ECLWeightedIDR must be non-nil (ECL is computed)")
 	}
 	if !result.FlagPOCI {
 		t.Error("POCI: FlagPOCI must be true")
 	}
-	// Verify POCI warning.
+	// Verify POCI warning code is present.
 	found := false
 	for _, w := range result.Warnings {
 		if w == WarnPOCIRequiresFullCAEIR {

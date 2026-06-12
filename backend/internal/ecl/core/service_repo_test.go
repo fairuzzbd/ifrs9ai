@@ -79,6 +79,7 @@ func TestOrchestrator_GetResult_Found(t *testing.T) {
 		"8200000.0000", "0.2500", "0.5000", "0.2500",
 		nil, nil, false, nil,
 		"[]", nil, createdAt,
+		FormulaVersionM7, // F8 fix: formula_version column
 	)
 
 	mock.ExpectQuery(`SELECT id, calc_run_id`).
@@ -332,5 +333,6 @@ func resultLineRowCols() []string {
 		"ecl_weighted_idr", "bobot_good", "bobot_normal", "bobot_bad",
 		"net_carrying_idr", "prior_sealed_ecl_idr", "flag_poci", "parameter_snapshot_id",
 		"warnings_json", "sealed_at", "created_at",
+		"formula_version", // F8 fix: migration 000030
 	}
 }
