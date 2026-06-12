@@ -228,6 +228,17 @@ func (r *stubAmendmentRepo) ListQueue(_ context.Context, _ listquery.Query, _ st
 	return rows, &response.PaginationMeta{Limit: limit}, nil
 }
 
+// GetByDocumentAndInstrumen implements AmendmentRepoIface (B3 idempotency fix).
+func (r *stubAmendmentRepo) GetByDocumentAndInstrumen(_ context.Context, documentID uuid.UUID, instrumenID uuid.UUID) (*AmendmentProposal, error) {
+	for _, p := range r.proposals {
+		if p.DocumentID != nil && *p.DocumentID == documentID && p.InstrumenID == instrumenID && !p.Status.IsTerminal() {
+			cp := *p
+			return &cp, nil
+		}
+	}
+	return nil, nil
+}
+
 type stubAuditWriter struct{ events []AuditEvent }
 
 func (w *stubAuditWriter) Write(_ context.Context, _ *sql.Tx, evt AuditEvent) error {

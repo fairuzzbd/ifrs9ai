@@ -501,6 +501,11 @@ type AmendmentRepoIface interface {
 	// ListQueue returns paginated proposals for the review queue (P4-M6, story M6-004).
 	// Returns non-terminal proposals enriched with kode_instrumen, abs_diff.
 	ListQueue(ctx context.Context, q listquery.Query, cursor string, limit int) ([]QueueRow, *response.PaginationMeta, error)
+
+	// GetByDocumentAndInstrumen returns the most-recent non-terminal DOCUMENT_UPLOAD
+	// proposal for (documentID, instrumenID).  Used for idempotent detect (B3 fix).
+	// Returns (nil, nil) if no such proposal exists.
+	GetByDocumentAndInstrumen(ctx context.Context, documentID uuid.UUID, instrumenID uuid.UUID) (*AmendmentProposal, error)
 }
 
 // DBAmendmentRepo implements AmendmentRepoIface against ecl.eir_reestimation_log.
@@ -656,6 +661,27 @@ func (r *DBAmendmentRepo) HasActiveProposal(ctx context.Context, instrumenID uui
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// GetByDocumentAndInstrumen returns the most-recent non-terminal DOCUMENT_UPLOAD
+// proposal for (documentID, instrumenID).  Used to implement idempotent detect
+// when migration 000028 partial unique index fires PG error 23505 (B3 fix).
+// Returns (nil, nil) if no such proposal exists.
+func (r *DBAmendmentRepo) GetByDocumentAndInstrumen(ctx context.Context, documentID uuid.UUID, instrumenID uuid.UUID) (*AmendmentProposal, error) {
+	q := `SELECT ` + amendmentCols + `
+		FROM ecl.eir_reestimation_log l
+		WHERE l.document_id = $1
+		  AND l.instrumen_id = $2
+		  AND l.workflow_status NOT IN ('CANCELLED','REJECTED')
+		  AND l.deleted_at IS NULL
+		ORDER BY l.created_at DESC
+		LIMIT 1`
+	row := r.db.QueryRowContext(ctx, q, documentID, instrumenID)
+	p, err := scanAmendmentRow(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return p, err
 }
 
 // List returns paginated proposals ordered by created_at DESC.
