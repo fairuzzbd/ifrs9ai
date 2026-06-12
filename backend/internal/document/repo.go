@@ -129,6 +129,30 @@ func (r *DBRepository) GetByID(ctx context.Context, id uuid.UUID) (*Document, er
 	return &doc, nil
 }
 
+// GetDocType mengembalikan document_category untuk dokumen yang diberikan.
+// Mengembalikan ("", nil) jika dokumen tidak ditemukan (bukan error).
+// Digunakan oleh ecl/eir.DetectionService untuk validasi tipe dokumen (B2).
+func (r *DBRepository) GetDocType(ctx context.Context, id uuid.UUID) (string, error) {
+	if r.db == nil {
+		return "", fmt.Errorf("document repo: database tidak tersedia")
+	}
+	var category sql.NullString
+	err := r.db.QueryRowContext(ctx,
+		`SELECT document_category FROM doc.document WHERE id = $1 AND deleted_at IS NULL`,
+		id,
+	).Scan(&category)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("document repo: get doc type: %w", err)
+	}
+	if !category.Valid {
+		return "", nil
+	}
+	return category.String, nil
+}
+
 // SoftDelete soft-deletes dokumen.
 func (r *DBRepository) SoftDelete(ctx context.Context, tx *sql.Tx, id uuid.UUID, deletedBy uuid.UUID) error {
 	execCtx := func(query string, args ...any) error {

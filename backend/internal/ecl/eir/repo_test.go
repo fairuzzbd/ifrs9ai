@@ -886,6 +886,9 @@ func TestDBAmendmentRepo_GetByID_Found_PendingReview(t *testing.T) {
 			now, makerID, now, makerID,
 			"TUGURE",
 			int64(1),
+			// M6 columns
+			nil, nil, nil, // cancelled_at, cancel_reason, cancelled_by
+			nil, nil, nil, // trigger_source, drift_report_id, document_id
 		))
 
 	repo := NewDBAmendmentRepo(db)
@@ -935,6 +938,9 @@ func TestDBAmendmentRepo_GetByID_Found_Approved_WithEIRBaru(t *testing.T) {
 			&now, nil, nil,
 			now, makerID, now, approverID,
 			"TUGURE", int64(2),
+			// M6 columns
+			nil, nil, nil, // cancelled_at, cancel_reason, cancelled_by
+			nil, nil, nil, // trigger_source, drift_report_id, document_id
 		))
 
 	repo := NewDBAmendmentRepo(db)
@@ -1113,6 +1119,9 @@ func amendmentSelectCols() []string {
 		"dokumen_pendukung_id",
 		"created_at", "created_by", "updated_at", "updated_by",
 		"tenant_id", "row_version",
+		// M6 additions (migration 000027)
+		"cancelled_at", "cancel_reason", "cancelled_by",
+		"trigger_source", "drift_report_id", "document_id",
 	}
 }
 

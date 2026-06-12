@@ -1,15 +1,16 @@
 // Package eir — repository layer for ecl.eir_amortization_schedule,
-// ecl.eir_reestimation_log, and mst.instrumen EIR fields.
+// ecl.eir_reestimation_log, mst.instrumen EIR fields, and sys.drift_report (P4-M6).
 //
 // Design principles:
 //   - All queries use parameterized SQL (no string concat, no SQLi risk).
 //   - NUMERIC columns read via ::text cast to avoid float64 (DEC-016).
-//   - No hard-delete in ecl.* schema (DEC-018).
+//   - No hard-delete in ecl.* or sys.drift_report (DEC-018).
 //   - Schedule rows: INSERT-only; amounts are immutable after insert.
 //     Only recomputed_from_seq may be updated (DB trigger enforces, service guards too).
 //
 // References:
-//   - db/migrations/000026_eir_schema_fix.up.sql (schema details)
+//   - db/migrations/000026_eir_schema_fix.up.sql (M5 schema details)
+//   - db/migrations/000027_drift_report_and_amendment_lifecycle.up.sql (M6 additions)
 //   - DEC-016, DEC-018, formulas.md §EIR Newton-Raphson
 package eir
 
@@ -491,6 +492,20 @@ type AmendmentRepoIface interface {
 
 	// List returns paginated proposals.
 	List(ctx context.Context, q listquery.Query, cursor string, limit int, actorID uuid.UUID, isAdmin bool) ([]AmendmentProposal, *response.PaginationMeta, error)
+
+	// Cancel transitions proposal to CANCELLED within tx (P4-M6, story M6-005).
+	// Sets cancelled_at, cancel_reason, cancelled_by in ecl.eir_reestimation_log.
+	// DB CHECK: cancel_reason length >= 20.
+	Cancel(ctx context.Context, tx *sql.Tx, proposalID uuid.UUID, cancelReason string, cancelledBy uuid.UUID) error
+
+	// ListQueue returns paginated proposals for the review queue (P4-M6, story M6-004).
+	// Returns non-terminal proposals enriched with kode_instrumen, abs_diff.
+	ListQueue(ctx context.Context, q listquery.Query, cursor string, limit int) ([]QueueRow, *response.PaginationMeta, error)
+
+	// GetByDocumentAndInstrumen returns the most-recent non-terminal DOCUMENT_UPLOAD
+	// proposal for (documentID, instrumenID).  Used for idempotent detect (B3 fix).
+	// Returns (nil, nil) if no such proposal exists.
+	GetByDocumentAndInstrumen(ctx context.Context, documentID uuid.UUID, instrumenID uuid.UUID) (*AmendmentProposal, error)
 }
 
 // DBAmendmentRepo implements AmendmentRepoIface against ecl.eir_reestimation_log.
@@ -607,6 +622,8 @@ func (r *DBAmendmentRepo) Update(ctx context.Context, tx *sql.Tx, p *AmendmentPr
 
 // amendmentCols is the SELECT column list matching scanAmendmentRow.
 // Maps DB columns to AmendmentProposal fields.
+// M6 additions (migration 000027): cancelled_at, cancel_reason, cancelled_by,
+// trigger_source, drift_report_id, document_id, abs_diff.
 const amendmentCols = `
 	l.id, l.instrumen_id, l.tanggal_re_estimation,
 	l.modifikasi_terms_json, l.workflow_status,
@@ -616,7 +633,9 @@ const amendmentCols = `
 	l.reviewer_signature_hash, l.approver_signature_hash,
 	l.approved_at, l.rejected_at,
 	l.dokumen_pendukung_id,
-	l.created_at, l.created_by, l.updated_at, l.updated_by, l.tenant_id, l.row_version`
+	l.created_at, l.created_by, l.updated_at, l.updated_by, l.tenant_id, l.row_version,
+	l.cancelled_at, l.cancel_reason, l.cancelled_by,
+	l.trigger_source, l.drift_report_id, l.document_id`
 
 // GetByID fetches a proposal by ID.
 func (r *DBAmendmentRepo) GetByID(ctx context.Context, proposalID uuid.UUID) (*AmendmentProposal, error) {
@@ -642,6 +661,27 @@ func (r *DBAmendmentRepo) HasActiveProposal(ctx context.Context, instrumenID uui
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// GetByDocumentAndInstrumen returns the most-recent non-terminal DOCUMENT_UPLOAD
+// proposal for (documentID, instrumenID).  Used to implement idempotent detect
+// when migration 000028 partial unique index fires PG error 23505 (B3 fix).
+// Returns (nil, nil) if no such proposal exists.
+func (r *DBAmendmentRepo) GetByDocumentAndInstrumen(ctx context.Context, documentID uuid.UUID, instrumenID uuid.UUID) (*AmendmentProposal, error) {
+	q := `SELECT ` + amendmentCols + `
+		FROM ecl.eir_reestimation_log l
+		WHERE l.document_id = $1
+		  AND l.instrumen_id = $2
+		  AND l.workflow_status NOT IN ('CANCELLED','REJECTED')
+		  AND l.deleted_at IS NULL
+		ORDER BY l.created_at DESC
+		LIMIT 1`
+	row := r.db.QueryRowContext(ctx, q, documentID, instrumenID)
+	p, err := scanAmendmentRow(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return p, err
 }
 
 // List returns paginated proposals ordered by created_at DESC.
@@ -718,7 +758,7 @@ func (r *DBAmendmentRepo) List(ctx context.Context, q listquery.Query, cursor st
 }
 
 // scanAmendmentRow scans one ecl.eir_reestimation_log row into AmendmentProposal.
-// Column order must match amendmentCols exactly.
+// Column order must match amendmentCols exactly, including M6 additions.
 func scanAmendmentRow(s scanner) (*AmendmentProposal, error) {
 	var p AmendmentProposal
 	var (
@@ -732,6 +772,13 @@ func scanAmendmentRow(s scanner) (*AmendmentProposal, error) {
 		makerIDVal                                     uuid.UUID
 		statusStr                                      string
 		tanggal                                        time.Time
+		// M6 additions
+		cancelledAt   *time.Time
+		cancelReason  *string
+		cancelledBy   *uuid.UUID
+		triggerSource sql.NullString
+		driftReportID *uuid.UUID
+		documentID    *uuid.UUID
 	)
 	if err := s.Scan(
 		&p.ID, &p.InstrumenID, &tanggal,
@@ -743,6 +790,8 @@ func scanAmendmentRow(s scanner) (*AmendmentProposal, error) {
 		&approvedAt, &rejectedAt,
 		&dokumenID,
 		&p.CreatedAt, &p.CreatedBy, &p.UpdatedAt, &p.UpdatedBy, &p.TenantID, &p.RowVersion,
+		&cancelledAt, &cancelReason, &cancelledBy,
+		&triggerSource, &driftReportID, &documentID,
 	); err != nil {
 		return nil, err
 	}
@@ -762,6 +811,17 @@ func scanAmendmentRow(s scanner) (*AmendmentProposal, error) {
 	p.ApprovedAt = approvedAt
 	p.RejectedAt = rejectedAt
 	p.RevisedCashflowJSON = cashflowJSON
+	// M6
+	p.CancelledAt = cancelledAt
+	p.CancelReason = cancelReason
+	p.CancelledBy = cancelledBy
+	p.DriftReportID = driftReportID
+	p.DocumentID = documentID
+	if triggerSource.Valid {
+		p.TriggerSource = AmendTriggerSource(triggerSource.String)
+	} else {
+		p.TriggerSource = AmendTriggerManual
+	}
 
 	var err error
 	if p.EIRLama, err = func() (*decimal.Decimal, error) {
@@ -789,4 +849,402 @@ func scanAmendmentRow(s scanner) (*AmendmentProposal, error) {
 		}
 	}
 	return &p, nil
+}
+
+// Cancel transitions a proposal to CANCELLED within tx.
+// Sets cancelled_at=now(), cancel_reason, cancelled_by, workflow_status='CANCELLED'.
+// caller must verify ownership and state machine rules before calling.
+func (r *DBAmendmentRepo) Cancel(ctx context.Context, tx *sql.Tx, proposalID uuid.UUID, cancelReason string, cancelledBy uuid.UUID) error {
+	q := `UPDATE ecl.eir_reestimation_log
+		SET workflow_status = 'CANCELLED',
+		    cancelled_at    = now(),
+		    cancel_reason   = $1,
+		    cancelled_by    = $2,
+		    updated_by      = $2,
+		    updated_at      = now(),
+		    row_version     = row_version + 1
+		WHERE id = $3 AND deleted_at IS NULL`
+	_, err := tx.ExecContext(ctx, q, cancelReason, cancelledBy, proposalID)
+	return err
+}
+
+// ListQueue returns non-terminal proposals for the review queue,
+// enriched with kode_instrumen from mst.instrumen join.
+func (r *DBAmendmentRepo) ListQueue(ctx context.Context, q listquery.Query, cursor string, limit int) ([]QueueRow, *response.PaginationMeta, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	whereClause, args, orderBy := q.WithAllowed(AllowedColsQueue).ToSQL("l")
+	argIdx := len(args) + 1
+
+	baseWhere := "l.workflow_status NOT IN ('APPROVED','REJECTED','CANCELLED') AND l.deleted_at IS NULL"
+
+	if cursor != "" {
+		if decoded, decErr := decodeCursorStr(cursor); decErr == nil && decoded != "" {
+			baseWhere += fmt.Sprintf(" AND l.created_at < $%d::TIMESTAMPTZ", argIdx)
+			args = append(args, decoded)
+			argIdx++
+		}
+	}
+	_ = argIdx
+
+	fullWhere := baseWhere
+	if whereClause != "" {
+		fullWhere = baseWhere + " AND " + whereClause
+	}
+	if orderBy == "" {
+		orderBy = "l.created_at DESC"
+	}
+
+	//nolint:gosec // fullWhere and orderBy are validated column names from AllowedColsQueue whitelist
+	query := fmt.Sprintf(`SELECT
+		l.id, l.instrumen_id, i.kode_instrumen,
+		l.workflow_status, l.trigger_source,
+		l.eir_sebelum::text,
+		l.maker_id, l.reviewer_id,
+		l.tanggal_re_estimation,
+		l.created_at,
+		l.drift_report_id,
+		l.document_id
+	FROM ecl.eir_reestimation_log l
+	JOIN mst.instrumen i ON i.id = l.instrumen_id
+	WHERE %s ORDER BY %s LIMIT %d`, fullWhere, orderBy, limit+1)
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var result []QueueRow
+	for rows.Next() {
+		var qr QueueRow
+		var (
+			statusStr     string
+			triggerSrc    sql.NullString
+			eirSebelumStr sql.NullString
+			driftID       *uuid.UUID
+			docID         *uuid.UUID
+			makerID       *uuid.UUID
+			reviewerID    *uuid.UUID
+		)
+		if err := rows.Scan(
+			&qr.AmendmentID, &qr.InstrumenID, &qr.KodeInstrumen,
+			&statusStr, &triggerSrc,
+			&eirSebelumStr,
+			&makerID, &reviewerID,
+			&qr.TanggalAmandemen,
+			&qr.CreatedAt,
+			&driftID,
+			&docID,
+		); err != nil {
+			return nil, nil, err
+		}
+		qr.Status = AmendmentStatus(statusStr)
+		qr.MakerID = makerID
+		qr.ReviewerID = reviewerID
+		qr.DriftReportID = driftID
+		qr.DocumentID = docID
+		if triggerSrc.Valid {
+			qr.TriggerSource = AmendTriggerSource(triggerSrc.String)
+		} else {
+			qr.TriggerSource = AmendTriggerManual
+		}
+		if eirSebelumStr.Valid && eirSebelumStr.String != "" {
+			v, e := decimal.NewFromString(eirSebelumStr.String)
+			if e == nil {
+				qr.EIRLama = &v
+			}
+		}
+		result = append(result, qr)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	hasMore := len(result) > limit
+	if hasMore {
+		result = result[:limit]
+	}
+
+	var nextCursor *string
+	if hasMore && len(result) > 0 {
+		last := result[len(result)-1]
+		c := encodeCursorStr(last.CreatedAt.UTC().Format(time.RFC3339Nano))
+		nextCursor = &c
+	}
+
+	return result, &response.PaginationMeta{
+		NextCursor: nextCursor,
+		HasMore:    hasMore,
+		Limit:      limit,
+	}, nil
+}
+
+// ─── DriftReportRepoIface ─────────────────────────────────────────────────────
+
+// DriftReportRepoIface defines CRUD for sys.drift_report.
+type DriftReportRepoIface interface {
+	// Create inserts a new drift report row (status=IN_PROGRESS) within tx.
+	Create(ctx context.Context, tx *sql.Tx, report *DriftReport) error
+
+	// Update updates status, counts, and completion timestamp within tx.
+	Update(ctx context.Context, tx *sql.Tx, report *DriftReport) error
+
+	// GetByID fetches a drift report by ID.
+	GetByID(ctx context.Context, reportID uuid.UUID) (*DriftReport, error)
+
+	// GetInProgressReport returns the first IN_PROGRESS report, or nil if none.
+	// Used to guard against concurrent drift generation.
+	GetInProgressReport(ctx context.Context) (*DriftReport, error)
+
+	// List returns paginated drift reports for the list endpoint.
+	List(ctx context.Context, q listquery.Query, cursor string, limit int) ([]DriftReport, *response.PaginationMeta, error)
+
+	// LoadThresholds reads drift_flag_threshold and drift_high_threshold from sys.parameter.
+	// Returns (flagThreshold, highThreshold, error).
+	LoadThresholds(ctx context.Context) (decimal.Decimal, decimal.Decimal, error)
+}
+
+// DBDriftReportRepo implements DriftReportRepoIface against sys.drift_report.
+type DBDriftReportRepo struct {
+	db *sql.DB
+}
+
+// NewDBDriftReportRepo creates a DBDriftReportRepo.
+func NewDBDriftReportRepo(db *sql.DB) *DBDriftReportRepo {
+	return &DBDriftReportRepo{db: db}
+}
+
+const driftReportCols = `
+	r.id, r.tanggal_run, r.trigger_source, r.triggered_by,
+	r.asynq_job_id, r.status,
+	r.started_at, r.completed_at,
+	r.total_instrumen, r.drift_low_count, r.drift_high_count,
+	r.missing_schedule_count, r.error_count, r.error_summary,
+	r.drift_flag_threshold::text, r.drift_high_threshold::text,
+	r.created_at, r.created_by, r.updated_at, r.updated_by, r.tenant_id, r.row_version`
+
+func (r *DBDriftReportRepo) Create(ctx context.Context, tx *sql.Tx, report *DriftReport) error {
+	q := `INSERT INTO sys.drift_report
+		(id, tanggal_run, trigger_source, triggered_by,
+		 asynq_job_id, status, started_at,
+		 drift_flag_threshold, drift_high_threshold,
+		 total_instrumen, drift_low_count, drift_high_count,
+		 missing_schedule_count, error_count,
+		 created_by, updated_by, tenant_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,
+		        $8::NUMERIC(10,8),$9::NUMERIC(10,8),
+		        0,0,0,0,0,$10,$10,$11)`
+
+	var triggeredBy interface{}
+	if report.TriggeredBy != nil {
+		triggeredBy = *report.TriggeredBy
+	}
+	_, err := tx.ExecContext(ctx, q,
+		report.ID, report.TanggalRun,
+		string(report.TriggerSource), triggeredBy,
+		report.AsynqJobID, string(report.Status), report.StartedAt,
+		report.DriftFlagThreshold.StringFixed(8),
+		report.DriftHighThreshold.StringFixed(8),
+		report.CreatedBy, report.TenantID,
+	)
+	return err
+}
+
+func (r *DBDriftReportRepo) Update(ctx context.Context, tx *sql.Tx, report *DriftReport) error {
+	q := `UPDATE sys.drift_report
+		SET status                = $1,
+		    completed_at          = $2,
+		    total_instrumen        = $3,
+		    drift_low_count        = $4,
+		    drift_high_count       = $5,
+		    missing_schedule_count = $6,
+		    error_count            = $7,
+		    error_summary          = $8,
+		    updated_by             = $9,
+		    updated_at             = now(),
+		    row_version            = row_version + 1
+		WHERE id = $10`
+	_, err := tx.ExecContext(ctx, q,
+		string(report.Status), report.CompletedAt,
+		report.TotalInstrumen, report.DriftLowCount, report.DriftHighCount,
+		report.MissingScheduleCount, report.ErrorCount, report.ErrorSummary,
+		report.UpdatedBy, report.ID,
+	)
+	return err
+}
+
+func (r *DBDriftReportRepo) GetByID(ctx context.Context, reportID uuid.UUID) (*DriftReport, error) {
+	q := `SELECT ` + driftReportCols + ` FROM sys.drift_report r WHERE r.id = $1`
+	row := r.db.QueryRowContext(ctx, q, reportID)
+	dr, err := scanDriftReport(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return dr, err
+}
+
+func (r *DBDriftReportRepo) GetInProgressReport(ctx context.Context) (*DriftReport, error) {
+	q := `SELECT ` + driftReportCols + ` FROM sys.drift_report r WHERE r.status = 'IN_PROGRESS' LIMIT 1`
+	row := r.db.QueryRowContext(ctx, q)
+	dr, err := scanDriftReport(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return dr, err
+}
+
+func (r *DBDriftReportRepo) List(ctx context.Context, q listquery.Query, cursor string, limit int) ([]DriftReport, *response.PaginationMeta, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	whereClause, args, orderBy := q.WithAllowed(AllowedColsDriftReport).ToSQL("r")
+	argIdx := len(args) + 1
+
+	baseWhere := "1=1"
+	if cursor != "" {
+		if decoded, decErr := decodeCursorStr(cursor); decErr == nil && decoded != "" {
+			baseWhere += fmt.Sprintf(" AND r.created_at < $%d::TIMESTAMPTZ", argIdx)
+			args = append(args, decoded)
+			argIdx++
+		}
+	}
+	_ = argIdx
+
+	fullWhere := baseWhere
+	if whereClause != "" {
+		fullWhere = baseWhere + " AND " + whereClause
+	}
+	if orderBy == "" {
+		orderBy = "r.tanggal_run DESC, r.created_at DESC"
+	}
+
+	//nolint:gosec // fullWhere validated via AllowedColsDriftReport whitelist
+	query := fmt.Sprintf(`SELECT `+driftReportCols+`
+		FROM sys.drift_report r
+		WHERE %s ORDER BY %s LIMIT %d`, fullWhere, orderBy, limit+1)
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var result []DriftReport
+	for rows.Next() {
+		dr, err := scanDriftReport(rows)
+		if err != nil {
+			return nil, nil, err
+		}
+		result = append(result, *dr)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	hasMore := len(result) > limit
+	if hasMore {
+		result = result[:limit]
+	}
+
+	var nextCursor *string
+	if hasMore && len(result) > 0 {
+		last := result[len(result)-1]
+		c := encodeCursorStr(last.CreatedAt.UTC().Format(time.RFC3339Nano))
+		nextCursor = &c
+	}
+
+	return result, &response.PaginationMeta{
+		NextCursor: nextCursor,
+		HasMore:    hasMore,
+		Limit:      limit,
+	}, nil
+}
+
+// LoadThresholds reads drift thresholds from sys.parameter.
+// Keys: 'drift_low_threshold', 'drift_high_threshold'.
+// Both must exist and be valid decimals, else returns ErrEIRDriftThresholdInvalid.
+func (r *DBDriftReportRepo) LoadThresholds(ctx context.Context) (decimal.Decimal, decimal.Decimal, error) {
+	q := `SELECT key, value FROM sys.parameter
+		WHERE key IN ('drift_low_threshold','drift_high_threshold')
+		  AND effective_to IS NULL`
+
+	rows, err := r.db.QueryContext(ctx, q)
+	if err != nil {
+		return decimal.Zero, decimal.Zero, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	params := make(map[string]string)
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return decimal.Zero, decimal.Zero, err
+		}
+		params[k] = v
+	}
+
+	flagStr, ok1 := params["drift_low_threshold"]
+	highStr, ok2 := params["drift_high_threshold"]
+	if !ok1 || !ok2 {
+		return decimal.Zero, decimal.Zero,
+			ErrEIRDriftThresholdInvalid("sys.parameter keys drift_low_threshold or drift_high_threshold missing")
+	}
+
+	flag, err := decimal.NewFromString(flagStr)
+	if err != nil || flag.IsZero() || flag.IsNegative() {
+		return decimal.Zero, decimal.Zero,
+			ErrEIRDriftThresholdInvalid("drift_low_threshold invalid: " + flagStr)
+	}
+
+	high, err := decimal.NewFromString(highStr)
+	if err != nil || high.IsZero() || high.IsNegative() || high.LessThanOrEqual(flag) {
+		return decimal.Zero, decimal.Zero,
+			ErrEIRDriftThresholdInvalid("drift_high_threshold invalid or <= low_threshold: " + highStr)
+	}
+
+	return flag, high, nil
+}
+
+// scanDriftReport scans one sys.drift_report row.
+// NUMERIC columns read via ::text (DEC-016).
+func scanDriftReport(s scanner) (*DriftReport, error) {
+	var dr DriftReport
+	var (
+		triggerSrc                   string
+		asynqJobID                   *string
+		startedAt, completedAt       *time.Time
+		triggeredBy                  *uuid.UUID
+		errorSummary                 *string
+		flagThreshStr, highThreshStr string
+	)
+	if err := s.Scan(
+		&dr.ID, &dr.TanggalRun, &triggerSrc, &triggeredBy,
+		&asynqJobID, &dr.Status,
+		&startedAt, &completedAt,
+		&dr.TotalInstrumen, &dr.DriftLowCount, &dr.DriftHighCount,
+		&dr.MissingScheduleCount, &dr.ErrorCount, &errorSummary,
+		&flagThreshStr, &highThreshStr,
+		&dr.CreatedAt, &dr.CreatedBy, &dr.UpdatedAt, &dr.UpdatedBy, &dr.TenantID, &dr.RowVersion,
+	); err != nil {
+		return nil, err
+	}
+	dr.TriggerSource = DriftTriggerSource(triggerSrc)
+	dr.TriggeredBy = triggeredBy
+	dr.AsynqJobID = asynqJobID
+	dr.StartedAt = startedAt
+	dr.CompletedAt = completedAt
+	dr.ErrorSummary = errorSummary
+
+	var err error
+	if dr.DriftFlagThreshold, err = decimal.NewFromString(flagThreshStr); err != nil {
+		return nil, fmt.Errorf("drift_flag_threshold: %w", err)
+	}
+	if dr.DriftHighThreshold, err = decimal.NewFromString(highThreshStr); err != nil {
+		return nil, fmt.Errorf("drift_high_threshold: %w", err)
+	}
+	return &dr, nil
 }
