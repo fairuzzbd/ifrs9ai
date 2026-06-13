@@ -1,11 +1,13 @@
 package rollforward
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
 
 	"blips-ifrs9.tugu-re.com/internal/auth"
 	domainerrors "blips-ifrs9.tugu-re.com/internal/common/errors"
@@ -27,17 +29,24 @@ import (
 // Idempotency-Key: required on POST /compute (DEC-021).
 // No float64 in response (DEC-016).
 
-// Handler holds the roll-forward service.
+// Handler holds the roll-forward service and optional Asynq client for async dispatch.
 type Handler struct {
-	svc *Service
+	svc         *Service
+	asynqClient *asynq.Client // nil = sync-only (dev mode or Redis not configured)
 }
 
 // NewHandler creates a Handler. Panics if svc is nil.
-func NewHandler(svc *Service) *Handler {
+// asynqClient may be nil — when nil, all requests are handled synchronously
+// regardless of instrument count (dev/test mode without Redis).
+func NewHandler(svc *Service, asynqClient ...*asynq.Client) *Handler {
 	if svc == nil {
 		panic("rollforward.NewHandler: svc must not be nil")
 	}
-	return &Handler{svc: svc}
+	h := &Handler{svc: svc}
+	if len(asynqClient) > 0 {
+		h.asynqClient = asynqClient[0]
+	}
+	return h
 }
 
 // ─── POST /ecl/roll-forward/compute ─────────────────────────────────────────
@@ -97,6 +106,52 @@ func (h *Handler) ComputeRollForward(c *gin.Context) {
 		return
 	}
 
+	// Async dispatch check (Issue #88, state machine §1):
+	// If estimated instrument count > asyncThreshold (1000) AND asynqClient is wired,
+	// enqueue Asynq task and return 202 with {jobId, statusUrl, streamUrl, count}.
+	// Otherwise: sync compute and return 200 with full report.
+	if h.asynqClient != nil {
+		count, countErr := h.svc.repo.GetInstrumentCount(c.Request.Context(), currentID)
+		if countErr != nil {
+			response.ErrorWithStatus(c, http.StatusInternalServerError,
+				domainerrors.CodeInternal, "Gagal menghitung jumlah instrumen: "+countErr.Error(), nil)
+			return
+		}
+
+		if count > asyncThreshold {
+			payload := TaskPayload{
+				CurrentCalcRunID:    currentID,
+				PriorCalcRunID:      priorID,
+				ActorID:             actorID,
+				TraceID:             c.GetString("X-Trace-Id"),
+				AllowNonSealedPrior: req.AllowNonSealedPrior,
+			}
+			task, taskErr := NewRollForwardTask(payload)
+			if taskErr != nil {
+				response.ErrorWithStatus(c, http.StatusInternalServerError,
+					domainerrors.CodeInternal, "Gagal membuat Asynq task: "+taskErr.Error(), nil)
+				return
+			}
+			info, enqErr := h.asynqClient.EnqueueContext(c.Request.Context(), task)
+			if enqErr != nil {
+				response.ErrorWithStatus(c, http.StatusInternalServerError,
+					domainerrors.CodeInternal, "Gagal mengantrikan task async: "+enqErr.Error(), nil)
+				return
+			}
+			jobID := info.ID
+			c.JSON(http.StatusAccepted, gin.H{
+				"data": AsyncJobResponse{
+					JobID:     jobID,
+					StatusURL: fmt.Sprintf("/api/v1/jobs/%s", jobID),
+					StreamURL: fmt.Sprintf("/api/v1/jobs/%s/stream", jobID),
+					Count:     count,
+				},
+			})
+			return
+		}
+	}
+
+	// Sync path (instrument count ≤ asyncThreshold or no Asynq client).
 	report, err := h.svc.ComputeRollForward(c.Request.Context(), ComputeRequest{
 		CurrentCalcRunID:    currentID,
 		PriorCalcRunID:      priorID,

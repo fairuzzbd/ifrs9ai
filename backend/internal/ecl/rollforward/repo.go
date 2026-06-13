@@ -372,6 +372,23 @@ func (r *Repo) GetPortofolioNama(ctx context.Context, portofolioID uuid.UUID) (s
 	return nama, true, nil
 }
 
+// GetInstrumentCount returns the count of distinct instrumen_id in calc_result_line
+// for a given calc run. Used by the async dispatch threshold check (Issue #88).
+func (r *Repo) GetInstrumentCount(ctx context.Context, calcRunID uuid.UUID) (int, error) {
+	const q = `
+SELECT COUNT(DISTINCT instrumen_id)
+FROM ecl.calc_result_line
+WHERE calc_run_id = $1
+  AND deleted_at IS NULL`
+
+	var n int
+	err := r.db.QueryRowContext(ctx, q, calcRunID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("rollforward.GetInstrumentCount(%s): %w", calcRunID, err)
+	}
+	return n, nil
+}
+
 // GetPortofolioInstruments returns all instrument IDs for a portfolio.
 func (r *Repo) GetPortofolioInstruments(ctx context.Context, portofolioID uuid.UUID) ([]uuid.UUID, error) {
 	const q = `

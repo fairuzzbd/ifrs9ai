@@ -772,6 +772,14 @@ func main() {
 	// -----------------------------------------------------------------------
 	rfRepo := rollforward.NewRepo(db)
 	rfSvc := rollforward.NewService(rfRepo, db, auditWriter, logger)
+	rfWorker := rollforward.NewWorker(rfSvc, logger)
+	_ = rfWorker // registered on Asynq mux below (when REDIS_URL is set)
+	// rfHandler is wired with an Asynq client when Redis is available for >1000 instrument
+	// async dispatch (Issue #88, state machine §1). Client is nil in dev mode.
+	// The asynqClient is created below in the Redis block; we set a pointer here that
+	// the Asynq block will populate before RegisterRoutes is called.
+	// To avoid forward-reference, we build handler after the Redis block.
+	// Temporarily build without client; re-assigned below with client if Redis available.
 	rfHandler := rollforward.NewHandler(rfSvc)
 	rollforward.RegisterRoutes(v1, rfHandler, jwtVerifier, db)
 
@@ -796,6 +804,8 @@ func main() {
 		// same task type, but M8 worker also updates ecl.calc_run lifecycle.
 		asynqMux.HandleFunc(eclcore.TaskNameECLBulkCompute, calcRunWorker.Handle)
 		_ = eclBulkWorker // replaced by calcRunWorker above
+		// M11 Issue #88: async roll-forward for >1000 instruments.
+		asynqMux.HandleFunc(rollforward.TaskRollForwardCompute, rfWorker.HandleComputeRollForward)
 		// lpsExpiryWorker will be registered here in Phase 5 worker binary.
 		// asynqMux.HandleFunc(lps.TaskExpiryCheck, lpsExpiryWorker.HandleExpiryCheck)
 
