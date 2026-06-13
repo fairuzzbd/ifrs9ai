@@ -328,6 +328,15 @@ paths:
                     userApproverNama: null
                     dokumenPendukungId: null
                     dokumenPendukungFilename: null
+                    sicrEvidence:
+                      triggerType: "RATING_DOWNGRADE_NOTCH"
+                      ratingBaseline: "idAA"
+                      ratingCurrent: "idBBB+"
+                      notchDelta: -3
+                      dpdValue: null
+                      dpdPeriode: null
+                      cureConsecutivePeriodes: null
+                      overrideProposalId: null
                     createdAt: "2026-01-15T01:05:00+07:00"
                 pagination:
                   nextCursor: null
@@ -1255,6 +1264,8 @@ components:
         - STAGING_OVERRIDE_EXPIRED          # 410 — override sudah expire
         - STAGING_RATING_BASELINE_MISSING   # 422 — rating_at_origination null
         - STAGING_CALC_RUN_SEALED           # 423 — periode sudah seal, tidak bisa override
+        # M9 warning codes (non-error, informational — HTTP 200 dengan warnings array)
+        - STAGING_SICR_EVIDENCE_UNAVAILABLE  # warning — trigger_payload_jsonb null (row lama sebelum migration 0022 atau INITIAL trigger)
 
     # ---- Job accepted response (202) ---------------------------------------
     JobAcceptedResponse:
@@ -1472,6 +1483,72 @@ components:
           type: string
           nullable: true
           description: Filename dokumen pendukung (dari doc.upload)
+        sicrEvidence:
+          type: object
+          nullable: true
+          description: |
+            Detail evidence SICR / cure yang memicu transisi ini.
+            Populated dari trigger_payload_jsonb di ecl.stage_history (tersimpan sejak migration 0022).
+            Null untuk rows lama sebelum migration 0022, atau untuk trigger INITIAL.
+            Backend: expose kolom trigger_payload_jsonb dari DB — tidak perlu schema change baru.
+          properties:
+            triggerType:
+              type: string
+              enum:
+                - RATING_DOWNGRADE_NOTCH
+                - IG_TO_NON_IG
+                - DPD_GTE_30
+                - DPD_GTE_90
+                - MANUAL_OVERRIDE
+                - CURE_ASSESSMENT
+                - INITIAL
+              description: |
+                Tipe trigger spesifik untuk display UI.
+                Lebih granular dari triggerType di level row (mis. RATING_DOWNGRADE_NOTCH vs IG_TO_NON_IG).
+              example: "RATING_DOWNGRADE_NOTCH"
+            ratingBaseline:
+              type: string
+              nullable: true
+              description: Rating Pefindo saat origination / inisiasi (rating baseline untuk SICR comparison).
+              example: "idAA"
+            ratingCurrent:
+              type: string
+              nullable: true
+              description: Rating Pefindo saat transisi ini terjadi.
+              example: "idA-"
+            notchDelta:
+              type: integer
+              nullable: true
+              description: |
+                Delta notch antara ratingBaseline dan ratingCurrent.
+                Negatif = downgrade. SICR trigger: notchDelta ≤ -2 (DEC-011).
+              example: -3
+            dpdValue:
+              type: integer
+              nullable: true
+              description: DPD value (hari) yang memicu transisi. Null jika trigger bukan DPD.
+              example: 35
+            dpdPeriode:
+              type: string
+              format: date
+              nullable: true
+              description: Tanggal periode DPD record yang memicu (YYYY-MM-01).
+              example: "2026-06-01"
+            cureConsecutivePeriodes:
+              type: integer
+              nullable: true
+              description: |
+                Jumlah periode berturut-turut yang memenuhi kriteria cure saat transisi ini.
+                Populated untuk trigger CURE_ASSESSMENT. DEC-012: minimal 3.
+              example: 3
+            overrideProposalId:
+              type: string
+              format: uuid
+              nullable: true
+              description: |
+                UUID proposal override (ecl.staging_override_proposal) jika trigger adalah
+                MANUAL_OVERRIDE. Null untuk semua trigger lain.
+              example: "550e8400-e29b-41d4-a716-446655441234"
         createdAt:
           type: string
           format: date-time
