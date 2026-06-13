@@ -133,6 +133,18 @@ paths:
                   eirType: "STANDARD"
                   persisted: false
                   computedAt: "2026-06-12T10:30:00+07:00"
+                  solverMetadata:
+                    iterations: 7
+                    finalResidual: "0.00000000001"
+                    initialGuess: "0.04000000"
+                    algorithm: "NEWTON_RAPHSON"
+                    convergencePath:
+                      - "0.00845231230"
+                      - "0.00012345678"
+                      - "0.00000001230"
+                      - "0.00000000001"
+                    toleranceUsed: "0.00000000010"
+                    wasPOCICreditAdjusted: false
                 meta:
                   traceId: "01HXY..."
         "400":
@@ -1515,6 +1527,8 @@ components:
         - EIR_INSTRUMEN_NOT_FOUND             # 404 — instrumen tidak ada di mst.instrumen
         - EIR_ALREADY_COMPUTED                # 409 — eir_awal sudah terisi, gunakan amendment
         - EIR_NOT_YET_COMPUTED                # 422 — generate schedule sebelum EIR dihitung
+        # M9 warning codes (non-error, informational)
+        - EIR_SOLVER_METADATA_EMPTY           # warning — solverMetadata tidak tersedia untuk compute lama (sebelum M9); tampilkan pesan informatif di UI
 
     # ---- Job accepted response (202) ----------------------------------------
     JobAcceptedResponse:
@@ -1623,6 +1637,7 @@ components:
         - eirType
         - persisted
         - computedAt
+        - solverMetadata
       properties:
         instrumenId:
           type: string
@@ -1663,6 +1678,63 @@ components:
           type: string
           format: date-time
           description: Timestamp saat compute dilakukan
+        solverMetadata:
+          type: object
+          description: |
+            Detail internal Newton-Raphson solver untuk keperluan debug dan audit display di UI M9.
+            Selalu populated pada response compute (bukan nullable) — frontend dapat tampilkan di
+            expandable "Detail Solver" panel.
+          required:
+            - iterations
+            - finalResidual
+            - initialGuess
+            - algorithm
+            - toleranceUsed
+            - wasPOCICreditAdjusted
+          properties:
+            iterations:
+              type: integer
+              description: Jumlah iterasi Newton-Raphson yang digunakan sebelum konvergen. Max 100 (DEC-013).
+              example: 7
+            finalResidual:
+              type: string
+              description: |
+                Nilai |f(r)| pada iterasi terakhir sebagai string NUMERIC(10,8).
+                Harus < toleranceUsed jika konvergen.
+              example: "0.00000000001"
+            initialGuess:
+              type: string
+              description: |
+                Nilai r_initial yang digunakan sebagai seed Newton-Raphson.
+                DEC-013: default 0.10 jika couponRate null; couponRate dipakai sebagai seed jika ada.
+              example: "0.10000000"
+            algorithm:
+              type: string
+              description: Nama algoritma solver. Konstanta — selalu "NEWTON_RAPHSON".
+              enum: [NEWTON_RAPHSON]
+              example: "NEWTON_RAPHSON"
+            convergencePath:
+              type: array
+              items:
+                type: string
+              maxItems: 100
+              description: |
+                Nilai residual |f(r)| per iterasi sebagai array string (NUMERIC(10,8)).
+                Index 0 = residual setelah iterasi pertama.
+                Capped 100 entri (sesuai max_iter DEC-013).
+                Backend: hanya populate jika persistResult=false atau ROLE-RISK/ROLE-AUDIT.
+                Dapat berukuran besar — frontend hanya tampilkan chart/collapsed view.
+              example: ["0.00845231230", "0.00012345678", "0.00000001230", "0.00000000001"]
+            toleranceUsed:
+              type: string
+              description: Tolerance yang digunakan solver. Konstanta per DEC-013.
+              example: "0.00000000010"
+            wasPOCICreditAdjusted:
+              type: boolean
+              description: |
+                true jika pociMode=true saat compute — cashflow sudah PD-adjusted dan
+                EIR yang dihasilkan adalah credit-adjusted EIR (POCI, PSAK 71).
+              example: false
 
     # ---- EIR Generate Schedule Request --------------------------------------
     EIRGenerateScheduleRequest:
@@ -1969,10 +2041,52 @@ components:
           description: "EIR baru setelah re-estimasi. Populated hanya setelah APPROVED dan solver sukses."
           example: "0.04680000"
         catchUpAdjustment:
-          type: string
+          type: object
           nullable: true
-          description: "NPV difference pada tanggal amandemen. NUMERIC(20,4). Populated setelah APPROVED."
-          example: "12500000.0000"
+          description: |
+            Detail catch-up adjustment setelah amendment approve.
+            Null selama workflowStatus bukan APPROVED.
+            Derived display field — nilai sudah tersimpan di ecl.eir_reestimation_log.catch_up_adjustment
+            dan kolom terkait sejak M5 (PR #60/#61). Tidak butuh schema change DB baru.
+          properties:
+            valueIdr:
+              type: string
+              description: |
+                Nilai catch-up adjustment dalam IDR sebagai string NUMERIC(20,4).
+                Positif = gain (EIR baru lebih tinggi dari EIR lama).
+                Negatif = loss.
+                Backend: ecl.eir_reestimation_log.catch_up_adjustment.StringFixed(4)
+              example: "12500000.0000"
+            computedAt:
+              type: string
+              format: date-time
+              description: Timestamp saat catch-up adjustment dihitung (= saat approve dieksekusi).
+              example: "2028-01-01T10:30:00+07:00"
+            priorEir:
+              type: string
+              description: |
+                EIR sebelum amendment. NUMERIC(10,8).
+                Backend: ecl.eir_reestimation_log.eir_sebelum
+              example: "0.04200000"
+            newEir:
+              type: string
+              description: |
+                EIR baru setelah re-estimasi. NUMERIC(10,8).
+                Backend: ecl.eir_reestimation_log.eir_sesudah
+              example: "0.04680000"
+            npvDelta:
+              type: string
+              description: |
+                Selisih NPV pada tanggal amandemen antara schedule lama dan baru. NUMERIC(20,4) IDR.
+                NPV_delta = PV(cashflows_baru) − carrying_lama_pada_tanggal_amandemen.
+                Sama dengan valueIdr tetapi eksplisit sebagai NPV calculation result.
+              example: "12500000.0000"
+            formulaVersion:
+              type: string
+              description: |
+                Versi formula catch-up yang digunakan — dipakai untuk audit trail dan reproduksi kalkulasi.
+                Contoh: "M5-v1.0". Diisi backend saat approve (konstanta per versi kode).
+              example: "M5-v1.0"
         modifikasiTermsJson:
           type: object
           nullable: true

@@ -322,6 +322,9 @@ components:
         - EIR_INSTRUMEN_NOT_FOUND             # 404 — instrumenId not found in mst.instrumen
         - EIR_ALREADY_COMPUTED                # 409 — eir_awal already set; use amendment or forceRecompute
         - EIR_NOT_YET_COMPUTED                # 422 — generate schedule attempted before EIR was computed
+        # M9 warning codes (non-error, informational — returned in HTTP 200 warnings[] field)
+        - STAGING_SICR_EVIDENCE_UNAVAILABLE   # warning — trigger_payload_jsonb null (pre-migration-0022 rows or INITIAL trigger)
+        - EIR_SOLVER_METADATA_EMPTY           # warning — solverMetadata not available for compute records pre-M9
         # Calc Run Orchestration (APP-C, P4-M8)
         - CALC_RUN_NOT_FOUND               # 404 — calc_run id tidak ada di ecl.calc_run
         - CALC_RUN_INVALID_TRANSITION      # 422 — transisi status state machine tidak valid
