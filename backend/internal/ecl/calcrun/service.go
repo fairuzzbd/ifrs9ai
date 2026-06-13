@@ -540,7 +540,7 @@ func (s *Service) ApproveSeal(ctx context.Context, id uuid.UUID, req SealApprove
 	}
 
 	// SoD check 1: approver ≠ creator (server-side enforcement, DEC-017).
-	// The DB CHECK constraint is the last line of defence; service layer must enforce first.
+	// The DB CHECK constraint is the last line of defense; service layer must enforce first.
 	if run.CreatedBy == actorID {
 		sodTx, txErr := s.repo.BeginTx(ctx)
 		if txErr == nil {
