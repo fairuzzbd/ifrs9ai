@@ -75,6 +75,11 @@ func ExportDetectScopeMismatch(priorLines, currentLines []ResultLineHeader) []st
 	return detectScopeMismatch(priorLines, currentLines)
 }
 
+// ExportMustCoordCell exposes mustCoordCell for panic-path testing (PR #91 errcheck fix).
+func ExportMustCoordCell(col, row int) string {
+	return mustCoordCell(col, row)
+}
+
 // ExportScopeMismatchThresholdPct exposes the threshold constant for test assertions.
 func ExportScopeMismatchThresholdPct() string {
 	return scopeMismatchThresholdPct.String()

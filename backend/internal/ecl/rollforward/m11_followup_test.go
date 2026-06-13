@@ -699,5 +699,36 @@ func TestGetInstrumentCount_DBError(t *testing.T) {
 	}
 }
 
+// ─── PR #91: mustCoordCell panic-path coverage ───────────────────────────────
+
+// TestMustCoordCell_ValidCoords verifies mustCoordCell returns correct names for valid input.
+func TestMustCoordCell_ValidCoords(t *testing.T) {
+	tests := []struct {
+		col, row int
+		want     string
+	}{
+		{1, 1, "A1"},
+		{2, 1, "B1"},
+		{1, 2, "A2"},
+		{3, 5, "C5"},
+	}
+	for _, tc := range tests {
+		got := rollforward.ExportMustCoordCell(tc.col, tc.row)
+		if got != tc.want {
+			t.Errorf("mustCoordCell(%d,%d): want %q, got %q", tc.col, tc.row, tc.want, got)
+		}
+	}
+}
+
+// TestMustCoordCell_InvalidCoord_Panics verifies mustCoordCell panics on invalid (col < 1).
+func TestMustCoordCell_InvalidCoord_Panics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic for col=0 (invalid coordinate), got none")
+		}
+	}()
+	rollforward.ExportMustCoordCell(0, 1) // col must be ≥ 1 per excelize spec
+}
+
 // ─── Internal helpers ────────────────────────────────────────────────────────
 // (shared helpers like buildServiceWithMock, buildLines, etc. are in service_mock_test.go)

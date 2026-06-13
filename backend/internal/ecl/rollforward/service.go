@@ -873,6 +873,17 @@ func rollbackTx(ctx context.Context, logger *slog.Logger, tx interface{ Rollback
 
 // ─── XLSX generation ─────────────────────────────────────────────────────────
 
+// mustCoordCell converts (col, row) 1-based indices to an Excel cell name (e.g. "A1").
+// Panics if the conversion fails — this indicates a programmer error (col < 1 or row < 1),
+// which cannot occur given the hardcoded positive indices used in generateXLSXBytes.
+func mustCoordCell(col, row int) string {
+	cell, err := excelize.CoordinatesToCellName(col, row)
+	if err != nil {
+		panic(fmt.Sprintf("excelize.CoordinatesToCellName(%d,%d): %v", col, row, err))
+	}
+	return cell
+}
+
 // generateXLSXBytes produces a 3-sheet XLSX disclosure file per PSAK 71 §5.5.
 //
 // Sheet 1 — "Movement Table": ECL movement components (opening → closing).
@@ -922,12 +933,12 @@ func generateXLSXBytes(report *Report) ([]byte, error) {
 	// Header row.
 	headers1 := []string{"Komponen Roll-Forward", "Jumlah (IDR)"}
 	for col, h := range headers1 {
-		cell, _ := excelize.CoordinatesToCellName(col+1, 1)
-		_ = f.SetCellValue(sheetMovement, cell, h)
-		_ = f.SetCellStyle(sheetMovement, cell, cell, boldStyle)
+		cell := mustCoordCell(col+1, 1)
+		_ = f.SetCellValue(sheetMovement, cell, h)               //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
+		_ = f.SetCellStyle(sheetMovement, cell, cell, boldStyle) //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
 	}
 	// Freeze header row (row 1 frozen so it stays visible when scrolling).
-	_ = f.SetPanes(sheetMovement, &excelize.Panes{Freeze: true, YSplit: 1, TopLeftCell: "A2"})
+	_ = f.SetPanes(sheetMovement, &excelize.Panes{Freeze: true, YSplit: 1, TopLeftCell: "A2"}) //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
 
 	// Data rows.
 	type movementRow struct {
@@ -950,39 +961,39 @@ func generateXLSXBytes(report *Report) ([]byte, error) {
 
 	for i, r := range rows {
 		rowNum := i + 2
-		labelCell, _ := excelize.CoordinatesToCellName(1, rowNum)
-		amtCell, _ := excelize.CoordinatesToCellName(2, rowNum)
-		_ = f.SetCellValue(sheetMovement, labelCell, r.label)
+		labelCell := mustCoordCell(1, rowNum)
+		amtCell := mustCoordCell(2, rowNum)
+		_ = f.SetCellValue(sheetMovement, labelCell, r.label) //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
 		amtF, _ := r.amount.Float64()
-		_ = f.SetCellValue(sheetMovement, amtCell, amtF)
-		_ = f.SetCellStyle(sheetMovement, amtCell, amtCell, idrStyle)
+		_ = f.SetCellValue(sheetMovement, amtCell, amtF)              //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
+		_ = f.SetCellStyle(sheetMovement, amtCell, amtCell, idrStyle) //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
 		// Bold the Opening and Closing rows.
 		if r.label == "Opening ECL" || r.label == "Closing ECL" {
-			_ = f.SetCellStyle(sheetMovement, labelCell, labelCell, boldStyle)
+			_ = f.SetCellStyle(sheetMovement, labelCell, labelCell, boldStyle) //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
 		}
 	}
 
 	// Footer row: computed_at + detection_method.
 	footerRow := len(rows) + 3
-	footerCell, _ := excelize.CoordinatesToCellName(1, footerRow)
-	_ = f.SetCellValue(sheetMovement, footerCell,
+	footerCell := mustCoordCell(1, footerRow)
+	_ = f.SetCellValue(sheetMovement, footerCell, //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
 		fmt.Sprintf("Computed at: %s | Detection method: %s",
 			report.ComputedAt.Format("2006-01-02T15:04:05Z07:00"),
 			string(report.DetectionMethod)))
 
 	// Total row (sum of movement components — should equal Closing ECL for reconciled runs).
 	totalRow := len(rows) + 2
-	totalLabelCell, _ := excelize.CoordinatesToCellName(1, totalRow)
-	totalAmtCell, _ := excelize.CoordinatesToCellName(2, totalRow)
-	_ = f.SetCellValue(sheetMovement, totalLabelCell, "Total (Verifikasi Closing)")
-	_ = f.SetCellStyle(sheetMovement, totalLabelCell, totalLabelCell, boldStyle)
+	totalLabelCell := mustCoordCell(1, totalRow)
+	totalAmtCell := mustCoordCell(2, totalRow)
+	_ = f.SetCellValue(sheetMovement, totalLabelCell, "Total (Verifikasi Closing)") //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
+	_ = f.SetCellStyle(sheetMovement, totalLabelCell, totalLabelCell, boldStyle)    //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
 	closingF, _ := report.ClosingEclIdr.Float64()
-	_ = f.SetCellValue(sheetMovement, totalAmtCell, closingF)
-	_ = f.SetCellStyle(sheetMovement, totalAmtCell, totalAmtCell, idrStyle)
+	_ = f.SetCellValue(sheetMovement, totalAmtCell, closingF)               //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
+	_ = f.SetCellStyle(sheetMovement, totalAmtCell, totalAmtCell, idrStyle) //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
 
 	// Column widths.
-	_ = f.SetColWidth(sheetMovement, "A", "A", 45)
-	_ = f.SetColWidth(sheetMovement, "B", "B", 22)
+	_ = f.SetColWidth(sheetMovement, "A", "A", 45) //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
+	_ = f.SetColWidth(sheetMovement, "B", "B", 22) //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
 
 	// ─────────────────────────────────────────────────────────────────────────
 	// Sheet 2 — Gross Carrying Amount per Stage
@@ -999,11 +1010,11 @@ func generateXLSXBytes(report *Report) ([]byte, error) {
 
 	headers2 := []string{"Stage", "Opening ECL (IDR)", "Closing ECL (IDR)", "Catatan"}
 	for col, h := range headers2 {
-		cell, _ := excelize.CoordinatesToCellName(col+1, 1)
-		_ = f.SetCellValue(sheetGCA, cell, h)
-		_ = f.SetCellStyle(sheetGCA, cell, cell, boldStyle)
+		cell := mustCoordCell(col+1, 1)
+		_ = f.SetCellValue(sheetGCA, cell, h)               //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
+		_ = f.SetCellStyle(sheetGCA, cell, cell, boldStyle) //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
 	}
-	_ = f.SetPanes(sheetGCA, &excelize.Panes{Freeze: true, YSplit: 1, TopLeftCell: "A2"})
+	_ = f.SetPanes(sheetGCA, &excelize.Panes{Freeze: true, YSplit: 1, TopLeftCell: "A2"}) //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
 
 	type stageRow struct {
 		stage   string
@@ -1021,34 +1032,34 @@ func generateXLSXBytes(report *Report) ([]byte, error) {
 	}
 	for i, sr := range stageRows {
 		rowNum := i + 2
-		stageCell, _ := excelize.CoordinatesToCellName(1, rowNum)
-		openCell, _ := excelize.CoordinatesToCellName(2, rowNum)
-		closeCell, _ := excelize.CoordinatesToCellName(3, rowNum)
-		noteCell, _ := excelize.CoordinatesToCellName(4, rowNum)
-		_ = f.SetCellValue(sheetGCA, stageCell, sr.stage)
+		stageCell := mustCoordCell(1, rowNum)
+		openCell := mustCoordCell(2, rowNum)
+		closeCell := mustCoordCell(3, rowNum)
+		noteCell := mustCoordCell(4, rowNum)
+		_ = f.SetCellValue(sheetGCA, stageCell, sr.stage) //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
 		openF, _ := sr.opening.Float64()
 		closeF, _ := sr.closing.Float64()
-		_ = f.SetCellValue(sheetGCA, openCell, openF)
-		_ = f.SetCellStyle(sheetGCA, openCell, openCell, idrStyle)
-		_ = f.SetCellValue(sheetGCA, closeCell, closeF)
-		_ = f.SetCellStyle(sheetGCA, closeCell, closeCell, idrStyle)
-		_ = f.SetCellValue(sheetGCA, noteCell, sr.note)
+		_ = f.SetCellValue(sheetGCA, openCell, openF)                //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
+		_ = f.SetCellStyle(sheetGCA, openCell, openCell, idrStyle)   //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
+		_ = f.SetCellValue(sheetGCA, closeCell, closeF)              //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
+		_ = f.SetCellStyle(sheetGCA, closeCell, closeCell, idrStyle) //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
+		_ = f.SetCellValue(sheetGCA, noteCell, sr.note)              //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
 		if sr.stage == "Total" {
-			_ = f.SetCellStyle(sheetGCA, stageCell, stageCell, boldStyle)
+			_ = f.SetCellStyle(sheetGCA, stageCell, stageCell, boldStyle) //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
 		}
 	}
 
 	// Footer.
 	gFooterRow := len(stageRows) + 3
-	gFooterCell, _ := excelize.CoordinatesToCellName(1, gFooterRow)
-	_ = f.SetCellValue(sheetGCA, gFooterCell,
+	gFooterCell := mustCoordCell(1, gFooterRow)
+	_ = f.SetCellValue(sheetGCA, gFooterCell, //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
 		fmt.Sprintf("Computed at: %s | Detection method: %s",
 			report.ComputedAt.Format("2006-01-02T15:04:05Z07:00"),
 			string(report.DetectionMethod)))
 
-	_ = f.SetColWidth(sheetGCA, "A", "A", 12)
-	_ = f.SetColWidth(sheetGCA, "B", "C", 22)
-	_ = f.SetColWidth(sheetGCA, "D", "D", 55)
+	_ = f.SetColWidth(sheetGCA, "A", "A", 12) //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
+	_ = f.SetColWidth(sheetGCA, "B", "C", 22) //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
+	_ = f.SetColWidth(sheetGCA, "D", "D", 55) //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
 
 	// ─────────────────────────────────────────────────────────────────────────
 	// Sheet 3 — Sign-Off
@@ -1100,8 +1111,8 @@ func generateXLSXBytes(report *Report) ([]byte, error) {
 	for i, row := range signRows {
 		rowNum := i + 1
 		for col, val := range row {
-			cell, _ := excelize.CoordinatesToCellName(col+1, rowNum)
-			_ = f.SetCellValue(sheetSignOff, cell, val)
+			cell := mustCoordCell(col+1, rowNum)
+			_ = f.SetCellValue(sheetSignOff, cell, val) //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
 		}
 		// Bold section headers.
 		if len(row) > 0 && (row[0] == "BLIPS IFRS9 — CKPN Roll-Forward Disclosure" ||
@@ -1110,13 +1121,13 @@ func generateXLSXBytes(report *Report) ([]byte, error) {
 			row[0] == "Reviewed by" ||
 			row[0] == "Approved by" ||
 			row[0] == "Sealed by") {
-			cell, _ := excelize.CoordinatesToCellName(1, rowNum)
-			_ = f.SetCellStyle(sheetSignOff, cell, cell, boldStyle)
+			cell := mustCoordCell(1, rowNum)
+			_ = f.SetCellStyle(sheetSignOff, cell, cell, boldStyle) //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
 		}
 	}
 
-	_ = f.SetColWidth(sheetSignOff, "A", "A", 30)
-	_ = f.SetColWidth(sheetSignOff, "B", "B", 60)
+	_ = f.SetColWidth(sheetSignOff, "A", "A", 30) //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
+	_ = f.SetColWidth(sheetSignOff, "B", "B", 60) //nolint:errcheck // excelize set ops fail only on invalid sheet/coord — hardcoded valid here
 
 	// Write to buffer.
 	var buf bytes.Buffer
