@@ -54,6 +54,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/workflow"
 
 	eclcore "blips-ifrs9.tugu-re.com/internal/ecl/core"
+	"blips-ifrs9.tugu-re.com/internal/ecl/calcrun"
 	"blips-ifrs9.tugu-re.com/internal/ecl/eir"
 	"blips-ifrs9.tugu-re.com/internal/ecl/helpers"
 	"blips-ifrs9.tugu-re.com/internal/ecl/lookthrough"
@@ -721,6 +722,36 @@ func main() {
 	eclHandler := eclcore.NewHandler(eclOrchestrator)
 	eclcore.RegisterRoutes(v1, eclHandler)
 
+	// -----------------------------------------------------------------------
+	// ECL Calc Run Lifecycle + Seal (APP-C-CALC-RUN-001..006, Phase 4 Module 8)
+	// Endpoints (all under /api/v1/ecl/calc-runs/):
+	//   POST   /ecl/calc-runs                              — create DRAFT (M8-001)
+	//   GET    /ecl/calc-runs                              — list (M8-003)
+	//   GET    /ecl/calc-runs/:id                          — detail (M8-003)
+	//   POST   /ecl/calc-runs/:id/start                    — start → IN_PROGRESS (M8-002)
+	//   POST   /ecl/calc-runs/:id/cancel                   — cancel with reason (M8-005)
+	//   GET    /ecl/calc-runs/:id/parameter-snapshot       — frozen params JSONB (M8-002)
+	//   GET    /ecl/calc-runs/:id/result-lines             — list result lines (M8-003)
+	//   POST   /ecl/calc-runs/:id/seal/request             — ROLE-RISK request seal (M8-004)
+	//   POST   /ecl/calc-runs/:id/seal/approve             — ROLE-ALCO approve + step-up MFA (M8-004)
+	//   POST   /ecl/calc-runs/:id/seal/reject              — ROLE-ALCO reject (M8-004)
+	//
+	// State machine: docs/state-machines/p4-m8-calc-run.md
+	// Seal: 4-eyes (RISK request → ALCO approve), LOCKED per §4.
+	// After SEALED: block new calc_run for same periode (DB trigger + service guard).
+	// Parameter snapshot: all ALCO-approved params frozen at /start (DEC-016, DEC-018).
+	// Decisions: DEC-010, DEC-016, DEC-017, DEC-018, DEC-021, DEC-022, DEC-027.
+	// -----------------------------------------------------------------------
+	calcRunRepo := calcrun.NewCalcRunRepo(db)
+	calcRunSnapshotSvc := calcrun.NewParameterSnapshotService(db)
+	calcRunSvc := calcrun.NewService(calcRunRepo, calcRunSnapshotSvc, auditWriter, nil /* asynqClient: wired below */, nil /* jobUpdater: noop */, logger)
+	// Wire M7 orchestrator's CalcRunSealChecker: prevents ECL compute on sealed runs.
+	eclOrchestrator.WithSealChecker(calcRunSvc)
+	calcRunWorker := calcrun.NewCalcRunWorker(calcRunSvc, eclOrchestrator, nil, logger)
+	calcRunHandler := calcrun.NewHandler(calcRunSvc)
+	calcrun.RegisterRoutes(v1, calcRunHandler, jwtVerifier, db)
+	_ = calcRunWorker // registered on asynqMux below
+
 	// B1 fix: Register DriftCronHandler on Asynq mux + scheduler.
 	// Previously the handler was instantiated then discarded (_ = ...), making the
 	// drift cron feature completely dead.  Now we:
@@ -738,7 +769,10 @@ func main() {
 		asynqMux := asynq.NewServeMux()
 		asynqMux.HandleFunc(eir.TaskDriftCron, driftCronHandler.HandleDriftCronTask)
 		asynqMux.HandleFunc(eir.TaskDriftAdHoc, driftCronHandler.HandleDriftAdHocTask)
-		asynqMux.HandleFunc(eclcore.TaskNameECLBulkCompute, eclBulkWorker.Handle)
+		// M8: calcRunWorker overrides the M7 eclBulkWorker for "ecl:bulk_compute" —
+		// same task type, but M8 worker also updates ecl.calc_run lifecycle.
+		asynqMux.HandleFunc(eclcore.TaskNameECLBulkCompute, calcRunWorker.Handle)
+		_ = eclBulkWorker // replaced by calcRunWorker above
 		// lpsExpiryWorker will be registered here in Phase 5 worker binary.
 		// asynqMux.HandleFunc(lps.TaskExpiryCheck, lpsExpiryWorker.HandleExpiryCheck)
 

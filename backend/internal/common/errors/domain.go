@@ -161,6 +161,26 @@ const (
 	CodeEIRDriftReportPeriodeOutOfRange Code = "EIR_DRIFT_REPORT_PERIODE_OUT_OF_RANGE" // 422 — periode param out of data range
 	CodeEIRDriftGenerationInProgress    Code = "EIR_DRIFT_GENERATION_IN_PROGRESS"      // 409 — concurrent drift job running
 	CodeEIRDriftThresholdInvalid        Code = "EIR_DRIFT_THRESHOLD_INVALID"           // 422 — sys.parameter threshold values invalid
+
+	// P4-M8 Calc Run Lifecycle + Seal codes (APP-C-CALC-RUN-001..017).
+	// State machine: docs/state-machines/p4-m8-calc-run.md §6.
+	CodeCalcRunNotFound                  Code = "CALC_RUN_NOT_FOUND"                    // 404 — ecl.calc_run row not found
+	CodeCalcRunInvalidTransition         Code = "CALC_RUN_INVALID_TRANSITION"           // 422 — state machine reject
+	CodeCalcRunDuplicateInProgress       Code = "CALC_RUN_DUPLICATE_IN_PROGRESS"        // 409 — another IN_PROGRESS for same periode
+	CodeCalcRunPeriodeAlreadySealed      Code = "CALC_RUN_PERIODE_ALREADY_SEALED"       // 409 — a SEALED run exists for same periode
+	CodeCalcRunPeriodeHardClosed         Code = "CALC_RUN_PERIODE_HARD_CLOSED"          // 423 — periode is hard-closed
+	CodeCalcRunParameterSnapshotInvalid  Code = "CALC_RUN_PARAMETER_SNAPSHOT_INVALID"  // 422 — required ALCO params missing/not APPROVED
+	CodeCalcRunSealRequiresCompleted     Code = "CALC_RUN_SEAL_REQUIRES_COMPLETED"      // 422 — seal request but run not COMPLETED
+	CodeCalcRunSealNotRequested          Code = "CALC_RUN_SEAL_NOT_REQUESTED"           // 422 — approve/reject but not in SEAL_REQUESTED
+	CodeCalcRunSealSoDViolation          Code = "CALC_RUN_SEAL_SOD_VIOLATION"           // 403 — seal requester == approver
+	CodeCalcRunSealStepUpRequired        Code = "CALC_RUN_SEAL_STEP_UP_REQUIRED"        // 403 — step-up MFA missing for seal approve
+	CodeCalcRunHasErrors                 Code = "CALC_RUN_HAS_ERRORS"                   // 422 — error_count > 0, cannot seal
+	CodeCalcRunCancelReasonTooShort      Code = "CALC_RUN_CANCEL_REASON_TOO_SHORT"      // 422 — cancel_reason < 30 chars
+	CodeCalcRunCancelAfterCompleted      Code = "CALC_RUN_CANCEL_AFTER_COMPLETED"       // 422 — cannot cancel COMPLETED/SEALED run
+	CodeCalcRunECLParamNotFound          Code = "CALC_RUN_ECL_PARAM_NOT_FOUND"          // 422 — ALCO param lookup failed
+	CodeCalcRunFXRateNotFound            Code = "CALC_RUN_FX_RATE_NOT_FOUND"            // 422 — BI JISDOR rate missing for eval date
+	CodeCalcRunForbiddenNotMaker         Code = "CALC_RUN_FORBIDDEN_NOT_MAKER"          // 403 — cancel attempted by non-maker
+	CodeCalcRunSealed                    Code = "CALC_RUN_SEALED"                       // 423 — run is SEALED, immutable
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
@@ -266,6 +286,22 @@ func (c Code) HTTPStatus() int {
 		return http.StatusNotFound
 	case CodeEIRDriftGenerationInProgress:
 		return http.StatusConflict
+	// P4-M8 Calc Run codes.
+	case CodeCalcRunNotFound:
+		return http.StatusNotFound
+	case CodeCalcRunDuplicateInProgress, CodeCalcRunPeriodeAlreadySealed:
+		return http.StatusConflict
+	case CodeCalcRunPeriodeHardClosed, CodeCalcRunSealed:
+		return 423 // Locked
+	case CodeCalcRunInvalidTransition, CodeCalcRunParameterSnapshotInvalid,
+		CodeCalcRunSealRequiresCompleted, CodeCalcRunSealNotRequested,
+		CodeCalcRunHasErrors, CodeCalcRunCancelReasonTooShort,
+		CodeCalcRunCancelAfterCompleted, CodeCalcRunECLParamNotFound,
+		CodeCalcRunFXRateNotFound:
+		return http.StatusUnprocessableEntity
+	case CodeCalcRunSealSoDViolation, CodeCalcRunSealStepUpRequired,
+		CodeCalcRunForbiddenNotMaker:
+		return http.StatusForbidden
 	case CodePeriodeClosed, CodeECLParamFrozen:
 		return 423 // Locked
 	case CodeRateLimited:
