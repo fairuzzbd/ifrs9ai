@@ -41,6 +41,13 @@ const ERROR_MESSAGE_MAP: Record<string, string> = {
   MFA_REQUIRED:
     "Verifikasi Multi-Factor Authentication diperlukan. Silakan login ulang dengan MFA.",
   NETWORK_ERROR: "Tidak dapat terhubung ke server. Periksa koneksi internet Anda.",
+  CALC_RUN_PERIODE_ALREADY_SEALED:
+    "Periode ini sudah memiliki calc run yang di-segel. Override memerlukan persetujuan ALCO — fitur belum tersedia.",
+  ECL_PARAM_NOT_FOUND:
+    "Parameter ECL untuk periode ini belum disetujui ALCO. Hubungi ROLE-ALCO.",
+  CALC_RUN_NOT_FOUND: "Calc run tidak ditemukan.",
+  CALC_RUN_INVALID_STATUS:
+    "Aksi tidak valid untuk status calc run saat ini.",
 };
 
 function formatError(err: ApiError | { code: string; message: string; traceId: string }): string {
