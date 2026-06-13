@@ -38,7 +38,7 @@ func buildHandlerTestSetup(t *testing.T, claims *auth.Claims) (*gin.Engine, sqlm
 	t.Cleanup(func() { _ = db.Close() })
 
 	// Build service with sqlmock DB.
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 	snap := calcrun.NewParameterSnapshotService(db)
 	aw := audit.NewWriter(db)
 	svc := calcrun.NewService(repo, snap, aw, nil, nil, nil)
@@ -635,7 +635,7 @@ func TestHandler_ClaimsFromCtx_WrongType_401(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	_ = mock
 
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 	snap := calcrun.NewParameterSnapshotService(db)
 	aw := audit.NewWriter(db)
 	svc := calcrun.NewService(repo, snap, aw, nil, nil, nil)
@@ -1387,5 +1387,103 @@ func TestHandler_CreateCalcRun_HappyPath_201(t *testing.T) {
 	r.ServeHTTP(w, makeReq("POST", "/ecl/calc-runs", string(body)))
 	if w.Code != http.StatusCreated {
 		t.Errorf("status = %d; want 201; body = %s", w.Code, w.Body.String())
+	}
+}
+
+// ─── StartCalcRun: invalid actor UUID in Sub → 400 VALIDATION_FAILED ─────────
+//
+// Exercises handler.go — new uuid.Parse(claims.Sub) guard in StartCalcRun.
+// The id parse succeeds (valid UUID); actor parse fails before svc.Start is called.
+
+func TestHandler_StartCalcRun_InvalidActorUUID_400(t *testing.T) {
+	id := uuid.New()
+	claims := &auth.Claims{
+		Sub:         "not-a-uuid",
+		Permissions: []string{calcrun.PermCalcRunStart},
+	}
+	// No DB expectations: actor parse fails before any service call.
+	r, _ := buildHandlerTestSetup(t, claims)
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, makeReq("POST", "/ecl/calc-runs/"+id.String()+"/start", ""))
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("StartCalcRun invalid actor: status = %d; want 400", w.Code)
+	}
+}
+
+// ─── CancelCalcRun: invalid actor UUID in Sub → 400 VALIDATION_FAILED ────────
+
+func TestHandler_CancelCalcRun_InvalidActorUUID_400(t *testing.T) {
+	id := uuid.New()
+	claims := &auth.Claims{
+		Sub:         "not-a-uuid",
+		Permissions: []string{calcrun.PermCalcRunCancel},
+	}
+	r, _ := buildHandlerTestSetup(t, claims)
+
+	body := `{"cancelReason":"Alasan pembatalan yang cukup panjang untuk memenuhi syarat minimum."}`
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, makeReq("POST", "/ecl/calc-runs/"+id.String()+"/cancel", body))
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("CancelCalcRun invalid actor: status = %d; want 400", w.Code)
+	}
+}
+
+// ─── RequestSeal: invalid actor UUID in Sub → 400 VALIDATION_FAILED ──────────
+
+func TestHandler_RequestSeal_InvalidActorUUID_400(t *testing.T) {
+	id := uuid.New()
+	claims := &auth.Claims{
+		Sub:         "not-a-uuid",
+		Permissions: []string{calcrun.PermCalcRunSealRequest},
+	}
+	r, _ := buildHandlerTestSetup(t, claims)
+
+	body := `{"comment":"Permintaan seal dengan alasan yang cukup."}`
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, makeReq("POST", "/ecl/calc-runs/"+id.String()+"/seal/request", body))
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("RequestSeal invalid actor: status = %d; want 400", w.Code)
+	}
+}
+
+// ─── ApproveSeal: invalid actor UUID in Sub → 400 VALIDATION_FAILED ──────────
+
+func TestHandler_ApproveSeal_InvalidActorUUID_400(t *testing.T) {
+	id := uuid.New()
+	now := int64(1748000000)
+	claims := &auth.Claims{
+		Sub:              "not-a-uuid",
+		Permissions:      []string{calcrun.PermCalcRunSealApprove},
+		StepupVerifiedAt: &now,
+	}
+	r, _ := buildHandlerTestSetup(t, claims)
+
+	req, _ := http.NewRequest("POST", "/ecl/calc-runs/"+id.String()+"/seal/approve",
+		bytes.NewBufferString(`{"comment":"Approved by ALCO committee."}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Step-Up-Token", "valid-step-up-token")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("ApproveSeal invalid actor: status = %d; want 400", w.Code)
+	}
+}
+
+// ─── RejectSeal: invalid actor UUID in Sub → 400 VALIDATION_FAILED ───────────
+
+func TestHandler_RejectSeal_InvalidActorUUID_400(t *testing.T) {
+	id := uuid.New()
+	claims := &auth.Claims{
+		Sub:         "not-a-uuid",
+		Permissions: []string{calcrun.PermCalcRunSealApprove},
+	}
+	r, _ := buildHandlerTestSetup(t, claims)
+
+	body := `{"rejectReason":"Data tidak lengkap dan perlu dikoreksi."}`
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, makeReq("POST", "/ecl/calc-runs/"+id.String()+"/seal/reject", body))
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("RejectSeal invalid actor: status = %d; want 400", w.Code)
 	}
 }

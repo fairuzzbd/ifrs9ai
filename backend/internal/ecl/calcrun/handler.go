@@ -175,7 +175,12 @@ func (h *Handler) StartCalcRun(c *gin.Context) {
 		return
 	}
 
-	actorID, _ := uuid.Parse(claims.Sub)
+	actorID, err := uuid.Parse(claims.Sub)
+	if err != nil {
+		response.ErrorWithStatus(c, http.StatusBadRequest,
+			domainerrors.CodeValidationFailed, "actor UUID dalam JWT tidak valid.", nil)
+		return
+	}
 	resp, err := h.svc.Start(c.Request.Context(), id, actorID)
 	if err != nil {
 		writeCalcRunError(c, err)
@@ -212,7 +217,12 @@ func (h *Handler) CancelCalcRun(c *gin.Context) {
 		return
 	}
 
-	actorID, _ := uuid.Parse(claims.Sub)
+	actorID, err := uuid.Parse(claims.Sub)
+	if err != nil {
+		response.ErrorWithStatus(c, http.StatusBadRequest,
+			domainerrors.CodeValidationFailed, "actor UUID dalam JWT tidak valid.", nil)
+		return
+	}
 	run, err := h.svc.Cancel(c.Request.Context(), id, req, actorID)
 	if err != nil {
 		writeCalcRunError(c, err)
@@ -292,7 +302,12 @@ func (h *Handler) RequestSeal(c *gin.Context) {
 		return
 	}
 
-	actorID, _ := uuid.Parse(claims.Sub)
+	actorID, err := uuid.Parse(claims.Sub)
+	if err != nil {
+		response.ErrorWithStatus(c, http.StatusBadRequest,
+			domainerrors.CodeValidationFailed, "actor UUID dalam JWT tidak valid.", nil)
+		return
+	}
 	run, err := h.svc.RequestSeal(c.Request.Context(), id, req, actorID)
 	if err != nil {
 		writeCalcRunError(c, err)
@@ -336,7 +351,12 @@ func (h *Handler) ApproveSeal(c *gin.Context) {
 		stepUpFresh = false
 	}
 
-	actorID, _ := uuid.Parse(claims.Sub)
+	actorID, err := uuid.Parse(claims.Sub)
+	if err != nil {
+		response.ErrorWithStatus(c, http.StatusBadRequest,
+			domainerrors.CodeValidationFailed, "actor UUID dalam JWT tidak valid.", nil)
+		return
+	}
 	run, err := h.svc.ApproveSeal(c.Request.Context(), id, req, actorID, stepUpFresh)
 	if err != nil {
 		writeCalcRunError(c, err)
@@ -373,7 +393,12 @@ func (h *Handler) RejectSeal(c *gin.Context) {
 		return
 	}
 
-	actorID, _ := uuid.Parse(claims.Sub)
+	actorID, err := uuid.Parse(claims.Sub)
+	if err != nil {
+		response.ErrorWithStatus(c, http.StatusBadRequest,
+			domainerrors.CodeValidationFailed, "actor UUID dalam JWT tidak valid.", nil)
+		return
+	}
 	run, err := h.svc.RejectSeal(c.Request.Context(), id, req, actorID)
 	if err != nil {
 		writeCalcRunError(c, err)

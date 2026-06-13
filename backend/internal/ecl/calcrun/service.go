@@ -72,7 +72,7 @@ func (n *noopJobUpdater) MarkFailed(ctx context.Context, jobID, errCode, errMsg 
 
 // Service implements the ECL calc run lifecycle and seal workflow.
 type Service struct {
-	repo        *CalcRunRepo
+	repo        *Repo
 	snapshot    *ParameterSnapshotService
 	auditWriter *audit.Writer
 	asynqClient AsynqEnqueuer  // nil = sync mode (dev/test)
@@ -83,7 +83,7 @@ type Service struct {
 // NewService creates a Service. Panics if repo or auditWriter is nil (DEC-018).
 // asynqClient may be nil (dev mode; no Asynq dispatch).
 func NewService(
-	repo *CalcRunRepo,
+	repo *Repo,
 	snapshot *ParameterSnapshotService,
 	auditWriter *audit.Writer,
 	asynqClient AsynqEnqueuer,
@@ -220,7 +220,7 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID) (CalcRun, error) {
 }
 
 // List returns paginated CalcRun summaries for a periode.
-func (s *Service) List(ctx context.Context, periodeID string, limit int, cursor string) ([]CalcRunSummary, string, bool, error) {
+func (s *Service) List(ctx context.Context, periodeID string, limit int, cursor string) ([]Summary, string, bool, error) {
 	return s.repo.List(ctx, periodeID, limit, cursor)
 }
 
@@ -311,7 +311,10 @@ func (s *Service) Start(ctx context.Context, id uuid.UUID, actorID uuid.UUID) (S
 			PeriodeID:      updated.PeriodeID,
 			ActorID:        actorID,
 		}
-		b, _ := json.Marshal(payload)
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return StartResponse{}, fmt.Errorf("calcrun.Start: marshal asynq payload: %w", err)
+		}
 		task := asynq.NewTask(eclcore.TaskNameECLBulkCompute, b)
 		if _, err := s.asynqClient.EnqueueContext(ctx, task); err != nil {
 			s.logger.WarnContext(ctx, "calcrun.Start: asynq enqueue failed (run stays IN_PROGRESS)", "error", err)
@@ -539,22 +542,31 @@ func (s *Service) ApproveSeal(ctx context.Context, id uuid.UUID, req SealApprove
 	// 4-eyes SoD: approver ≠ requester (server-side enforcement, DEC-017).
 	if run.SealRequestedBy != nil && *run.SealRequestedBy == actorID {
 		// Write SoD violation audit event before returning error.
+		// Failure to record this audit event is itself an error — abort and return.
 		sodTx, txErr := s.repo.BeginTx(ctx)
 		if txErr == nil {
 			txWriter := s.auditWriter.WithTx(sodTx)
-			_ = txWriter.Write(ctx, audit.Event{
+			if writeErr := txWriter.Write(ctx, audit.Event{
 				Action:     "CALC_RUN.SOD_VIOLATION_ATTEMPT",
 				EntityType: "ecl.calc_run",
 				EntityID:   id,
 				After: map[string]any{
-					"id":                 id,
-					"attempted_by":       actorID,
-					"seal_requested_by":  run.SealRequestedBy,
-					"violation_type":     "SEAL_APPROVE_BY_REQUESTER",
+					"id":                id,
+					"attempted_by":      actorID,
+					"seal_requested_by": run.SealRequestedBy,
+					"violation_type":    "SEAL_APPROVE_BY_REQUESTER",
 				},
 				ActorUserID: actorID.String(),
-			})
-			_ = sodTx.Commit()
+			}); writeErr != nil {
+				// Audit write failed — rollback and surface as internal error (DEC-018).
+				if rbErr := sodTx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+					s.logger.WarnContext(ctx, "calcrun.ApproveSeal: SoD audit rollback error", "error", rbErr)
+				}
+				return CalcRun{}, fmt.Errorf("calcrun.ApproveSeal: SoD audit write: %w", writeErr)
+			}
+			if commitErr := sodTx.Commit(); commitErr != nil {
+				return CalcRun{}, fmt.Errorf("calcrun.ApproveSeal: SoD audit commit: %w", commitErr)
+			}
 		}
 		return CalcRun{}, ErrCalcRunSealSoDViolation(actorID.String())
 	}
@@ -730,9 +742,13 @@ func (s *Service) countActiveInstruments(ctx context.Context) (int, error) {
 // insertSysJob creates a sys.job row for the Asynq job.
 func (s *Service) insertSysJob(ctx context.Context, tx *sql.Tx, jobID string, calcRunID uuid.UUID, actorID uuid.UUID) error {
 	payload := map[string]any{"calc_run_id": calcRunID.String()}
-	payloadJSON, _ := json.Marshal(payload)
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("calcrun.insertSysJob: marshal payload: %w", err)
+	}
 
-	_, err := tx.ExecContext(ctx, `
+	var execErr error
+	_, execErr = tx.ExecContext(ctx, `
 INSERT INTO sys.job (
     id, type, status, progress, current_step,
     payload_jsonb, can_cancel,
@@ -743,8 +759,8 @@ INSERT INTO sys.job (
     $3, $3, 'TUGURE'
 ) ON CONFLICT (id) DO NOTHING`,
 		jobID, payloadJSON, actorID)
-	if err != nil {
-		return fmt.Errorf("calcrun.insertSysJob: %w", err)
+	if execErr != nil {
+		return fmt.Errorf("calcrun.insertSysJob: %w", execErr)
 	}
 	return nil
 }
