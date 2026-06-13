@@ -1503,7 +1503,7 @@ func buildCalcRunRow(id uuid.UUID, status string, errorCount int) *sqlmock.Rows 
 		nil,      // parameter_snapshot_jsonb
 		nil, nil, // seal_requested_by, seal_requested_at
 		nil, nil, // sealed_by, sealed_at
-		nil,      // signature_hash_seal
+		nil,           // signature_hash_seal
 		nil, nil, nil, // seal_rejected_by, seal_rejected_at, reject_reason
 		nil, nil, nil, // cancelled_by, cancelled_at, cancel_reason
 		nil, // superseded_by_run_id

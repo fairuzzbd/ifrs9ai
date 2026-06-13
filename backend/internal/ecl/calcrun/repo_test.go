@@ -652,7 +652,7 @@ func TestCalcRunRepo_Get_InvalidSealApprovedBy_UUID_Error(t *testing.T) {
 			nil, nil, 0, 0, nil, nil, nil,
 			sealReqBy.String(), nil,
 			"not-a-valid-uuid", nil, // sealed_by (invalid), sealed_at
-			nil,                     // signature_hash_seal
+			nil, // signature_hash_seal
 			nil, nil, nil, nil, nil, nil, nil,
 			now, createdBy, now, createdBy, int64(1), "TUGURE",
 		))
