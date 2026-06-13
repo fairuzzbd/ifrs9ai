@@ -64,6 +64,27 @@ func ExportRollForwardHTTPStatus(code string) int {
 	return rollForwardHTTPStatus(code)
 }
 
+// ExportGenerateXLSXBytes exposes the internal generateXLSXBytes for white-box testing.
+// Used by TestExportXLSX_Returns_RealExcelBytes and TestExportXLSX_ThreeSheets.
+func ExportGenerateXLSXBytes(report *Report) ([]byte, error) {
+	return generateXLSXBytes(report)
+}
+
+// ExportDetectScopeMismatch exposes the internal detectScopeMismatch for testing (Issue #89).
+func ExportDetectScopeMismatch(priorLines, currentLines []ResultLineHeader) []string {
+	return detectScopeMismatch(priorLines, currentLines)
+}
+
+// ExportScopeMismatchThresholdPct exposes the threshold constant for test assertions.
+func ExportScopeMismatchThresholdPct() string {
+	return scopeMismatchThresholdPct.String()
+}
+
+// ExportAsyncThreshold exposes the asyncThreshold constant for test assertions (Issue #88).
+func ExportAsyncThreshold() int {
+	return asyncThreshold
+}
+
 // NewServiceForTest creates a Service with a fake (unconnected) DB for handler routing tests.
 // The DB is opened with a DSN that will never succeed a Ping — callers must not invoke
 // any DB-bound service methods. Only use this in tests that exercise routing/validation logic.
