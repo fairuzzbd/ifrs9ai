@@ -686,8 +686,8 @@ func TestService_Cancel_NotMaker(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected calcRunError; got %T: %v", err, err)
 	}
-	if ce.Code() != "FORBIDDEN" {
-		t.Errorf("code = %q; want FORBIDDEN", ce.Code())
+	if ce.Code() != "CALC_RUN_FORBIDDEN_NOT_MAKER" {
+		t.Errorf("code = %q; want CALC_RUN_FORBIDDEN_NOT_MAKER", ce.Code())
 	}
 	if ce.HTTPStatus() != 403 {
 		t.Errorf("http = %d; want 403", ce.HTTPStatus())
@@ -1055,6 +1055,46 @@ func TestService_ApproveSeal_SoDViolation(t *testing.T) {
 	}
 }
 
+// ─── Service.ApproveSeal — SoD violation: creator == approver (F1, DEC-017) ──
+
+func TestApproveSeal_SoDViolation_CreatorIsApprover(t *testing.T) {
+	svc, mock := newTestService(t)
+	// actorID is the CREATOR of the calc_run — SoD violation (approver ≠ creator).
+	actorID := uuid.New()
+	runID := uuid.New()
+
+	mock.MatchExpectationsInOrder(false)
+	// Return a run whose created_by == actorID and seal_requested_by is a different user.
+	requesterID := uuid.New()
+	mock.ExpectQuery(`SELECT .+ FROM ecl.calc_run`).
+		WithArgs(runID).
+		WillReturnRows(buildCalcRunRowCreatedByWithRequester(runID, "SEAL_REQUESTED", actorID, requesterID))
+
+	// Creator SoD audit write: BeginTx + hash query + audit INSERT + Commit.
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT current_hash FROM aud.audit_log`).
+		WillReturnRows(sqlmock.NewRows([]string{"current_hash"}))
+	mock.ExpectExec(`INSERT INTO aud.audit_log`).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	req := calcrun.SealApproveBody{Comment: "Should be rejected by SoD."}
+	_, err := svc.ApproveSeal(context.Background(), runID, req, actorID, true /* stepUpFresh */)
+	if err == nil {
+		t.Fatal("expected SoD violation error for creator == approver")
+	}
+	ce, ok := calcrun.IsCalcRunError(err)
+	if !ok {
+		t.Fatalf("expected calcRunError; got %T: %v", err, err)
+	}
+	if ce.Code() != "CALC_RUN_SEAL_SOD_VIOLATION" {
+		t.Errorf("code = %q; want CALC_RUN_SEAL_SOD_VIOLATION", ce.Code())
+	}
+	if ce.HTTPStatus() != 403 {
+		t.Errorf("http = %d; want 403", ce.HTTPStatus())
+	}
+}
+
 // ─── Service.RejectSeal — SoD violation: requester == rejector ───────────────
 
 func TestService_RejectSeal_SoDViolation(t *testing.T) {
@@ -1395,6 +1435,45 @@ func TestService_Start_WithAsynqClient_EnqueueFails(t *testing.T) {
 	}
 }
 
+// ─── F2: StatusSealRejected constant + CanRequestSeal ────────────────────────
+
+func TestStatusSealRejected_CanRequestSeal(t *testing.T) {
+	// SEAL_REJECTED must be eligible for re-submission (F2, FSD-APP-C §5.4).
+	if !calcrun.StatusSealRejected.CanRequestSeal() {
+		t.Error("CanRequestSeal() = false for SEAL_REJECTED; want true")
+	}
+}
+
+func TestStatusSealRejected_IsNotTerminal(t *testing.T) {
+	// SEAL_REJECTED is not a terminal state — only SEALED and CANCELLED are.
+	if calcrun.StatusSealRejected.IsTerminal() {
+		t.Error("IsTerminal() = true for SEAL_REJECTED; want false")
+	}
+}
+
+func TestStatusSealRejected_CannotApproveSeal(t *testing.T) {
+	// SEAL_REJECTED must not allow a direct approve (must go SEAL_REJECTED → SEAL_REQUESTED first).
+	if calcrun.StatusSealRejected.CanApproveSeal() {
+		t.Error("CanApproveSeal() = true for SEAL_REJECTED; want false")
+	}
+}
+
+// ─── F3: ErrCalcRunForbiddenNotMaker uses specific error code ─────────────────
+
+func TestErrCalcRunForbiddenNotMaker_SpecificCode(t *testing.T) {
+	err := calcrun.ErrCalcRunForbiddenNotMaker("creator-uuid")
+	ce, ok := calcrun.IsCalcRunError(err)
+	if !ok {
+		t.Fatalf("expected calcRunError; got %T: %v", err, err)
+	}
+	if ce.Code() != "CALC_RUN_FORBIDDEN_NOT_MAKER" {
+		t.Errorf("code = %q; want CALC_RUN_FORBIDDEN_NOT_MAKER (not generic FORBIDDEN)", ce.Code())
+	}
+	if ce.HTTPStatus() != 403 {
+		t.Errorf("http = %d; want 403", ce.HTTPStatus())
+	}
+}
+
 // ─── helper: build a minimal calc_run result row ─────────────────────────────
 
 // buildCalcRunRow returns sqlmock rows for a minimal CalcRun with status and error_count.
@@ -1517,6 +1596,40 @@ func buildCalcRunRowCreatedBy(id uuid.UUID, status string, creatorID uuid.UUID) 
 		nil, nil,
 		nil,
 		nil, nil,
+		nil, nil,
+		nil, nil,
+		nil, nil, nil,
+		nil, nil, nil,
+		nil,
+		now, creatorID, now, creatorID, 1, "TUGURE",
+	)
+}
+
+// buildCalcRunRowCreatedByWithRequester returns sqlmock rows with both created_by and
+// seal_requested_by set to distinct UUIDs (used for F1 SoD creator-is-approver test).
+func buildCalcRunRowCreatedByWithRequester(id uuid.UUID, status string, creatorID, requesterID uuid.UUID) *sqlmock.Rows {
+	now := time.Now().UTC()
+	evalDate := time.Date(2026, 6, 13, 0, 0, 0, 0, time.UTC)
+	return sqlmock.NewRows([]string{
+		"id", "periode_id", "evaluation_date", "scope", "status",
+		"job_id",
+		"total_instrumen", "processed_count", "error_count",
+		"started_at", "completed_at",
+		"parameter_snapshot_jsonb",
+		"seal_requested_by", "seal_requested_at",
+		"seal_approved_by", "seal_approved_at",
+		"sealed_at", "signature_hash_seal",
+		"seal_rejected_by", "seal_rejected_at", "reject_reason",
+		"cancelled_by", "cancelled_at", "cancel_reason",
+		"superseded_by_run_id",
+		"created_at", "created_by", "updated_at", "updated_by", "row_version", "tenant_id",
+	}).AddRow(
+		id, "periode-2026-06", evalDate, "ALL_ACTIVE", status,
+		nil,
+		nil, 0, 0,
+		nil, nil,
+		nil,
+		requesterID, now, // seal_requested_by ≠ creator
 		nil, nil,
 		nil, nil,
 		nil, nil, nil,

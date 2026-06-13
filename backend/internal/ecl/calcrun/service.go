@@ -539,7 +539,37 @@ func (s *Service) ApproveSeal(ctx context.Context, id uuid.UUID, req SealApprove
 		return CalcRun{}, ErrCalcRunSealNotRequested(string(run.Status))
 	}
 
-	// 4-eyes SoD: approver ≠ requester (server-side enforcement, DEC-017).
+	// SoD check 1: approver ≠ creator (server-side enforcement, DEC-017).
+	// The DB CHECK constraint is the last line of defence; service layer must enforce first.
+	if run.CreatedBy == actorID {
+		sodTx, txErr := s.repo.BeginTx(ctx)
+		if txErr == nil {
+			txWriter := s.auditWriter.WithTx(sodTx)
+			if writeErr := txWriter.Write(ctx, audit.Event{
+				Action:     "CALC_RUN.SOD_VIOLATION_ATTEMPT",
+				EntityType: "ecl.calc_run",
+				EntityID:   id,
+				After: map[string]any{
+					"id":             id,
+					"attempted_by":   actorID,
+					"created_by":     run.CreatedBy,
+					"violation_type": "SEAL_APPROVE_BY_CREATOR",
+				},
+				ActorUserID: actorID.String(),
+			}); writeErr != nil {
+				if rbErr := sodTx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+					s.logger.WarnContext(ctx, "calcrun.ApproveSeal: creator SoD audit rollback error", "error", rbErr)
+				}
+				return CalcRun{}, fmt.Errorf("calcrun.ApproveSeal: creator SoD audit write: %w", writeErr)
+			}
+			if commitErr := sodTx.Commit(); commitErr != nil {
+				return CalcRun{}, fmt.Errorf("calcrun.ApproveSeal: creator SoD audit commit: %w", commitErr)
+			}
+		}
+		return CalcRun{}, ErrCalcRunSealSoDViolation(actorID.String())
+	}
+
+	// SoD check 2: approver ≠ requester (server-side enforcement, DEC-017).
 	if run.SealRequestedBy != nil && *run.SealRequestedBy == actorID {
 		// Write SoD violation audit event before returning error.
 		// Failure to record this audit event is itself an error — abort and return.
