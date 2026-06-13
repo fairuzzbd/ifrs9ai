@@ -221,7 +221,7 @@ func (h *Handler) ExportDisclosure(c *gin.Context) {
 		return
 	}
 
-	xlsxBytes, err := h.svc.ExportXLSX(c.Request.Context(), report, forceMismatch)
+	xlsxBytes, err := h.svc.ExportXLSX(c.Request.Context(), report, forceMismatch, actorID)
 	if err != nil {
 		writeRollForwardError(c, err)
 		return
