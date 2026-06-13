@@ -263,23 +263,27 @@ func TestComputeSingle_POCI_PersistTrue_AuditTx(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POCI persist=true: %v", err)
 	}
-	if result.RoutingPath != RoutingPOCIDeferred {
-		t.Errorf("routing: want POCI_DEFERRED, got %s", result.RoutingPath)
+	// Phase 4.5 (DEC-POCI-001): routing_path = POCI_COMPUTED (CA-EIR available, baseline persisted).
+	if result.RoutingPath != RoutingPOCIComputed {
+		t.Errorf("routing: want POCI_COMPUTED, got %s", result.RoutingPath)
 	}
-	// F2 fix: POCI computes via STANDARD → ECLWeightedIDR is non-nil (computed ECL).
+	// Phase 4.5: POCI computes baseline ECL via STANDARD → ECLWeightedIDR is non-nil.
 	if result.ECLWeightedIDR == nil {
-		t.Error("F2 fix: POCI ECLWeightedIDR must be non-nil (computed via STANDARD path)")
+		t.Error("Phase 4.5: POCI ECLWeightedIDR must be non-nil (initial baseline ECL computed)")
 	}
-	// Verify POCI warning is present.
-	found := false
-	for _, w := range result.Warnings {
-		if w == WarnPOCIRequiresFullCAEIR {
-			found = true
-			break
+	// Verify both POCI warning codes are present.
+	wantWarnings := []string{WarnPOCIRequiresFullCAEIR, WarnPOCIECLRepresentsInitialBaseline}
+	for _, want := range wantWarnings {
+		found := false
+		for _, w := range result.Warnings {
+			if w == want {
+				found = true
+				break
+			}
 		}
-	}
-	if !found {
-		t.Errorf("F2 fix: expected warning %s in POCI result, got %v", WarnPOCIRequiresFullCAEIR, result.Warnings)
+		if !found {
+			t.Errorf("POCI persist: expected warning %s, got %v", want, result.Warnings)
+		}
 	}
 }
 

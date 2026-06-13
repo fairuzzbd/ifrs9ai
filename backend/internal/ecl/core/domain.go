@@ -83,17 +83,39 @@ const (
 	// No ECL is required. ecl_weighted_idr = 0.0000. No ecl.calc_result_line row written.
 	RoutingSkipFVTPL RoutingPath = "SKIP_FVTPL"
 
-	// RoutingPOCIDeferred indicates a POCI (Purchased or Originated Credit Impaired) instrument.
-	// ECL computation requires credit-adjusted EIR (Phase 5 defer).
+	// RoutingPOCIDeferred indicates a POCI instrument without a CA-EIR schedule yet.
+	// Used when flag_poci=true but no credit-adjusted EIR schedule exists.
 	// ecl_weighted_idr = NULL (not 0). No ecl.calc_result_line row written.
+	// Superseded by RoutingPOCIComputed once CA-EIR is available (DEC-POCI-001).
 	RoutingPOCIDeferred RoutingPath = "POCI_DEFERRED"
+
+	// RoutingPOCIComputed indicates a POCI instrument that has been fully processed
+	// with credit-adjusted EIR per PSAK 71 §5.5.13 (Phase 4.5).
+	//
+	// ECL is computed via the STANDARD formula path using PD/LGD/EAD helpers, but
+	// the EIR used for the amortization schedule was produced by Solver.SolveCreditAdjusted
+	// (PD-adjusted cashflows at origination). ECL result represents the initial baseline
+	// lifetime ECL (not a delta from origination). Delta computation is deferred to Phase 5.
+	//
+	// ecl_weighted_idr = computed non-nil value.
+	// ecl.calc_result_line row IS written (unlike POCI_DEFERRED).
+	// DEC-POCI-001.
+	RoutingPOCIComputed RoutingPath = "POCI_COMPUTED"
 )
 
 // ─── Warning codes ────────────────────────────────────────────────────────────
 
 const (
-	// WarnPOCIRequiresFullCAEIR is emitted for POCI instruments. Phase 5 defer.
+	// WarnPOCIRequiresFullCAEIR is emitted for POCI instruments where full CA-EIR
+	// integration (jurnal P&L direct booking) is deferred to Phase 5.
+	// Still emitted in Phase 4.5 for RoutingPOCIComputed. DEC-POCI-002.
 	WarnPOCIRequiresFullCAEIR = "ECL_POCI_REQUIRES_FULL_CREDIT_ADJUSTED_EIR"
+
+	// WarnPOCIECLRepresentsInitialBaseline is emitted when ECL for a POCI instrument
+	// represents the full initial-baseline lifetime ECL, NOT the change-in-ECL-since-origination.
+	// Per PSAK 71 §5.5.13, the correct POCI ECL delta is computed starting Phase 5.
+	// DEC-POCI-001: Phase 4.5 limitation — baseline persisted; delta deferred.
+	WarnPOCIECLRepresentsInitialBaseline = "POCI_ECL_REPRESENTS_INITIAL_BASELINE_NOT_DELTA"
 
 	// WarnFVTPLSkip is emitted for FVTPL / FVOCI_ELECTION instruments.
 	WarnFVTPLSkip = "FVTPL_SKIP"

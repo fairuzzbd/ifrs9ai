@@ -164,27 +164,31 @@ func TestHandler_ComputeSingle_POCI_200_NullECL(t *testing.T) {
 		t.Fatalf("unmarshal response: %v", err)
 	}
 	data := resp["data"].(map[string]interface{})
-	if data["routingPath"] != "POCI_DEFERRED" {
-		t.Errorf("routingPath: want POCI_DEFERRED, got %v", data["routingPath"])
+	// Phase 4.5 (DEC-POCI-001): routing_path = POCI_COMPUTED (CA-EIR available).
+	if data["routingPath"] != "POCI_COMPUTED" {
+		t.Errorf("routingPath: want POCI_COMPUTED, got %v", data["routingPath"])
 	}
-	// F2 fix: POCI now computes via STANDARD path — eclWeightedIdr must be present and non-null.
+	// Phase 4.5: POCI baseline ECL computed — eclWeightedIdr must be present and non-null.
 	eclVal, hasKey := data["eclWeightedIdr"]
 	if !hasKey {
-		t.Errorf("POCI: eclWeightedIdr must be present in response (F2 fix: computed via STANDARD)")
+		t.Errorf("POCI: eclWeightedIdr must be present in response (Phase 4.5: initial baseline ECL computed)")
 	} else if eclVal == nil {
-		t.Errorf("POCI: eclWeightedIdr must be non-nil (F2 fix: ECL computed, credit-adjusted EIR deferred)")
+		t.Errorf("POCI: eclWeightedIdr must be non-nil (Phase 4.5: baseline ECL, delta deferred to Phase 5)")
 	}
-	// POCI warning must be present.
+	// Both POCI warning codes must be present.
 	warnings, _ := data["warnings"].([]interface{})
-	foundWarn := false
-	for _, w := range warnings {
-		if w == WarnPOCIRequiresFullCAEIR {
-			foundWarn = true
-			break
+	wantCodes := []string{WarnPOCIRequiresFullCAEIR, WarnPOCIECLRepresentsInitialBaseline}
+	for _, want := range wantCodes {
+		foundWarn := false
+		for _, w := range warnings {
+			if w == want {
+				foundWarn = true
+				break
+			}
 		}
-	}
-	if !foundWarn {
-		t.Errorf("POCI: expected warning %s in response, got %v", WarnPOCIRequiresFullCAEIR, data["warnings"])
+		if !foundWarn {
+			t.Errorf("POCI handler: expected warning %s in response, got %v", want, data["warnings"])
+		}
 	}
 }
 

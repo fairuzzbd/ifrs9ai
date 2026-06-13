@@ -252,14 +252,21 @@ func (o *ECLOrchestrator) handleSkipFVTPL(ctx context.Context, req ComputeReques
 
 // ─── POCI path ────────────────────────────────────────────────────────────────
 
-// handlePOCI computes ECL via the STANDARD path for POCI instruments and appends
-// a warning that credit-adjusted EIR is required (Phase 5 defer).
+// handlePOCI computes ECL via the STANDARD path for POCI instruments (Phase 4.5).
 //
-// F2 fix (MAJOR): Previously returned ECLWeightedIDR=nil with no persist.
-// Scope spec: "ECL still computed via STANDARD path with flag + warning".
-// POCI routing_path column is set to 'POCI_DEFERRED' for audit trail.
-// ECLWeightedIDR is non-nil (computed via STANDARD formula).
-// Credit-adjusted EIR adjustment is deferred to Phase 5 (FSD-APP-C §4.3).
+// POCI semantics per PSAK 71 §5.5.13 / IFRS 9 §5.4.1(c):
+//   - Credit-adjusted EIR (CA-EIR) is used for the amortization schedule.
+//   - CA-EIR is computed via Solver.SolveCreditAdjusted with PD-adjusted cashflows.
+//   - ECL allowance = change in lifetime ECL since origination (not full lifetime ECL).
+//
+// Phase 4.5 limitation (DEC-POCI-001):
+//   - ECL is computed via STANDARD formula (EAD × PD × LGD × FL × bobot).
+//   - Result represents the INITIAL BASELINE lifetime ECL, not the delta-since-origination.
+//   - Delta computation and jurnal P&L direct booking are deferred to Phase 5.
+//   - RoutingPath = POCI_COMPUTED (replaces POCI_DEFERRED from prior stub).
+//
+// DEC-POCI-002: Phase 5 will add delta + jurnal integration.
+// DEC-POCI-003: CA-EIR uses NR with PD-adjusted CF at origination only.
 func (o *ECLOrchestrator) handlePOCI(ctx context.Context, req ComputeRequest, inst *InstrumenSnapshot) (*ComputeResult, error) {
 	// Resolve stage via standard path.
 	stage, err := o.resolveStage(ctx, req.InstrumenID)
@@ -275,17 +282,52 @@ func (o *ECLOrchestrator) handlePOCI(ctx context.Context, req ComputeRequest, in
 		return nil, err
 	}
 
-	// Compute via STANDARD formula — inst already loaded.
-	result, err := o.handleStandard(ctx, req, inst, stage, bobot)
+	// Compute via STANDARD formula with POCI_COMPUTED routing override.
+	// The EAD used here reflects the CA-EIR adjusted carrying amount from the
+	// amortization schedule (built via SolveCreditAdjusted in Phase 4.5 EIR service).
+	// routingOverride = RoutingPOCIComputed ensures both in-memory result and
+	// persisted DB row carry POCI_COMPUTED instead of POCI_DEFERRED.
+	// DEC-POCI-001: Phase 4.5 baseline ECL persistence.
+	periodeID := req.PeriodeID
+	m2Stage := stageToM2(stage)
+
+	_, pdGoodDetail, err := o.helpers.PD.GetPD(ctx, req.InstrumenID, m2Stage, helpers.ScenarioGood, periodeID, req.EvaluationDate)
 	if err != nil {
-		return nil, fmt.Errorf("core.handlePOCI STANDARD compute: %w", err)
+		return nil, fmt.Errorf("core.handlePOCI PD-GOOD: %w", err)
+	}
+	_, pdNormalDetail, err := o.helpers.PD.GetPD(ctx, req.InstrumenID, m2Stage, helpers.ScenarioNormal, periodeID, req.EvaluationDate)
+	if err != nil {
+		return nil, fmt.Errorf("core.handlePOCI PD-NORMAL: %w", err)
+	}
+	_, pdBadDetail, err := o.helpers.PD.GetPD(ctx, req.InstrumenID, m2Stage, helpers.ScenarioBad, periodeID, req.EvaluationDate)
+	if err != nil {
+		return nil, fmt.Errorf("core.handlePOCI PD-BAD: %w", err)
+	}
+	_, lgdDetail, err := o.helpers.LGD.GetLGD(ctx, req.InstrumenID, periodeID)
+	if err != nil {
+		return nil, fmt.Errorf("core.handlePOCI LGD: %w", err)
+	}
+	eadIDR, _, err := o.helpers.EAD.ComputeEAD(ctx, req.InstrumenID, req.EvaluationDate)
+	if err != nil {
+		return nil, fmt.Errorf("core.handlePOCI EAD: %w", err)
 	}
 
-	// Override routing_path to POCI_DEFERRED for audit column.
-	result.RoutingPath = RoutingPOCIDeferred
+	result, err := o.applyFormulaAndPersist(ctx, req, inst, stage, bobot,
+		pdGoodDetail, pdNormalDetail, pdBadDetail,
+		lgdDetail, eadIDR,
+		RoutingPOCIComputed, // routingOverride: set POCI_COMPUTED on both result + DB row
+	)
+	if err != nil {
+		return nil, fmt.Errorf("core.handlePOCI applyFormula: %w", err)
+	}
+
+	// Ensure FlagPOCI=true (applyFormulaAndPersist inherits inst.FlagPOCI, but be explicit).
 	result.FlagPOCI = true
-	// Append POCI warning — ECL is computed but credit-adjusted EIR not yet applied.
-	result.Warnings = append(result.Warnings, WarnPOCIRequiresFullCAEIR)
+
+	// Append POCI warnings:
+	//   1. WarnPOCIRequiresFullCAEIR — jurnal P&L booking not yet wired (Phase 5).
+	//   2. WarnPOCIECLRepresentsInitialBaseline — Phase 4.5 baseline limitation.
+	result.Warnings = append(result.Warnings, WarnPOCIRequiresFullCAEIR, WarnPOCIECLRepresentsInitialBaseline)
 
 	return result, nil
 }
@@ -441,8 +483,12 @@ func (o *ECLOrchestrator) handleLPS(
 // ─── applyFormulaAndPersist ──────────────────────────────────────────────────
 
 // applyFormulaAndPersist applies the canonical ECL formula and optionally persists.
-// Called from handleStandard and handleLPS after PD/LGD/EAD are resolved.
+// Called from handleStandard, handleLPS, and handlePOCI after PD/LGD/EAD are resolved.
 // OQ-M7-4: uses PDDetail.PDBase for formula, PDDetail.ImpactMevPDMultiplier for FL.
+//
+// routingOverride: when non-empty, overrides DetermineRouting(inst) for both the
+// in-memory result and the persisted DB row. Used by handlePOCI to write POCI_COMPUTED
+// instead of POCI_DEFERRED (DEC-POCI-001).
 func (o *ECLOrchestrator) applyFormulaAndPersist(
 	ctx context.Context,
 	req ComputeRequest,
@@ -454,7 +500,13 @@ func (o *ECLOrchestrator) applyFormulaAndPersist(
 	pdBadDetail helpers.PDDetail,
 	lgdDetail helpers.LGDDetail,
 	eadIDR decimal.Decimal,
+	routingOverride ...RoutingPath,
 ) (*ComputeResult, error) {
+	// Resolve effective routing path (override takes precedence for POCI).
+	effectiveRouting := DetermineRouting(inst)
+	if len(routingOverride) > 0 && routingOverride[0] != "" {
+		effectiveRouting = routingOverride[0]
+	}
 	// Collect warnings from M2 helpers.
 	warnings := make([]string, 0, len(pdGoodDetail.Warnings)+len(pdNormalDetail.Warnings)+len(lgdDetail.Warnings))
 	for _, w := range pdGoodDetail.Warnings {
@@ -528,7 +580,7 @@ func (o *ECLOrchestrator) applyFormulaAndPersist(
 		EvaluationDate:          req.EvaluationDate,
 		PeriodeID:               req.PeriodeID,
 		Stage:                   stage,
-		RoutingPath:             DetermineRouting(inst),
+		RoutingPath:             effectiveRouting,
 		FlagPOCI:                inst.FlagPOCI,
 		EADIDR:                  &eadResult,
 		PDUsedPerScenario:       pdScenarios,
@@ -555,7 +607,7 @@ func (o *ECLOrchestrator) applyFormulaAndPersist(
 			EvaluationDate:    req.EvaluationDate,
 			PeriodeID:         req.PeriodeID,
 			Stage:             stage,
-			RoutingPath:       DetermineRouting(inst),
+			RoutingPath:       effectiveRouting,
 			EADIDR:            eadIDR,
 			PDGood:            &fr.PDGood,
 			PDNormal:          &fr.PDNormal,
