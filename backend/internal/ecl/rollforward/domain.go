@@ -486,6 +486,7 @@ type StageHistoryRow struct {
 // InstrumentBucket identifies which roll-forward category an instrument belongs to.
 type InstrumentBucket string
 
+// Stage transition buckets used in roll-forward movement categorization.
 const (
 	BucketStage1To2      InstrumentBucket = "stage_1_to_2"
 	BucketStage2To1      InstrumentBucket = "stage_2_to_1"

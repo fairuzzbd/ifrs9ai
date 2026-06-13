@@ -28,8 +28,8 @@ import (
 )
 
 // buildFullTestEngine creates a gin engine with rollforward routes
-// backed by a sqlmock DB. Returns (engine, mock, svc).
-func buildFullTestEngine(t *testing.T) (*gin.Engine, sqlmock.Sqlmock, *rollforward.Service) {
+// backed by a sqlmock DB. Returns (engine, mock).
+func buildFullTestEngine(t *testing.T) (*gin.Engine, sqlmock.Sqlmock) {
 	t.Helper()
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -57,7 +57,7 @@ func buildFullTestEngine(t *testing.T) (*gin.Engine, sqlmock.Sqlmock, *rollforwa
 	dashGroup.Use(makeClaimsMiddleware())
 	dashGroup.GET("/ckpn-trend", h.GetCKPNTrend)
 
-	return r, mock, svc
+	return r, mock
 }
 
 // makeClaimsMiddleware injects claims with all rollforward permissions.
@@ -81,7 +81,7 @@ func makeClaimsMiddleware() gin.HandlerFunc {
 // ─── GET /ecl/roll-forward — service error → writeRollForwardError ────────────
 
 func TestGetRollForward_ServiceError_WriteRollForwardError(t *testing.T) {
-	r, mock, _ := buildFullTestEngine(t)
+	r, mock := buildFullTestEngine(t)
 
 	currentRunID := uuid.New()
 
@@ -114,7 +114,7 @@ func TestGetRollForward_ServiceError_WriteRollForwardError(t *testing.T) {
 // ─── GET /ecl/roll-forward — success ─────────────────────────────────────────
 
 func TestGetRollForward_Success_Returns200(t *testing.T) {
-	r, mock, _ := buildFullTestEngine(t)
+	r, mock := buildFullTestEngine(t)
 
 	currentRunID := uuid.New()
 	instrID := uuid.New()
@@ -149,7 +149,7 @@ func TestGetRollForward_Success_Returns200(t *testing.T) {
 // ─── POST /ecl/roll-forward/compute — success ─────────────────────────────────
 
 func TestComputeRollForward_ServiceSuccess_Returns200(t *testing.T) {
-	r, mock, _ := buildFullTestEngine(t)
+	r, mock := buildFullTestEngine(t)
 
 	currentRunID := uuid.New()
 	instrID := uuid.New()
@@ -182,7 +182,7 @@ func TestComputeRollForward_ServiceSuccess_Returns200(t *testing.T) {
 // ─── GET /ecl/dashboard/ckpn-trend — success ─────────────────────────────────
 
 func TestGetCKPNTrend_FullHandler_Success(t *testing.T) {
-	r, mock, _ := buildFullTestEngine(t)
+	r, mock := buildFullTestEngine(t)
 
 	id1, id2 := uuid.New(), uuid.New()
 	now := time.Now()
@@ -216,7 +216,7 @@ func TestGetCKPNTrend_FullHandler_Success(t *testing.T) {
 // ─── GET /ecl/roll-forward/:id/export — success ──────────────────────────────
 
 func TestExportDisclosure_FullHandler_Reconciled_Returns200(t *testing.T) {
-	r, mock, _ := buildFullTestEngine(t)
+	r, mock := buildFullTestEngine(t)
 
 	currentRunID := uuid.New()
 	instrID := uuid.New()
@@ -249,7 +249,7 @@ func TestExportDisclosure_FullHandler_Reconciled_Returns200(t *testing.T) {
 // ─── GET /ecl/roll-forward/portfolios/:pid — success ──────────────────────────
 
 func TestGetPortfolioRollForward_FullHandler_Success(t *testing.T) {
-	r, mock, _ := buildFullTestEngine(t)
+	r, mock := buildFullTestEngine(t)
 
 	portID, currentRunID := uuid.New(), uuid.New()
 	instrID := uuid.New()
@@ -286,7 +286,7 @@ func TestGetPortfolioRollForward_FullHandler_Success(t *testing.T) {
 // ─── GET /ecl/roll-forward/portfolios/:pid/instruments — success ───────────────
 
 func TestListPortfolioInstruments_FullHandler_Found(t *testing.T) {
-	r, mock, _ := buildFullTestEngine(t)
+	r, mock := buildFullTestEngine(t)
 
 	portID := uuid.New()
 	instrID1, instrID2 := uuid.New(), uuid.New()
@@ -311,7 +311,7 @@ func TestListPortfolioInstruments_FullHandler_Found(t *testing.T) {
 }
 
 func TestListPortfolioInstruments_FullHandler_NotFound(t *testing.T) {
-	r, mock, _ := buildFullTestEngine(t)
+	r, mock := buildFullTestEngine(t)
 
 	portID := uuid.New()
 

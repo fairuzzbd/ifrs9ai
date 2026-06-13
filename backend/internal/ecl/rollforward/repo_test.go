@@ -14,7 +14,6 @@ package rollforward_test
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 	"time"
 
@@ -24,7 +23,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/ecl/rollforward"
 )
 
-func setupMock(t *testing.T) (*sql.DB, sqlmock.Sqlmock, *rollforward.Repo) {
+func setupMock(t *testing.T) (sqlmock.Sqlmock, *rollforward.Repo) {
 	t.Helper()
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -32,13 +31,13 @@ func setupMock(t *testing.T) (*sql.DB, sqlmock.Sqlmock, *rollforward.Repo) {
 	}
 	t.Cleanup(func() { db.Close() }) //nolint:errcheck
 	repo := rollforward.NewRepo(db)
-	return db, mock, repo
+	return mock, repo
 }
 
 // ─── GetResultLinesByCalcRun ─────────────────────────────────────────────────
 
 func TestGetResultLinesByCalcRun_NormalAndPOCI(t *testing.T) {
-	_, mock, repo := setupMock(t)
+	mock, repo := setupMock(t)
 	calcRunID := uuid.New()
 	instrID1, instrID2 := uuid.New(), uuid.New()
 
@@ -74,7 +73,7 @@ func TestGetResultLinesByCalcRun_NormalAndPOCI(t *testing.T) {
 }
 
 func TestGetResultLinesByCalcRun_Empty(t *testing.T) {
-	_, mock, repo := setupMock(t)
+	mock, repo := setupMock(t)
 	calcRunID := uuid.New()
 
 	mock.ExpectQuery(`SELECT instrumen_id, stage, ecl_weighted_idr, ead_idr`).
@@ -94,7 +93,7 @@ func TestGetResultLinesByCalcRun_Empty(t *testing.T) {
 // ─── GetCalcRunStatus ────────────────────────────────────────────────────────
 
 func TestGetCalcRunStatus_Found(t *testing.T) {
-	_, mock, repo := setupMock(t)
+	mock, repo := setupMock(t)
 	calcRunID := uuid.New()
 
 	rows := sqlmock.NewRows([]string{"status", "periode_id"}).
@@ -120,7 +119,7 @@ func TestGetCalcRunStatus_Found(t *testing.T) {
 }
 
 func TestGetCalcRunStatus_NotFound(t *testing.T) {
-	_, mock, repo := setupMock(t)
+	mock, repo := setupMock(t)
 	calcRunID := uuid.New()
 
 	mock.ExpectQuery(`SELECT status, periode_id FROM ecl.calc_run`).
@@ -140,7 +139,7 @@ func TestGetCalcRunStatus_NotFound(t *testing.T) {
 // ─── GetSealedCalcRunsByPeriode ──────────────────────────────────────────────
 
 func TestGetSealedCalcRunsByPeriode_ReturnsTwoRuns(t *testing.T) {
-	_, mock, repo := setupMock(t)
+	mock, repo := setupMock(t)
 	id1, id2 := uuid.New(), uuid.New()
 	now := time.Now()
 
@@ -168,7 +167,7 @@ func TestGetSealedCalcRunsByPeriode_ReturnsTwoRuns(t *testing.T) {
 // ─── GetECLByStageForCalcRun ─────────────────────────────────────────────────
 
 func TestGetECLByStageForCalcRun_AllThreeStages(t *testing.T) {
-	_, mock, repo := setupMock(t)
+	mock, repo := setupMock(t)
 	calcRunID := uuid.New()
 
 	rows := sqlmock.NewRows([]string{"stage", "coalesce"}).
@@ -203,7 +202,7 @@ func TestGetECLByStageForCalcRun_AllThreeStages(t *testing.T) {
 // ─── GetStageHistoryForCalcRun ────────────────────────────────────────────────
 
 func TestGetStageHistoryForCalcRun_ReturnsMap(t *testing.T) {
-	_, mock, repo := setupMock(t)
+	mock, repo := setupMock(t)
 	calcRunID := uuid.New()
 	instrID := uuid.New()
 	now := time.Now()
@@ -231,7 +230,7 @@ func TestGetStageHistoryForCalcRun_ReturnsMap(t *testing.T) {
 // ─── GetInstrumenStatusByIDs ─────────────────────────────────────────────────
 
 func TestGetInstrumenStatusByIDs_EmptyInput_NoDB(t *testing.T) {
-	_, mock, repo := setupMock(t)
+	mock, repo := setupMock(t)
 
 	// No DB expectations should be set — empty input returns early.
 	result, err := repo.GetInstrumenStatusByIDs(context.Background(), nil)
@@ -248,7 +247,7 @@ func TestGetInstrumenStatusByIDs_EmptyInput_NoDB(t *testing.T) {
 }
 
 func TestGetInstrumenStatusByIDs_SingleID(t *testing.T) {
-	_, mock, repo := setupMock(t)
+	mock, repo := setupMock(t)
 	instrID := uuid.New()
 	now := time.Now()
 
@@ -279,7 +278,7 @@ func TestGetInstrumenStatusByIDs_SingleID(t *testing.T) {
 // ─── GetPortofolioNama ────────────────────────────────────────────────────────
 
 func TestGetPortofolioNama_Found(t *testing.T) {
-	_, mock, repo := setupMock(t)
+	mock, repo := setupMock(t)
 	portID := uuid.New()
 
 	rows := sqlmock.NewRows([]string{"nama"}).AddRow("Portofolio Obligasi IDR")
@@ -301,7 +300,7 @@ func TestGetPortofolioNama_Found(t *testing.T) {
 }
 
 func TestGetPortofolioNama_NotFound(t *testing.T) {
-	_, mock, repo := setupMock(t)
+	mock, repo := setupMock(t)
 	portID := uuid.New()
 
 	mock.ExpectQuery(`SELECT nama FROM mst.portofolio`).
@@ -321,7 +320,7 @@ func TestGetPortofolioNama_NotFound(t *testing.T) {
 // ─── GetPortofolioInstruments ────────────────────────────────────────────────
 
 func TestGetPortofolioInstruments_ReturnsTwoIDs(t *testing.T) {
-	_, mock, repo := setupMock(t)
+	mock, repo := setupMock(t)
 	portID := uuid.New()
 	id1, id2 := uuid.New(), uuid.New()
 
@@ -343,7 +342,7 @@ func TestGetPortofolioInstruments_ReturnsTwoIDs(t *testing.T) {
 // ─── GetResultLinesByCalcRunAndPortfolio ─────────────────────────────────────
 
 func TestGetResultLinesByCalcRunAndPortfolio_ReturnsFiltered(t *testing.T) {
-	_, mock, repo := setupMock(t)
+	mock, repo := setupMock(t)
 	calcRunID, portID := uuid.New(), uuid.New()
 	instrID := uuid.New()
 
