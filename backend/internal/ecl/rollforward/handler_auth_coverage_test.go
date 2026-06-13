@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
@@ -378,6 +379,14 @@ func TestExportDisclosure_WithPriorCalcRunId_Success(t *testing.T) {
 		WithArgs(priorRunID).
 		WillReturnRows(sqlmock.NewRows([]string{"status", "periode_id"}).AddRow("SEALED", "MEI-2026"))
 
+	// validatePeriodeOrdering fetches tanggal_mulai from mst.periode_buku (F1).
+	mock.ExpectQuery(`SELECT tanggal_mulai FROM mst.periode_buku`).
+		WithArgs("MEI-2026").
+		WillReturnRows(sqlmock.NewRows([]string{"tanggal_mulai"}).AddRow(time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)))
+	mock.ExpectQuery(`SELECT tanggal_mulai FROM mst.periode_buku`).
+		WithArgs("JUNI-2026").
+		WillReturnRows(sqlmock.NewRows([]string{"tanggal_mulai"}).AddRow(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)))
+
 	priorLines := buildLines([]lineSpec{{id: instrID, stage: 1, ecl: "1000000.0000"}})
 	currentLines := buildLines([]lineSpec{{id: instrID, stage: 1, ecl: "1100000.0000"}})
 
@@ -393,6 +402,12 @@ func TestExportDisclosure_WithPriorCalcRunId_Success(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"instrumen_id", "calc_run_id", "trigger_type", "created_at"}))
 
 	// Audit (1 event for ComputeRollForward)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT current_hash`).WillReturnRows(sqlmock.NewRows([]string{"current_hash"}))
+	mock.ExpectExec(`INSERT INTO aud.audit_log`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	// Audit (1 event for ExportXLSX — ECL.ROLL_FORWARD_DISCLOSURE_EXPORT, F4)
 	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT current_hash`).WillReturnRows(sqlmock.NewRows([]string{"current_hash"}))
 	mock.ExpectExec(`INSERT INTO aud.audit_log`).WillReturnResult(sqlmock.NewResult(1, 1))

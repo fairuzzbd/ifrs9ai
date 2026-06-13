@@ -95,6 +95,14 @@ func expectAuditTxCommit(mock sqlmock.Sqlmock, numEvents int) {
 	mock.ExpectCommit()
 }
 
+// expectPeriodeTanggalMulai adds a mock expectation for GetPeriodeTanggalMulai.
+// Returns the given tanggal_mulai for periodeID.
+func expectPeriodeTanggalMulai(mock sqlmock.Sqlmock, periodeID string, tanggalMulai time.Time) {
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT tanggal_mulai FROM mst.periode_buku`)).
+		WithArgs(periodeID).
+		WillReturnRows(sqlmock.NewRows([]string{"tanggal_mulai"}).AddRow(tanggalMulai))
+}
+
 // ─── ComputeRollForward — first period ───────────────────────────────────────
 
 func TestComputeRollForward_FirstPeriod_AllOriginations(t *testing.T) {
@@ -267,6 +275,10 @@ func TestComputeRollForward_PriorNotSealed_AllowedWithWarning(t *testing.T) {
 	expectCalcRunStatus(mock, currentRunID, "COMPLETED", "JUNI-2026")
 	expectCalcRunStatus(mock, priorRunID, "COMPLETED", "MEI-2026") // not SEALED
 
+	// validatePeriodeOrdering now fetches tanggal_mulai from mst.periode_buku (F1).
+	expectPeriodeTanggalMulai(mock, "MEI-2026", time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC))
+	expectPeriodeTanggalMulai(mock, "JUNI-2026", time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+
 	// Load prior + current lines
 	lines := buildLines([]lineSpec{{id: instrID, stage: 1, ecl: "1000000.0000"}})
 	expectResultLines(mock, priorRunID, lines)
@@ -343,6 +355,10 @@ func TestComputeRollForward_NormalPeriod_Transfers_Reconciled(t *testing.T) {
 
 	expectCalcRunStatus(mock, currentRunID, "COMPLETED", "JUNI-2026")
 	expectCalcRunStatus(mock, priorRunID, "SEALED", "MEI-2026")
+
+	// validatePeriodeOrdering now fetches tanggal_mulai from mst.periode_buku (F1).
+	expectPeriodeTanggalMulai(mock, "MEI-2026", time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC))
+	expectPeriodeTanggalMulai(mock, "JUNI-2026", time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
 
 	priorLines := buildLines([]lineSpec{
 		{id: sameID, stage: 1, ecl: "500000.0000"},
@@ -570,7 +586,9 @@ func TestExportXLSX_Reconciled_ReturnsBytes(t *testing.T) {
 		CurrentPeriodeID: "JUNI-2026",
 	}
 
-	bytes, err := svc.ExportXLSX(context.Background(), report, false)
+	// Reconciled export: audit write is best-effort and succeeds silently without mock
+	// (no mock expectations for audit here — audit failure is logged, not returned).
+	bytes, err := svc.ExportXLSX(context.Background(), report, false, uuid.New())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -591,7 +609,8 @@ func TestExportXLSX_Mismatch_BlockedWithoutForce(t *testing.T) {
 		CurrentPeriodeID:  "JUNI-2026",
 	}
 
-	_, err := svc.ExportXLSX(context.Background(), report, false)
+	// Guard fires before audit write — no actorID needed for this error path.
+	_, err := svc.ExportXLSX(context.Background(), report, false, uuid.New())
 	if err == nil {
 		t.Fatal("expected error for MISMATCH")
 	}
@@ -616,7 +635,8 @@ func TestExportXLSX_Mismatch_AllowedWithForce(t *testing.T) {
 		CurrentPeriodeID:  "JUNI-2026",
 	}
 
-	bytes, err := svc.ExportXLSX(context.Background(), report, true)
+	// Audit write is best-effort; no mock expectations needed (failure logged, not returned).
+	bytes, err := svc.ExportXLSX(context.Background(), report, true, uuid.New())
 	if err != nil {
 		t.Fatalf("unexpected error with forceMismatch=true: %v", err)
 	}
@@ -643,5 +663,113 @@ func TestGetRollForward_FirstPeriod(t *testing.T) {
 	}
 	if report.ReconcileStatus != rollforward.ReconcileStatusReconciled {
 		t.Errorf("want RECONCILED, got %s", report.ReconcileStatus)
+	}
+}
+
+// ─── F1: validatePeriodeOrdering — temporal ordering via tanggal_mulai ───────
+
+// TestValidatePeriodeOrdering_RejectsPriorAfterCurrent verifies that a prior periode
+// with tanggal_mulai AFTER the current periode is rejected with ROLL_FORWARD_PERIODE_MISMATCH.
+// Synthetic: prior=2026-07-01 (JULI-2026), current=2026-06-01 (JUNI-2026) — inverted order.
+// Covers FSD-APP-C §5.1 F1 compliance finding.
+func TestValidatePeriodeOrdering_RejectsPriorAfterCurrent(t *testing.T) {
+	svc, mock := buildServiceWithMock(t)
+	currentRunID, priorRunID := uuid.New(), uuid.New()
+
+	// prior=JULI-2026 (future), current=JUNI-2026 (past) — inverted.
+	expectCalcRunStatus(mock, currentRunID, "COMPLETED", "JUNI-2026")
+	expectCalcRunStatus(mock, priorRunID, "SEALED", "JULI-2026")
+
+	// tanggal_mulai: prior=2026-07-01, current=2026-06-01 → prior >= current → MISMATCH
+	expectPeriodeTanggalMulai(mock, "JULI-2026", time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC))
+	expectPeriodeTanggalMulai(mock, "JUNI-2026", time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+
+	_, err := svc.ComputeRollForward(context.Background(), rollforward.ComputeRequest{
+		CurrentCalcRunID: currentRunID,
+		PriorCalcRunID:   &priorRunID,
+	})
+
+	if err == nil {
+		t.Fatal("expected ROLL_FORWARD_PERIODE_MISMATCH error, got nil")
+	}
+	de, ok := err.(*rollforward.DomainErrorExported)
+	if !ok {
+		t.Fatalf("expected *domainError, got %T: %v", err, err)
+	}
+	if de.Code() != rollforward.CodeRollForwardPeriodeMismatch {
+		t.Errorf("want %s, got %s", rollforward.CodeRollForwardPeriodeMismatch, de.Code())
+	}
+	_ = mock.ExpectationsWereMet()
+}
+
+// TestValidatePeriodeOrdering_AllowsPriorBeforeCurrent_HappyPath verifies that a prior
+// periode with tanggal_mulai strictly before current is accepted (no error returned).
+// Synthetic: prior=2026-06-01 (JUNI-2026), current=2026-07-01 (JULI-2026) — correct order.
+func TestValidatePeriodeOrdering_AllowsPriorBeforeCurrent_HappyPath(t *testing.T) {
+	svc, mock := buildServiceWithMock(t)
+	currentRunID, priorRunID := uuid.New(), uuid.New()
+	instrID := uuid.New()
+
+	expectCalcRunStatus(mock, currentRunID, "COMPLETED", "JULI-2026")
+	expectCalcRunStatus(mock, priorRunID, "SEALED", "JUNI-2026")
+
+	// tanggal_mulai: prior=2026-06-01, current=2026-07-01 → prior < current → OK
+	expectPeriodeTanggalMulai(mock, "JUNI-2026", time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+	expectPeriodeTanggalMulai(mock, "JULI-2026", time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC))
+
+	// Lines for both runs — same instrument, same stage (remeasurement path).
+	lines := buildLines([]lineSpec{{id: instrID, stage: 1, ecl: "1000000.0000"}})
+	expectResultLines(mock, priorRunID, lines)
+	expectResultLines(mock, currentRunID, lines)
+	expectStageHistory(mock, currentRunID)
+
+	expectAuditTxCommit(mock, 1)
+
+	report, err := svc.ComputeRollForward(context.Background(), rollforward.ComputeRequest{
+		CurrentCalcRunID: currentRunID,
+		PriorCalcRunID:   &priorRunID,
+		ActorID:          uuid.New(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error for valid ordering: %v", err)
+	}
+	if report.ReconcileStatus != rollforward.ReconcileStatusReconciled {
+		t.Errorf("want RECONCILED, got %s", report.ReconcileStatus)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet mock expectations: %v", err)
+	}
+}
+
+// ─── F4: ExportXLSX — audit event written ────────────────────────────────────
+
+// TestExportXLSX_WritesAuditEvent verifies that ExportXLSX writes a
+// ECL.ROLL_FORWARD_DISCLOSURE_EXPORT audit event after successful byte generation
+// (DEC-018, ux-patterns.md §1.4).
+func TestExportXLSX_WritesAuditEvent(t *testing.T) {
+	svc, mock := buildServiceWithMock(t)
+	actorID := uuid.New()
+
+	report := &rollforward.Report{
+		ReportID:          "rf-audit-test",
+		CurrentCalcRunID:  uuid.New(),
+		ReconcileStatus:   rollforward.ReconcileStatusReconciled,
+		CurrentPeriodeID:  "JUNI-2026",
+		ReconcileDeltaIdr: rollforward.ReconcileTolerance,
+	}
+
+	// Export audit write: one BEGIN + SELECT current_hash + INSERT + COMMIT
+	expectAuditTxCommit(mock, 1)
+
+	bytes, err := svc.ExportXLSX(context.Background(), report, false, actorID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(bytes) == 0 {
+		t.Error("expected non-empty bytes")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("export audit mock expectations not met: %v", err)
 	}
 }

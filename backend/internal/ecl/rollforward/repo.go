@@ -341,6 +341,23 @@ WHERE id IN (%s)
 	return result, nil
 }
 
+// GetPeriodeTanggalMulai returns the tanggal_mulai (DATE) for a periode_id string.
+// Used by validatePeriodeOrdering to enforce temporal ordering via real DB dates
+// rather than lexicographic string comparison (F1 — FSD-APP-C §5.1).
+// Returns time.Time{} zero value and false when not found.
+func (r *Repo) GetPeriodeTanggalMulai(ctx context.Context, periodeID string) (time.Time, bool, error) {
+	const q = `SELECT tanggal_mulai FROM mst.periode_buku WHERE id = $1 AND deleted_at IS NULL`
+	var t time.Time
+	err := r.db.QueryRowContext(ctx, q, periodeID).Scan(&t)
+	if err == sql.ErrNoRows {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("rollforward.GetPeriodeTanggalMulai(%q): %w", periodeID, err)
+	}
+	return t, true, nil
+}
+
 // GetPortofolioNama returns the nama of a portfolio. Returns "", false, nil if not found.
 func (r *Repo) GetPortofolioNama(ctx context.Context, portofolioID uuid.UUID) (string, bool, error) {
 	const q = `SELECT nama FROM mst.portofolio WHERE id = $1 AND deleted_at IS NULL`

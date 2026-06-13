@@ -421,13 +421,15 @@ func (s *Service) GetCKPNTrend(ctx context.Context, periods int) ([]CKPNTrendPoi
 // Returns CodeRollForwardExportMismatchForbidden if reconcileStatus = MISMATCH and
 // forceMismatch = false.
 //
+// actorID is the UUID of the requesting user, written to the audit event (DEC-018).
+//
 // Sheet layout:
 //   - "Movement Table": Stage 1/2/3/Total × components (opening, transfers, originations, etc.)
 //   - "Gross Carrying Amount": Stage 1/2/3 × (ead_idr, ecl_allowance, net_carrying)
 //   - "Sign-Off": metadata, preparer, reconcile_status, detection_method, Phase 5 note
 //
 // Uses ead_idr as proxy for gross_carrying per OQ-M11-005-A (Phase 4).
-func (s *Service) ExportXLSX(ctx context.Context, report *Report, forceMismatch bool) ([]byte, error) {
+func (s *Service) ExportXLSX(ctx context.Context, report *Report, forceMismatch bool, actorID uuid.UUID) ([]byte, error) {
 	if report.ReconcileStatus == ReconcileStatusMismatch && !forceMismatch {
 		return nil, errDomain(CodeRollForwardExportMismatchForbidden,
 			fmt.Sprintf("Roll-forward tidak reconcile (delta = Rp %s). Export disclosure formal diblokir. "+
@@ -441,6 +443,11 @@ func (s *Service) ExportXLSX(ctx context.Context, report *Report, forceMismatch 
 	// The test coverage focuses on the business logic (service + domain), not binary bytes.
 	// TODO(phase4-m11): wire excelize XLSX generation per M11-005 AC Skenario 1.
 	stub := []byte("XLSX-STUB:" + report.ReportID)
+
+	// Audit: ECL.ROLL_FORWARD_DISCLOSURE_EXPORT (DEC-018, formulas.md §Export pattern).
+	// Best-effort short-lived tx — failure is logged but not returned to caller.
+	s.writeExportAuditEvent(ctx, report, forceMismatch, len(stub), actorID)
+
 	return stub, nil
 }
 
@@ -622,22 +629,50 @@ func classifyDerecognitionReason(snap InstrumenStatusSnapshot, assessmentDate ti
 	}
 }
 
-// validatePeriodeOrdering validates that prior periode < current periode.
-// Uses string comparison on periode_id — assumes consistent naming convention.
-// Returns CodeRollForwardPeriodeMismatch if validation fails.
-func (s *Service) validatePeriodeOrdering(_ context.Context, priorCalcRunID, currentCalcRunID uuid.UUID, priorPeriodeID, currentPeriodeID string) error {
-	// The period ordering is validated by checking that the prior run's periode_id
-	// comes before the current run's periode_id. Since periode_id is stored in
-	// mst.periode_buku and calc_runs reference it, the simplest Phase 4 approach
-	// is to ensure priorPeriodeID != currentPeriodeID (same period is invalid).
-	// Full temporal ordering requires a DB query to mst.periode_buku.tanggal_mulai.
-	// For Phase 4, we reject only identical periods and periods that appear same
-	// (string equality check). Phase 5 can add full temporal ordering.
+// validatePeriodeOrdering validates that prior periode strictly precedes current periode.
+// Fetches tanggal_mulai from mst.periode_buku for both period IDs and compares the real
+// DB dates — not lexicographic string comparison — so Indonesian month names
+// (e.g. "JUNI-2026", "MEI-2026") are ordered correctly (FSD-APP-C §5.1, F1).
+// Returns CodeRollForwardPeriodeMismatch (422) if priorStart >= currentStart.
+func (s *Service) validatePeriodeOrdering(ctx context.Context, priorCalcRunID, currentCalcRunID uuid.UUID, priorPeriodeID, currentPeriodeID string) error {
+	// Fast-path: identical string → same period, always invalid.
 	if priorPeriodeID == currentPeriodeID {
 		return errDomain(CodeRollForwardPeriodeMismatch,
 			fmt.Sprintf("priorCalcRunId (%s) dan currentCalcRunId (%s) memiliki periode yang sama: %s. "+
 				"priorCalcRunId harus dari periode sebelum periode current.",
 				priorCalcRunID, currentCalcRunID, currentPeriodeID))
+	}
+
+	// Fetch tanggal_mulai for prior period.
+	priorStart, priorFound, err := s.repo.GetPeriodeTanggalMulai(ctx, priorPeriodeID)
+	if err != nil {
+		return fmt.Errorf("rollforward.validatePeriodeOrdering: load prior tanggal_mulai: %w", err)
+	}
+	if !priorFound {
+		// Period not in mst.periode_buku — cannot establish ordering, reject.
+		return errDomain(CodeRollForwardPeriodeMismatch,
+			fmt.Sprintf("periode prior %q tidak ditemukan di mst.periode_buku; tidak dapat memverifikasi urutan periode.",
+				priorPeriodeID))
+	}
+
+	// Fetch tanggal_mulai for current period.
+	currentStart, currentFound, err := s.repo.GetPeriodeTanggalMulai(ctx, currentPeriodeID)
+	if err != nil {
+		return fmt.Errorf("rollforward.validatePeriodeOrdering: load current tanggal_mulai: %w", err)
+	}
+	if !currentFound {
+		return errDomain(CodeRollForwardPeriodeMismatch,
+			fmt.Sprintf("periode current %q tidak ditemukan di mst.periode_buku; tidak dapat memverifikasi urutan periode.",
+				currentPeriodeID))
+	}
+
+	// Reject if prior does not strictly precede current.
+	if !priorStart.Before(currentStart) {
+		return errDomain(CodeRollForwardPeriodeMismatch,
+			fmt.Sprintf("priorCalcRunId (%s) periode %q (mulai %s) harus sebelum currentCalcRunId (%s) periode %q (mulai %s). "+
+				"Urutan temporal tidak valid.",
+				priorCalcRunID, priorPeriodeID, priorStart.Format("2006-01-02"),
+				currentCalcRunID, currentPeriodeID, currentStart.Format("2006-01-02")))
 	}
 	return nil
 }
@@ -747,6 +782,41 @@ func (s *Service) writeAuditEvent(ctx context.Context, req ComputeRequest, repor
 	}
 	if cerr := tx.Commit(); cerr != nil {
 		s.logger.WarnContext(ctx, "rollforward: audit tx commit failed", "error", cerr)
+	}
+}
+
+// writeExportAuditEvent writes the ECL.ROLL_FORWARD_DISCLOSURE_EXPORT audit event
+// after a successful ExportXLSX call (DEC-018, ux-patterns.md §1.4 Export pattern).
+// Best-effort: failures are logged, never returned to caller.
+func (s *Service) writeExportAuditEvent(ctx context.Context, report *Report, forceMismatch bool, byteCount int, actorID uuid.UUID) {
+	ev := audit.EventFromContext(ctx, audit.Event{
+		Action:      "ECL.ROLL_FORWARD_DISCLOSURE_EXPORT",
+		EntityType:  "ecl.roll_forward",
+		EntityID:    report.CurrentCalcRunID,
+		ActorUserID: actorID.String(),
+		After: map[string]any{
+			"format":              "xlsx",
+			"report_id":           report.ReportID,
+			"force_mismatch_used": forceMismatch,
+			"byte_count":          byteCount,
+			"reconcile_status":    string(report.ReconcileStatus),
+			"current_periode_id":  report.CurrentPeriodeID,
+		},
+	})
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		s.logger.WarnContext(ctx, "rollforward: cannot begin export audit tx", "error", err)
+		return
+	}
+	txWriter := s.auditWriter.WithTx(tx)
+	if werr := txWriter.Write(ctx, ev); werr != nil {
+		s.logger.WarnContext(ctx, "rollforward: export audit write failed", "error", werr)
+		rollbackTx(ctx, s.logger, tx)
+		return
+	}
+	if cerr := tx.Commit(); cerr != nil {
+		s.logger.WarnContext(ctx, "rollforward: export audit tx commit failed", "error", cerr)
 	}
 }
 
