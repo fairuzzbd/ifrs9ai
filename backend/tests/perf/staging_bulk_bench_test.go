@@ -5,12 +5,14 @@
 // Real DB latency must be benchmarked separately under load testing (k6).
 //
 // Decision refs:
-//   DEC-011: SICR triggers evaluated per instrument.
-//   DEC-012: Cure check adds O(n) closed-period scan.
-//   DEC-016: No float64; decimal arithmetic is the perf bottleneck.
+//
+//	DEC-011: SICR triggers evaluated per instrument.
+//	DEC-012: Cure check adds O(n) closed-period scan.
+//	DEC-016: No float64; decimal arithmetic is the perf bottleneck.
 //
 // Run:
-//   go test ./tests/perf/... -bench=BenchmarkBulkEvaluate1000 -benchtime=3s
+//
+//	go test ./tests/perf/... -bench=BenchmarkBulkEvaluate1000 -benchtime=3s
 package perf
 
 import (
@@ -24,12 +26,12 @@ import (
 
 // stagingInput is one instrument's evaluation inputs (mirrors staging.EvaluateSICR params).
 type stagingInput struct {
-	InstrumenID        uuid.UUID
+	InstrumenID         uuid.UUID
 	RatingAtOrigination string
-	RatingCurrent      string
-	RatingPrevious     string
-	DPDValue           int
-	CurrentStage       staging.Stage
+	RatingCurrent       string
+	RatingPrevious      string
+	DPDValue            int
+	CurrentStage        staging.Stage
 }
 
 // generateStagingInputs builds n inputs with realistic distribution.
@@ -47,13 +49,13 @@ func generateStagingInputs(n int) []stagingInput {
 			inputs[i].CurrentStage = staging.Stage3
 		case i%10 == 0: // 10% Stage2 cure path
 			inputs[i].RatingAtOrigination = "idAAA"
-			inputs[i].RatingCurrent = "idAA" // recovered
+			inputs[i].RatingCurrent = "idAA"  // recovered
 			inputs[i].RatingPrevious = "idBB" // was non-IG
 			inputs[i].DPDValue = 0
 			inputs[i].CurrentStage = staging.Stage2
 		case i%4 == 0: // 25% Stage1→2 SICR (rating downgrade ≥2 notch)
 			inputs[i].RatingAtOrigination = "idAAA"
-			inputs[i].RatingCurrent = "idAA"  // 1 notch — no trigger
+			inputs[i].RatingCurrent = "idAA" // 1 notch — no trigger
 			inputs[i].RatingPrevious = "idAAA"
 			inputs[i].DPDValue = 0
 			inputs[i].CurrentStage = staging.Stage1

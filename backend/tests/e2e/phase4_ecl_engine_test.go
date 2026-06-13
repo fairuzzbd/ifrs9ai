@@ -5,29 +5,32 @@
 // for CI; testcontainers-based DB integration available via -tags integration).
 //
 // Scenarios:
-//   A - Full ECL calc run lifecycle (staging → EAD → ECL → seal → roll-forward)
-//   B - EIR amendment flow (proposal → review → ALCO approve → catch-up adjustment)
-//   C - Drift detection cron → auto-amendment proposal
-//   D - Sealed run immutability (recompute blocked, DB trigger checked via service guard)
-//   E - SoD enforcement (maker cannot approve seal)
-//   F - LPS aggregator: ECL only on excess above IDR 2B cap
-//   G - Look-through Reksadana: weighted ECL matches expected
+//
+//	A - Full ECL calc run lifecycle (staging → EAD → ECL → seal → roll-forward)
+//	B - EIR amendment flow (proposal → review → ALCO approve → catch-up adjustment)
+//	C - Drift detection cron → auto-amendment proposal
+//	D - Sealed run immutability (recompute blocked, DB trigger checked via service guard)
+//	E - SoD enforcement (maker cannot approve seal)
+//	F - LPS aggregator: ECL only on excess above IDR 2B cap
+//	G - Look-through Reksadana: weighted ECL matches expected
 //
 // Decision log compliance:
-//   DEC-010: 3-stage × 3-skenario × dual FL  — Scenario A, G
-//   DEC-011: SICR triggers                    — Scenario A (staging eval)
-//   DEC-012: Cure 3 periods                   — Scenario A (cure path)
-//   DEC-013: Newton-Raphson 1e-10 tol         — Scenario B (EIR solver)
-//   DEC-014: LPS 2B cap                       — Scenario F
-//   DEC-015: Look-through Reksadana           — Scenario G
-//   DEC-016: NUMERIC precision (decimal)      — All (spot assertions on Cmp)
-//   DEC-017: 4-eyes / SoD                     — Scenario E, B
-//   DEC-018: Audit in-transaction             — Scenario A, B (audit row counts)
-//   DEC-026/027: MFA step-up for seal         — Scenario D, E
+//
+//	DEC-010: 3-stage × 3-skenario × dual FL  — Scenario A, G
+//	DEC-011: SICR triggers                    — Scenario A (staging eval)
+//	DEC-012: Cure 3 periods                   — Scenario A (cure path)
+//	DEC-013: Newton-Raphson 1e-10 tol         — Scenario B (EIR solver)
+//	DEC-014: LPS 2B cap                       — Scenario F
+//	DEC-015: Look-through Reksadana           — Scenario G
+//	DEC-016: NUMERIC precision (decimal)      — All (spot assertions on Cmp)
+//	DEC-017: 4-eyes / SoD                     — Scenario E, B
+//	DEC-018: Audit in-transaction             — Scenario A, B (audit row counts)
+//	DEC-026/027: MFA step-up for seal         — Scenario D, E
 //
 // Run:
-//   go test ./tests/e2e/... -v -timeout 60s
-//   go test ./tests/e2e/... -v -run TestE2E_ScenarioA  (single scenario)
+//
+//	go test ./tests/e2e/... -v -timeout 60s
+//	go test ./tests/e2e/... -v -run TestE2E_ScenarioA  (single scenario)
 package e2e
 
 import (
@@ -104,7 +107,7 @@ func TestE2E_ScenarioA_FullCalcRunLifecycle(t *testing.T) {
 	// ── Step 2: Evaluate staging ──────────────────────────────────────────────
 	// AC + FVOCI debt must get stage evaluation.
 	// Simulate a 3-notch rating downgrade on instrAC: idAA → idBBB+ (delta=3, SICR fires).
-	stagingResult := h.stagingSvc.EvaluateSingleInstrumen_Test(ctx, instrAC.ID, evalDate, "idBBB+")
+	stagingResult := h.stagingSvc.EvaluateSingleInstrumenTest(ctx, instrAC.ID, evalDate, "idBBB+")
 	assertNotNil(t, stagingResult, "staging result for instrAC")
 	if stagingResult.NewStage == nil || *stagingResult.NewStage != staging.Stage2 {
 		t.Fatalf("ScenarioA: expected instrAC → Stage 2, got %v", stagingResult.NewStage)
@@ -117,7 +120,7 @@ func TestE2E_ScenarioA_FullCalcRunLifecycle(t *testing.T) {
 	}
 
 	// instrFVOCI stays Stage 1 (no rating change).
-	stagingResultFVOCI := h.stagingSvc.EvaluateSingleInstrumen_Test(ctx, instrFVOCI.ID, evalDate, "idAA")
+	stagingResultFVOCI := h.stagingSvc.EvaluateSingleInstrumenTest(ctx, instrFVOCI.ID, evalDate, "idAA")
 	if stagingResultFVOCI.NewStage != nil {
 		t.Errorf("ScenarioA: expected no stage change for FVOCI, got %v", stagingResultFVOCI.NewStage)
 	}
@@ -405,11 +408,11 @@ func TestE2E_ScenarioE_SoDEnforcement(t *testing.T) {
 
 	h := newE2EHarness(t)
 
-	userA_ID := uuid.New()
-	userB_ID := uuid.New()
+	userAID := uuid.New()
+	userBID := uuid.New()
 
-	ctxA := ctxWithActor(userA_ID.String(), "ROLE-RISK", "TUGURE", false)
-	ctxB := ctxWithActor(userB_ID.String(), "ROLE-ALCO", "TUGURE", true /*mfa*/)
+	ctxA := ctxWithActor(userAID.String(), "ROLE-RISK", "TUGURE", false)
+	ctxB := ctxWithActor(userBID.String(), "ROLE-ALCO", "TUGURE", true /*mfa*/)
 
 	// User A creates + starts + completes calc run.
 	run := h.createAndCompleteCalcRun(ctxA, periodeJuni2026, evalDate)
@@ -531,10 +534,10 @@ func TestE2E_ScenarioG_LookthroughReksadana(t *testing.T) {
 	// Seed PD/LGD for each asset class (GOVT_BOND=0, CORP_BOND moderate, CASH=0).
 	h.seedLookthroughPDLGD("GOVT_BOND", decimal.Zero, decimal.Zero, decimal.Zero, decimal.Zero)
 	h.seedLookthroughPDLGD("CORP_BOND",
-		decimal.NewFromFloat(0.01),  // PD_Good
-		decimal.NewFromFloat(0.02),  // PD_Normal
-		decimal.NewFromFloat(0.04),  // PD_Bad
-		decimal.NewFromFloat(0.45),  // LGD
+		decimal.NewFromFloat(0.01), // PD_Good
+		decimal.NewFromFloat(0.02), // PD_Normal
+		decimal.NewFromFloat(0.04), // PD_Bad
+		decimal.NewFromFloat(0.45), // LGD
 	)
 	h.seedLookthroughPDLGD("CASH", decimal.Zero, decimal.Zero, decimal.Zero, decimal.Zero)
 
@@ -671,7 +674,7 @@ func TestE2E_StagingCure_3ConsecutivePeriods(t *testing.T) {
 	})
 
 	// Evaluate cure.
-	cureResult, err := h.stagingSvc.EvaluateCure_Test(ctx, instrID, "PBUKU-2026-06")
+	cureResult, err := h.stagingSvc.EvaluateCureTest(ctx, instrID, "PBUKU-2026-06")
 	if err != nil {
 		t.Fatalf("StagingCure: error: %v", err)
 	}
@@ -763,17 +766,17 @@ func TestE2E_AuditTrailHashChain_CalcRun(t *testing.T) {
 // For full integration with PostgreSQL, use -tags integration with testcontainers.
 
 type e2eHarness struct {
-	t             *testing.T
-	stagingSvc    *stagingTestAdapter
-	eirSvc        *eirTestAdapter
-	lpsSvc        e2eLPSServiceIface
+	t              *testing.T
+	stagingSvc     *stagingTestAdapter
+	eirSvc         *eirTestAdapter
+	lpsSvc         e2eLPSServiceIface
 	lookthroughSvc lookthrough.ServiceIface
-	calcRunSvc    *calcRunTestAdapter
-	rollFwdSvc    *rollForwardTestAdapter
-	auditStore    *inMemAuditStore
-	pdStore       *inMemPDStore
-	scheduleStore *inMemScheduleStore
-	instrStore    *inMemInstrumenStore
+	calcRunSvc     *calcRunTestAdapter
+	rollFwdSvc     *rollForwardTestAdapter
+	auditStore     *inMemAuditStore
+	pdStore        *inMemPDStore
+	scheduleStore  *inMemScheduleStore
+	instrStore     *inMemInstrumenStore
 }
 
 func newE2EHarness(t *testing.T) *e2eHarness {
@@ -976,7 +979,7 @@ func (s *inMemAuditStore) append(action, entityID string, hash []byte) {
 }
 
 func (s *inMemAuditStore) listByEntityID(entityID string) []string {
-	var actions []string
+	actions := make([]string, 0, len(s.rows))
 	for _, r := range s.rows {
 		actions = append(actions, r.Action)
 	}
@@ -993,14 +996,14 @@ type inMemPDStore struct {
 
 func newInMemPDStore() *inMemPDStore {
 	return &inMemPDStore{curves: map[string]decimal.Decimal{
-		"idAAA": decimal.NewFromFloat(0.00010000),
-		"idAA":  decimal.NewFromFloat(0.00350000),
-		"idAA-": decimal.NewFromFloat(0.00500000),
-		"idA":   decimal.NewFromFloat(0.01000000),
-		"idBBB": decimal.NewFromFloat(0.02000000),
+		"idAAA":  decimal.NewFromFloat(0.00010000),
+		"idAA":   decimal.NewFromFloat(0.00350000),
+		"idAA-":  decimal.NewFromFloat(0.00500000),
+		"idA":    decimal.NewFromFloat(0.01000000),
+		"idBBB":  decimal.NewFromFloat(0.02000000),
 		"idBBB+": decimal.NewFromFloat(0.01500000),
-		"idBB":  decimal.NewFromFloat(0.05000000),
-		"idD":   decimal.NewFromFloat(1.00000000),
+		"idBB":   decimal.NewFromFloat(0.05000000),
+		"idD":    decimal.NewFromFloat(1.00000000),
 	}}
 }
 
@@ -1053,7 +1056,7 @@ type inMemInstrumenStore struct {
 	instruments     map[uuid.UUID]*stagingInstrumenState
 	calcRuns        map[uuid.UUID]*calcrun.CalcRun
 	resultLines     map[uuid.UUID][]ecrResultLine // calcRunID → lines
-	idempotencyKeys map[uuid.UUID]uuid.UUID        // idempotencyKey → runID
+	idempotencyKeys map[uuid.UUID]uuid.UUID       // idempotencyKey → runID
 }
 
 type stagingInstrumenState struct {
@@ -1091,7 +1094,7 @@ type stagingEvaluationResult struct {
 	Skipped             bool
 }
 
-func (a *stagingTestAdapter) EvaluateSingleInstrumen_Test(
+func (a *stagingTestAdapter) EvaluateSingleInstrumenTest(
 	ctx context.Context, instrID uuid.UUID, evalDate time.Time, newRating string,
 ) *stagingEvaluationResult {
 	a.h.t.Helper()
@@ -1142,7 +1145,7 @@ func (a *stagingTestAdapter) EvaluateSingleInstrumen_Test(
 	return result
 }
 
-func (a *stagingTestAdapter) EvaluateCure_Test(
+func (a *stagingTestAdapter) EvaluateCureTest(
 	ctx context.Context, instrID uuid.UUID, periodeID string,
 ) (*cureEvaluationResult, error) {
 	state := a.h.instrStore.instruments[instrID]
@@ -1212,12 +1215,6 @@ func (a *eirTestAdapter) RunDriftDetection(ctx context.Context, periodeID string
 	}
 	a.driftReports[reportID] = &driftReport{Entries: entries}
 	return reportID, nil
-}
-
-// lpsTestAdapter wraps the LPS domain logic.
-type lpsTestAdapter struct {
-	h            *e2eHarness
-	depositoPairs map[string][]decimal.Decimal // "nasabah:bank" → EADs
 }
 
 type lpsAggregationResult struct {
@@ -1413,7 +1410,7 @@ func (h *e2eHarness) startCalcRun(ctx context.Context, runID uuid.UUID) string {
 
 func (h *e2eHarness) simulateBulkCompute(ctx context.Context, run *calcrun.CalcRun) {
 	// Generate synthetic result lines for all seeded instruments.
-	var lines []ecrResultLine
+	lines := make([]ecrResultLine, 0, len(h.instrStore.instruments))
 	for instrID, state := range h.instrStore.instruments {
 		ecl := decimal.NewFromInt(1_000_000) // stub: 1M ECL per instrument
 		line := ecrResultLine{
@@ -1721,10 +1718,11 @@ func (a *lookthroughTestAdapterImpl) Compute(
 	}
 
 	// Apply look-through formula: ECL = Σ(NAB × %class × PD × LGD × weights).
-	var breakdown []lookthrough.BreakdownLine
+	breakdown := make([]lookthrough.BreakdownLine, 0, len(data.Composition))
 	total := decimal.Zero
 
-	for _, comp := range data.Composition {
+	for i := range data.Composition {
+		comp := &data.Composition[i]
 		weight := comp.WeightPct.Div(decimal.NewFromInt(100))
 		navPortion := data.NAV.Mul(weight)
 		pdlgd := data.PDLGDParams[string(comp.AssetClass)]
@@ -1747,7 +1745,7 @@ func (a *lookthroughTestAdapterImpl) Compute(
 			ECLSkenariosGoodIDR:   eclGood,
 			ECLSkenariosNormalIDR: eclNormal,
 			ECLSkenariosBadIDR:    eclBad,
-			ECLFLGoodIDR:          eclGood,   // FL multiplier = 1.0 in test stub
+			ECLFLGoodIDR:          eclGood, // FL multiplier = 1.0 in test stub
 			ECLFLNormalIDR:        eclNormal,
 			ECLFLBadIDR:           eclBad,
 			ECLWeightedIDR:        eclWeighted,
@@ -1756,9 +1754,9 @@ func (a *lookthroughTestAdapterImpl) Compute(
 	}
 
 	return &lookthrough.Result{
-		InstrumenID:  instrID,
-		TotalECLIDR:  total,
-		Breakdown:    breakdown,
+		InstrumenID: instrID,
+		TotalECLIDR: total,
+		Breakdown:   breakdown,
 	}, nil
 }
 
