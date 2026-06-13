@@ -53,8 +53,8 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/notification"
 	"blips-ifrs9.tugu-re.com/internal/workflow"
 
-	eclcore "blips-ifrs9.tugu-re.com/internal/ecl/core"
 	"blips-ifrs9.tugu-re.com/internal/ecl/calcrun"
+	eclcore "blips-ifrs9.tugu-re.com/internal/ecl/core"
 	"blips-ifrs9.tugu-re.com/internal/ecl/eir"
 	"blips-ifrs9.tugu-re.com/internal/ecl/helpers"
 	"blips-ifrs9.tugu-re.com/internal/ecl/lookthrough"
@@ -742,12 +742,12 @@ func main() {
 	// Parameter snapshot: all ALCO-approved params frozen at /start (DEC-016, DEC-018).
 	// Decisions: DEC-010, DEC-016, DEC-017, DEC-018, DEC-021, DEC-022, DEC-027.
 	// -----------------------------------------------------------------------
-	calcRunRepo := calcrun.NewCalcRunRepo(db)
+	calcRunRepo := calcrun.NewRepo(db)
 	calcRunSnapshotSvc := calcrun.NewParameterSnapshotService(db)
 	calcRunSvc := calcrun.NewService(calcRunRepo, calcRunSnapshotSvc, auditWriter, nil /* asynqClient: wired below */, nil /* jobUpdater: noop */, logger)
 	// Wire M7 orchestrator's CalcRunSealChecker: prevents ECL compute on sealed runs.
 	eclOrchestrator.WithSealChecker(calcRunSvc)
-	calcRunWorker := calcrun.NewCalcRunWorker(calcRunSvc, eclOrchestrator, nil, logger)
+	calcRunWorker := calcrun.NewWorker(calcRunSvc, eclOrchestrator, nil, logger)
 	calcRunHandler := calcrun.NewHandler(calcRunSvc)
 	calcrun.RegisterRoutes(v1, calcRunHandler, jwtVerifier, db)
 	_ = calcRunWorker // registered on asynqMux below

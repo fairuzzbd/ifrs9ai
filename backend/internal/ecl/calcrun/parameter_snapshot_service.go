@@ -20,9 +20,9 @@ import (
 // ParameterSnapshot is the JSON structure frozen into ecl.calc_run.parameter_snapshot_jsonb.
 // All numeric values are stored as strings to avoid float64 precision loss (DEC-016).
 type ParameterSnapshot struct {
-	FrozenAt    string                   `json:"frozenAt"`    // RFC3339
-	PeriodeID   string                   `json:"periodeId"`
-	EvalDate    string                   `json:"evalDate"`    // YYYY-MM-DD
+	FrozenAt  string `json:"frozenAt"` // RFC3339
+	PeriodeID string `json:"periodeId"`
+	EvalDate  string `json:"evalDate"` // YYYY-MM-DD
 
 	// BobotSkenario — scenario weights (sum must = 1.0, DEC-010).
 	BobotSkenario *BobotSnapshotEntry `json:"bobotSkenario"`
@@ -48,12 +48,12 @@ type ParameterSnapshot struct {
 
 // BobotSnapshotEntry holds the approved scenario weights.
 type BobotSnapshotEntry struct {
-	ParamID    string `json:"paramId"`
-	BobotGood  string `json:"bobotGood"`   // NUMERIC(7,4) as string
+	ParamID     string `json:"paramId"`
+	BobotGood   string `json:"bobotGood"`   // NUMERIC(7,4) as string
 	BobotNormal string `json:"bobotNormal"` // NUMERIC(7,4) as string
-	BobotBad   string `json:"bobotBad"`    // NUMERIC(7,4) as string
-	ApprovedBy string `json:"approvedBy"`
-	ApprovedAt string `json:"approvedAt"`
+	BobotBad    string `json:"bobotBad"`    // NUMERIC(7,4) as string
+	ApprovedBy  string `json:"approvedBy"`
+	ApprovedAt  string `json:"approvedAt"`
 }
 
 // PDSnapshotSummary summarizes approved PD Pefindo rows.
@@ -96,11 +96,11 @@ type ImpactMevPDEntry struct {
 
 // LPSCoverageSnapshot holds the active LPS guarantee limit.
 type LPSCoverageSnapshot struct {
-	ParamID         string `json:"paramId"`
+	ParamID          string `json:"paramId"`
 	CoverageLimitIDR string `json:"coverageLimitIdr"` // NUMERIC(20,4) as string
-	EffectiveFrom   string `json:"effectiveFrom"`
-	EffectiveTo     string `json:"effectiveTo,omitempty"`
-	ApprovedBy      string `json:"approvedBy"`
+	EffectiveFrom    string `json:"effectiveFrom"`
+	EffectiveTo      string `json:"effectiveTo,omitempty"`
+	ApprovedBy       string `json:"approvedBy"`
 }
 
 // KursEntry is one FX rate row per currency for evaluation_date.

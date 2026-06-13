@@ -59,7 +59,7 @@ func TestCalcRunRepo_UpdateStatus_Success(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	id := uuid.New()
 	actorID := uuid.New()
@@ -91,7 +91,7 @@ func TestCalcRunRepo_UpdateStatus_DBError(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	id := uuid.New()
 	actorID := uuid.New()
@@ -116,7 +116,7 @@ func TestCalcRunRepo_UpdateStartFields_Success(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	id := uuid.New()
 	actorID := uuid.New()
@@ -147,7 +147,7 @@ func TestCalcRunRepo_UpdateProgress_Success(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	id := uuid.New()
 	actorID := uuid.New()
@@ -167,7 +167,7 @@ func TestCalcRunRepo_UpdateProgress_DBError(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	id := uuid.New()
 	actorID := uuid.New()
@@ -189,7 +189,7 @@ func TestCalcRunRepo_UpdateCompletion_Success(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	id := uuid.New()
 	actorID := uuid.New()
@@ -217,7 +217,7 @@ func TestCalcRunRepo_UpdateCompletion_WithErrors_Success(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	id := uuid.New()
 	actorID := uuid.New()
@@ -247,7 +247,7 @@ func TestCalcRunRepo_UpdateSealRequest_Success(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	id := uuid.New()
 	requestedBy := uuid.New()
@@ -275,7 +275,7 @@ func TestCalcRunRepo_UpdateSealRequest_DBError(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	id := uuid.New()
 	requestedBy := uuid.New()
@@ -300,7 +300,7 @@ func TestCalcRunRepo_UpdateSealApprove_Success(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	id := uuid.New()
 	approverID := uuid.New()
@@ -331,7 +331,7 @@ func TestCalcRunRepo_UpdateSealReject_Success(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	id := uuid.New()
 	rejectedBy := uuid.New()
@@ -361,7 +361,7 @@ func TestCalcRunRepo_UpdateCancel_Success(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	id := uuid.New()
 	cancelledBy := uuid.New()
@@ -389,7 +389,7 @@ func TestCalcRunRepo_UpdateCancel_DBError(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	id := uuid.New()
 	cancelledBy := uuid.New()
@@ -414,7 +414,7 @@ func TestCalcRunRepo_BeginTx_Success(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	mock.ExpectBegin()
 
@@ -434,7 +434,7 @@ func TestCalcRunRepo_BeginTx_DBError(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	mock.ExpectBegin().WillReturnError(errDB("max connections reached"))
 

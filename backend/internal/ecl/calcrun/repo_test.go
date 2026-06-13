@@ -19,13 +19,13 @@ import (
 // Full CRUD paths (Create, UpdateSealApprove etc.) are covered by integration tests.
 // These tests verify the "sealed guard" path (the most critical compliance path).
 
-func newMockDB(t *testing.T) (*calcrun.CalcRunRepo, sqlmock.Sqlmock) {
+func newMockDB(t *testing.T) (*calcrun.Repo, sqlmock.Sqlmock) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 	return repo, mock
 }
 
@@ -37,7 +37,7 @@ func TestNewCalcRunRepo_PanicOnNilDB(t *testing.T) {
 			t.Error("expected panic on nil db")
 		}
 	}()
-	calcrun.NewCalcRunRepo(nil)
+	calcrun.NewRepo(nil)
 }
 
 // ─── IsSealedCalcRun ──────────────────────────────────────────────────────────
@@ -123,7 +123,7 @@ func TestCalcRunRepo_CheckExistingInProgress_Found(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	existingID := uuid.New().String()
 	mock.ExpectQuery(`SELECT id FROM ecl.calc_run`).
@@ -144,7 +144,7 @@ func TestCalcRunRepo_CheckExistingInProgress_NotFound(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	mock.ExpectQuery(`SELECT id FROM ecl.calc_run`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"})) // empty
@@ -166,7 +166,7 @@ func TestCalcRunRepo_CheckExistingSealed_Found(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	sealedID := uuid.New().String()
 	mock.ExpectQuery(`SELECT id FROM ecl.calc_run`).
@@ -187,7 +187,7 @@ func TestCalcRunRepo_CheckExistingSealed_NotFound(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	mock.ExpectQuery(`SELECT id FROM ecl.calc_run`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
@@ -209,7 +209,7 @@ func TestCalcRunRepo_Get_NotFound(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	id := uuid.New()
 	mock.ExpectQuery(`SELECT .+ FROM ecl.calc_run`).
@@ -240,7 +240,7 @@ func TestCalcRunRepo_List_Empty(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	mock.ExpectQuery(`SELECT .+ FROM ecl.calc_run`).
 		WillReturnRows(sqlmock.NewRows([]string{
@@ -273,7 +273,7 @@ func TestCalcRunRepo_List_WithData(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	id1 := uuid.New()
 	id2 := uuid.New()
@@ -317,7 +317,7 @@ func TestCalcRunRepo_List_HasMore(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	createdBy := uuid.New()
 	now := time.Now().UTC()
@@ -360,7 +360,7 @@ func TestCalcRunRepo_List_NoPeriodeID(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	// No periodeID filter → different SQL args.
 	mock.ExpectQuery(`SELECT .+ FROM ecl.calc_run`).
@@ -386,7 +386,7 @@ func TestCalcRunRepo_List_InvalidLimit_Clamped(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	// limit=0 → clamped to 50 internally.
 	mock.ExpectQuery(`SELECT .+ FROM ecl.calc_run`).
@@ -424,7 +424,7 @@ func TestCalcRunRepo_IsSealedCalcRun_AllStatuses(t *testing.T) {
 		t.Run(tt.status, func(t *testing.T) {
 			db, mock, _ := sqlmock.New()
 			defer func() { _ = db.Close() }()
-			repo := calcrun.NewCalcRunRepo(db)
+			repo := calcrun.NewRepo(db)
 			id := uuid.New()
 
 			mock.ExpectQuery(regexp.QuoteMeta(`SELECT status FROM ecl.calc_run WHERE id = $1 AND deleted_at IS NULL`)).
@@ -456,7 +456,7 @@ func TestCalcRunRepo_Get_WithAllFields(t *testing.T) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	repo := calcrun.NewCalcRunRepo(db)
+	repo := calcrun.NewRepo(db)
 
 	id := uuid.New()
 	now := time.Now().UTC().Truncate(time.Second)
@@ -571,5 +571,94 @@ func TestTimeParseYYYYMMDD(t *testing.T) {
 	}
 	if date.Year() != 2026 || date.Month() != 6 || date.Day() != 13 {
 		t.Errorf("parsed date = %v; want 2026-06-13", date)
+	}
+}
+
+// ─── scanCalcRun UUID parse failure paths ─────────────────────────────────────
+// Exercises the new error-returning uuid.Parse calls added to scanCalcRun.
+
+func TestCalcRunRepo_Get_InvalidSealRequestedBy_UUID_Error(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	repo := calcrun.NewRepo(db)
+
+	id := uuid.New()
+	now := time.Now().UTC()
+	createdBy := uuid.New()
+
+	mock.ExpectQuery(`SELECT .+ FROM ecl.calc_run`).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "periode_id", "evaluation_date", "scope", "status",
+			"job_id",
+			"total_instrumen", "processed_count", "error_count",
+			"started_at", "completed_at",
+			"parameter_snapshot_jsonb",
+			"seal_requested_by", "seal_requested_at",
+			"seal_approved_by", "seal_approved_at",
+			"sealed_at", "signature_hash_seal",
+			"seal_rejected_by", "seal_rejected_at", "reject_reason",
+			"cancelled_by", "cancelled_at", "cancel_reason",
+			"superseded_by_run_id",
+			"created_at", "created_by", "updated_at", "updated_by", "row_version", "tenant_id",
+		}).AddRow(
+			id, "p-2026-06", now, "ALL_ACTIVE", "SEAL_REQUESTED",
+			nil, nil, 0, 0, nil, nil, nil,
+			"not-a-valid-uuid", // invalid seal_requested_by
+			nil, nil, nil, nil, nil,
+			nil, nil, nil, nil, nil, nil, nil,
+			now, createdBy, now, createdBy, int64(1), "TUGURE",
+		))
+
+	_, err = repo.Get(context.Background(), id)
+	if err == nil {
+		t.Fatal("expected error for invalid seal_requested_by UUID")
+	}
+}
+
+func TestCalcRunRepo_Get_InvalidSealApprovedBy_UUID_Error(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	repo := calcrun.NewRepo(db)
+
+	id := uuid.New()
+	now := time.Now().UTC()
+	createdBy := uuid.New()
+	sealReqBy := uuid.New()
+
+	mock.ExpectQuery(`SELECT .+ FROM ecl.calc_run`).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "periode_id", "evaluation_date", "scope", "status",
+			"job_id",
+			"total_instrumen", "processed_count", "error_count",
+			"started_at", "completed_at",
+			"parameter_snapshot_jsonb",
+			"seal_requested_by", "seal_requested_at",
+			"seal_approved_by", "seal_approved_at",
+			"sealed_at", "signature_hash_seal",
+			"seal_rejected_by", "seal_rejected_at", "reject_reason",
+			"cancelled_by", "cancelled_at", "cancel_reason",
+			"superseded_by_run_id",
+			"created_at", "created_by", "updated_at", "updated_by", "row_version", "tenant_id",
+		}).AddRow(
+			id, "p-2026-06", now, "ALL_ACTIVE", "SEALED",
+			nil, nil, 0, 0, nil, nil, nil,
+			sealReqBy.String(), nil,
+			"not-a-valid-uuid", // invalid seal_approved_by
+			nil, nil, nil,
+			nil, nil, nil, nil, nil, nil, nil,
+			now, createdBy, now, createdBy, int64(1), "TUGURE",
+		))
+
+	_, err = repo.Get(context.Background(), id)
+	if err == nil {
+		t.Fatal("expected error for invalid seal_approved_by UUID")
 	}
 }

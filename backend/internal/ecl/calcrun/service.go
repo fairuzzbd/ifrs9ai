@@ -75,7 +75,7 @@ type Service struct {
 	repo        *Repo
 	snapshot    *ParameterSnapshotService
 	auditWriter *audit.Writer
-	asynqClient AsynqEnqueuer  // nil = sync mode (dev/test)
+	asynqClient AsynqEnqueuer // nil = sync mode (dev/test)
 	jobUpdater  JobProgressUpdater
 	logger      *slog.Logger
 }
@@ -286,10 +286,10 @@ func (s *Service) Start(ctx context.Context, id uuid.UUID, actorID uuid.UUID) (S
 		EntityType: "ecl.calc_run",
 		EntityID:   id,
 		After: map[string]any{
-			"id":       id,
-			"status":   string(StatusInProgress),
-			"job_id":   jobID,
-			"started_at": time.Now().Format(time.RFC3339),
+			"id":                      id,
+			"status":                  string(StatusInProgress),
+			"job_id":                  jobID,
+			"started_at":              time.Now().Format(time.RFC3339),
 			"parameter_snapshot_hash": snapHash(snap),
 		},
 		ActorUserID: actorID.String(),
@@ -498,11 +498,11 @@ func (s *Service) RequestSeal(ctx context.Context, id uuid.UUID, req SealRequest
 		EntityType: "ecl.calc_run",
 		EntityID:   id,
 		After: map[string]any{
-			"id":                 id,
-			"status":             string(StatusSealRequested),
-			"seal_requested_by":  actorID,
-			"seal_requested_at":  time.Now().Format(time.RFC3339),
-			"seal_comment":       req.Comment,
+			"id":                id,
+			"status":            string(StatusSealRequested),
+			"seal_requested_by": actorID,
+			"seal_requested_at": time.Now().Format(time.RFC3339),
+			"seal_comment":      req.Comment,
 		},
 		ActorUserID: actorID.String(),
 	}); err != nil {
@@ -596,10 +596,10 @@ func (s *Service) ApproveSeal(ctx context.Context, id uuid.UUID, req SealApprove
 		EntityType: "ecl.calc_run",
 		EntityID:   id,
 		After: map[string]any{
-			"id":              id,
+			"id":               id,
 			"seal_approved_by": actorID,
-			"step_up_method":  "JWT_STEP_UP",
-			"comment":         req.Comment,
+			"step_up_method":   "JWT_STEP_UP",
+			"comment":          req.Comment,
 		},
 		ActorUserID: actorID.String(),
 	}); err != nil {
@@ -610,14 +610,14 @@ func (s *Service) ApproveSeal(ctx context.Context, id uuid.UUID, req SealApprove
 		EntityType: "ecl.calc_run",
 		EntityID:   id,
 		After: map[string]any{
-			"id":                    id,
-			"status":                string(StatusSealed),
-			"sealed_at":             sealedAt.Format(time.RFC3339),
-			"sealed_by":             actorID,
-			"seal_requested_by":     run.SealRequestedBy,
-			"seal_requested_at":     run.SealRequestedAt,
-			"signature_hash_seal":   hex.EncodeToString(sigHash[:]),
-			"signature_method":      "JWT_STEP_UP",
+			"id":                  id,
+			"status":              string(StatusSealed),
+			"sealed_at":           sealedAt.Format(time.RFC3339),
+			"sealed_by":           actorID,
+			"seal_requested_by":   run.SealRequestedBy,
+			"seal_requested_at":   run.SealRequestedAt,
+			"signature_hash_seal": hex.EncodeToString(sigHash[:]),
+			"signature_method":    "JWT_STEP_UP",
 		},
 		ActorUserID: actorID.String(),
 	}); err != nil {

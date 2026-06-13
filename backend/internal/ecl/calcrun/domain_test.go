@@ -12,7 +12,7 @@ import (
 
 func TestCalcRunStatus_IsTerminal(t *testing.T) {
 	tests := []struct {
-		status   calcrun.CalcRunStatus
+		status   calcrun.Status
 		terminal bool
 	}{
 		{calcrun.StatusDraft, false},
@@ -32,8 +32,8 @@ func TestCalcRunStatus_IsTerminal(t *testing.T) {
 }
 
 func TestCalcRunStatus_CanStart(t *testing.T) {
-	canStart := []calcrun.CalcRunStatus{calcrun.StatusDraft}
-	cannotStart := []calcrun.CalcRunStatus{
+	canStart := []calcrun.Status{calcrun.StatusDraft}
+	cannotStart := []calcrun.Status{
 		calcrun.StatusInProgress,
 		calcrun.StatusCompleted,
 		calcrun.StatusCompletedWithErrors,
@@ -54,11 +54,11 @@ func TestCalcRunStatus_CanStart(t *testing.T) {
 }
 
 func TestCalcRunStatus_CanCancel(t *testing.T) {
-	canCancel := []calcrun.CalcRunStatus{
+	canCancel := []calcrun.Status{
 		calcrun.StatusDraft,
 		calcrun.StatusInProgress,
 	}
-	cannotCancel := []calcrun.CalcRunStatus{
+	cannotCancel := []calcrun.Status{
 		calcrun.StatusCompleted,
 		calcrun.StatusCompletedWithErrors,
 		calcrun.StatusSealRequested,
@@ -78,8 +78,8 @@ func TestCalcRunStatus_CanCancel(t *testing.T) {
 }
 
 func TestCalcRunStatus_CanRequestSeal(t *testing.T) {
-	canRequest := []calcrun.CalcRunStatus{calcrun.StatusCompleted}
-	cannotRequest := []calcrun.CalcRunStatus{
+	canRequest := []calcrun.Status{calcrun.StatusCompleted}
+	cannotRequest := []calcrun.Status{
 		calcrun.StatusDraft,
 		calcrun.StatusInProgress,
 		calcrun.StatusCompletedWithErrors,
@@ -100,8 +100,8 @@ func TestCalcRunStatus_CanRequestSeal(t *testing.T) {
 }
 
 func TestCalcRunStatus_CanApproveSeal(t *testing.T) {
-	canApprove := []calcrun.CalcRunStatus{calcrun.StatusSealRequested}
-	cannotApprove := []calcrun.CalcRunStatus{
+	canApprove := []calcrun.Status{calcrun.StatusSealRequested}
+	cannotApprove := []calcrun.Status{
 		calcrun.StatusDraft,
 		calcrun.StatusInProgress,
 		calcrun.StatusCompleted,
@@ -148,7 +148,7 @@ func TestCalcRunStatus_StateTransitionMatrix(t *testing.T) {
 	// Validates the full state machine transition matrix from §2.
 	// Reference: p4-m8-calc-run.md
 	type stateCheck struct {
-		status      calcrun.CalcRunStatus
+		status      calcrun.Status
 		canStart    bool
 		canCancel   bool
 		canReqSeal  bool

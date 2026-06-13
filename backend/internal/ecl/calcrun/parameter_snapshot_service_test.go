@@ -487,8 +487,8 @@ func TestSnapshotAll_ImpactMevPD_DuplicateSkenario_TakesFirst(t *testing.T) {
 	// Two GOOD rows — first wins.
 	mock.ExpectQuery(`SELECT .+ FROM mst.impact_mev_pd`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "skenario", "impact_multiplier", "approved_by", "approved_at"}).
-			AddRow("imev-1", "GOOD", "0.80000000", "u1", "2026-06-02").  // first row (newest)
-			AddRow("imev-2", "GOOD", "0.75000000", "u1", "2026-06-01").  // second, should be skipped
+			AddRow("imev-1", "GOOD", "0.80000000", "u1", "2026-06-02"). // first row (newest)
+			AddRow("imev-2", "GOOD", "0.75000000", "u1", "2026-06-01"). // second, should be skipped
 			AddRow("imev-3", "BAD", "1.20000000", "u1", "2026-06-01"))
 	mock.ExpectQuery(`SELECT .+ FROM mst.lps_coverage`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "coverage_limit_idr", "effective_from", "effective_to", "approved_by"}).
@@ -568,4 +568,3 @@ func TestSnapshotAll_NoBobotNumericsNotFloat(t *testing.T) {
 		t.Errorf("bobotGood = %q; want 0.2500 (exact string, no float precision loss)", bg)
 	}
 }
-

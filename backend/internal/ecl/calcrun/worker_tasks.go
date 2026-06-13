@@ -31,26 +31,26 @@ import (
 //   - No float64 (all ECL amounts flow through decimal in M7).
 //   - Sealed guard: M7.ComputeBulk checks IsSealedCalcRun before processing.
 
-// CalcRunWorker handles the ECL bulk compute Asynq task.
-type CalcRunWorker struct {
+// Worker handles the ECL bulk compute Asynq task.
+type Worker struct {
 	service      *Service
 	orchestrator *eclcore.ECLOrchestrator
 	jobUpdater   JobProgressUpdater
 	logger       *slog.Logger
 }
 
-// NewCalcRunWorker creates a CalcRunWorker. Panics on nil service or orchestrator.
-func NewCalcRunWorker(
+// NewWorker creates a Worker. Panics on nil service or orchestrator.
+func NewWorker(
 	service *Service,
 	orchestrator *eclcore.ECLOrchestrator,
 	jobUpdater JobProgressUpdater,
 	logger *slog.Logger,
-) *CalcRunWorker {
+) *Worker {
 	if service == nil {
-		panic("calcrun.NewCalcRunWorker: service must not be nil")
+		panic("calcrun.NewWorker: service must not be nil")
 	}
 	if orchestrator == nil {
-		panic("calcrun.NewCalcRunWorker: orchestrator must not be nil")
+		panic("calcrun.NewWorker: orchestrator must not be nil")
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -59,7 +59,7 @@ func NewCalcRunWorker(
 	if jpu == nil {
 		jpu = &noopJobUpdater{}
 	}
-	return &CalcRunWorker{
+	return &Worker{
 		service:      service,
 		orchestrator: orchestrator,
 		jobUpdater:   jpu,
@@ -68,10 +68,10 @@ func NewCalcRunWorker(
 }
 
 // Handle implements asynq.Handler for task type "ecl:bulk_compute".
-func (w *CalcRunWorker) Handle(ctx context.Context, t *asynq.Task) error {
+func (w *Worker) Handle(ctx context.Context, t *asynq.Task) error {
 	var payload eclcore.TaskECLBulkComputePayload
 	if err := json.Unmarshal(t.Payload(), &payload); err != nil {
-		return fmt.Errorf("calcrun.CalcRunWorker: unmarshal payload: %w", err)
+		return fmt.Errorf("calcrun.Worker: unmarshal payload: %w", err)
 	}
 
 	w.logger.InfoContext(ctx, "calcrun.worker: starting bulk compute",
@@ -164,15 +164,15 @@ func (w *CalcRunWorker) Handle(ctx context.Context, t *asynq.Task) error {
 	}
 
 	jobResult := map[string]any{
-		"calc_run_id":          payload.CalcRunID.String(),
-		"total_scanned":        result.TotalScanned,
-		"total_computed":       result.TotalComputed,
-		"total_skipped_fvtpl":  result.TotalSkippedFVTPL,
-		"total_poci_deferred":  result.TotalPOCIDeferred,
-		"error_count":          errorCount,
+		"calc_run_id":            payload.CalcRunID.String(),
+		"total_scanned":          result.TotalScanned,
+		"total_computed":         result.TotalComputed,
+		"total_skipped_fvtpl":    result.TotalSkippedFVTPL,
+		"total_poci_deferred":    result.TotalPOCIDeferred,
+		"error_count":            errorCount,
 		"ecl_weighted_idr_total": result.ECLWeightedIDRTotal.StringFixed(4),
-		"status":               result.Status,
-		"errors":               errSummary,
+		"status":                 result.Status,
+		"errors":                 errSummary,
 	}
 
 	if err := w.jobUpdater.MarkCompleted(ctx, payload.JobID, jobResult); err != nil {
@@ -187,14 +187,6 @@ func (w *CalcRunWorker) Handle(ctx context.Context, t *asynq.Task) error {
 		"ecl_total_idr", result.ECLWeightedIDRTotal.StringFixed(4),
 	)
 	return nil
-}
-
-// max returns the larger of two ints (stdlib max available in Go 1.21+).
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // ─── Asynq task payload type (re-exported alias) ──────────────────────────────

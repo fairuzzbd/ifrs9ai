@@ -27,55 +27,55 @@ import (
 
 // ─── Status enum ──────────────────────────────────────────────────────────────
 
-// CalcRunStatus is the lifecycle status of an ecl.calc_run row.
+// Status is the lifecycle status of an ecl.calc_run row.
 // All valid values are listed below; any other value is rejected by service guards
 // and the DB CHECK constraint.
-type CalcRunStatus string
+type Status string
 
 const (
 	// StatusDraft is the initial state after creation. No Asynq job yet.
-	StatusDraft CalcRunStatus = "DRAFT"
+	StatusDraft Status = "DRAFT"
 
 	// StatusInProgress means an Asynq bulk compute job is running.
-	StatusInProgress CalcRunStatus = "IN_PROGRESS"
+	StatusInProgress Status = "IN_PROGRESS"
 
 	// StatusCompleted means bulk compute finished with zero errors.
 	// Eligible for seal request.
-	StatusCompleted CalcRunStatus = "COMPLETED"
+	StatusCompleted Status = "COMPLETED"
 
 	// StatusCompletedWithErrors means bulk compute finished but some instruments failed.
 	// Seal request is BLOCKED until errors are fixed (CALC_RUN_HAS_ERRORS).
-	StatusCompletedWithErrors CalcRunStatus = "COMPLETED_WITH_ERRORS"
+	StatusCompletedWithErrors Status = "COMPLETED_WITH_ERRORS"
 
 	// StatusSealRequested means ROLE-RISK submitted a seal request.
 	// Awaiting ROLE-ALCO / ROLE-CFO approve.
-	StatusSealRequested CalcRunStatus = "SEAL_REQUESTED"
+	StatusSealRequested Status = "SEAL_REQUESTED"
 
 	// StatusSealed is the terminal immutable state.
 	// DB trigger blocks all further updates; service guard returns ECL_PARAM_FROZEN.
-	StatusSealed CalcRunStatus = "SEALED"
+	StatusSealed Status = "SEALED"
 
 	// StatusCancelled is a terminal state for calc runs that were abandoned.
 	// Partial ecl.calc_result_line rows are preserved for audit.
-	StatusCancelled CalcRunStatus = "CANCELLED"
+	StatusCancelled Status = "CANCELLED"
 )
 
 // IsTerminal returns true for terminal states (SEALED, CANCELLED).
-func (s CalcRunStatus) IsTerminal() bool {
+func (s Status) IsTerminal() bool {
 	return s == StatusSealed || s == StatusCancelled
 }
 
 // CanStart returns true if this status allows a /start transition.
-func (s CalcRunStatus) CanStart() bool { return s == StatusDraft }
+func (s Status) CanStart() bool { return s == StatusDraft }
 
 // CanCancel returns true if this status allows a /cancel transition.
-func (s CalcRunStatus) CanCancel() bool { return s == StatusDraft || s == StatusInProgress }
+func (s Status) CanCancel() bool { return s == StatusDraft || s == StatusInProgress }
 
 // CanRequestSeal returns true if this status allows a /seal/request transition.
-func (s CalcRunStatus) CanRequestSeal() bool { return s == StatusCompleted }
+func (s Status) CanRequestSeal() bool { return s == StatusCompleted }
 
 // CanApproveSeal returns true if this status allows a /seal/approve or /seal/reject.
-func (s CalcRunStatus) CanApproveSeal() bool { return s == StatusSealRequested }
+func (s Status) CanApproveSeal() bool { return s == StatusSealRequested }
 
 // ─── Permission constants ──────────────────────────────────────────────────────
 
@@ -89,7 +89,7 @@ const (
 	// PermCalcRunStart allows triggering bulk compute (DRAFT → IN_PROGRESS). ROLE-RISK.
 	PermCalcRunStart = "calc_run.start"
 
-	// PermCalcRunCancel allows cancelling a calc_run (maker only). ROLE-RISK.
+	// PermCalcRunCancel allows canceling a calc_run (maker only). ROLE-RISK.
 	PermCalcRunCancel = "calc_run.cancel"
 
 	// PermCalcRunSealRequest allows submitting a seal request. ROLE-RISK.
@@ -107,19 +107,19 @@ const (
 // CalcRun is the run-level header for a bulk ECL computation.
 // Maps to ecl.calc_run (migration 000031).
 type CalcRun struct {
-	ID             uuid.UUID     `json:"id"`
-	PeriodeID      string        `json:"periodeId"`
-	EvaluationDate time.Time     `json:"evaluationDate"`
-	Scope          string        `json:"scope"` // "ALL_ACTIVE"
-	Status         CalcRunStatus `json:"status"`
+	ID             uuid.UUID `json:"id"`
+	PeriodeID      string    `json:"periodeId"`
+	EvaluationDate time.Time `json:"evaluationDate"`
+	Scope          string    `json:"scope"` // "ALL_ACTIVE"
+	Status         Status    `json:"status"`
 
 	// Asynq job linkage.
 	JobID *string `json:"jobId,omitempty"`
 
 	// Progress counters.
-	TotalInstrumen  *int `json:"totalInstrumen,omitempty"`
-	ProcessedCount  int  `json:"processedCount"`
-	ErrorCount      int  `json:"errorCount"`
+	TotalInstrumen *int `json:"totalInstrumen,omitempty"`
+	ProcessedCount int  `json:"processedCount"`
+	ErrorCount     int  `json:"errorCount"`
 
 	// Timing.
 	StartedAt   *time.Time `json:"startedAt,omitempty"`
@@ -133,10 +133,10 @@ type CalcRun struct {
 	SealRequestedAt *time.Time `json:"sealRequestedAt,omitempty"`
 	SealComment     *string    `json:"sealComment,omitempty"`
 
-	SealApprovedBy  *uuid.UUID `json:"sealApprovedBy,omitempty"`
-	SealApprovedAt  *time.Time `json:"sealApprovedAt,omitempty"`
-	SealedAt        *time.Time `json:"sealedAt,omitempty"`
-	SignatureHashSeal []byte   `json:"signatureHashSeal,omitempty"`
+	SealApprovedBy    *uuid.UUID `json:"sealApprovedBy,omitempty"`
+	SealApprovedAt    *time.Time `json:"sealApprovedAt,omitempty"`
+	SealedAt          *time.Time `json:"sealedAt,omitempty"`
+	SignatureHashSeal []byte     `json:"signatureHashSeal,omitempty"`
 
 	// Seal reject tracking.
 	SealRejectedBy *uuid.UUID `json:"sealRejectedBy,omitempty"`
@@ -210,27 +210,27 @@ type StartResponse struct {
 	StreamURL string `json:"streamUrl"`
 }
 
-// CalcRunSummary is a lightweight list view (DataTable) of a calc run.
-type CalcRunSummary struct {
-	ID             uuid.UUID     `json:"id"`
-	PeriodeID      string        `json:"periodeId"`
-	EvaluationDate time.Time     `json:"evaluationDate"`
-	Scope          string        `json:"scope"`
-	Status         CalcRunStatus `json:"status"`
-	ProcessedCount int           `json:"processedCount"`
-	ErrorCount     int           `json:"errorCount"`
-	TotalInstrumen *int          `json:"totalInstrumen,omitempty"`
-	StartedAt      *time.Time    `json:"startedAt,omitempty"`
-	CompletedAt    *time.Time    `json:"completedAt,omitempty"`
-	SealedAt       *time.Time    `json:"sealedAt,omitempty"`
-	CreatedAt      time.Time     `json:"createdAt"`
-	CreatedBy      uuid.UUID     `json:"createdBy"`
+// Summary is a lightweight list view (DataTable) of a calc run.
+type Summary struct {
+	ID             uuid.UUID  `json:"id"`
+	PeriodeID      string     `json:"periodeId"`
+	EvaluationDate time.Time  `json:"evaluationDate"`
+	Scope          string     `json:"scope"`
+	Status         Status     `json:"status"`
+	ProcessedCount int        `json:"processedCount"`
+	ErrorCount     int        `json:"errorCount"`
+	TotalInstrumen *int       `json:"totalInstrumen,omitempty"`
+	StartedAt      *time.Time `json:"startedAt,omitempty"`
+	CompletedAt    *time.Time `json:"completedAt,omitempty"`
+	SealedAt       *time.Time `json:"sealedAt,omitempty"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	CreatedBy      uuid.UUID  `json:"createdBy"`
 }
 
 // ─── Interfaces ───────────────────────────────────────────────────────────────
 
-// CalcRunRepoIface is the minimal repo interface (used for testing / dependency inversion).
-type CalcRunRepoIface interface {
+// RepoIface is the minimal repo interface (used for testing / dependency inversion).
+type RepoIface interface {
 	// IsSealedCalcRun implements the core.CalcRunSealChecker interface.
 	// Returns true if the calc_run with given id has status = 'SEALED'.
 	IsSealedCalcRun(ctx context.Context, calcRunID uuid.UUID) (bool, error)

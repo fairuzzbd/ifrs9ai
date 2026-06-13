@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// repo.go — CalcRunRepo: persistence for ecl.calc_run (migration 000031).
+// repo.go — Repo: persistence for ecl.calc_run (migration 000031).
 //
 // Rules (db-conventions.md, DEC-018):
 //   - No hard delete: ecl.calc_run is append-only; DB trigger blocks hard deletes.
@@ -19,23 +19,23 @@ import (
 //   - No float64: all numeric values use decimal.Decimal or int.
 //   - Audit cols: created_by / updated_by wired from actorID.
 
-// CalcRunRepo handles ecl.calc_run persistence.
-type CalcRunRepo struct {
+// Repo handles ecl.calc_run persistence.
+type Repo struct {
 	db *sql.DB
 }
 
-// NewCalcRunRepo creates a new CalcRunRepo. Panics if db is nil.
-func NewCalcRunRepo(db *sql.DB) *CalcRunRepo {
+// NewRepo creates a new Repo. Panics if db is nil.
+func NewRepo(db *sql.DB) *Repo {
 	if db == nil {
-		panic("calcrun.NewCalcRunRepo: db must not be nil")
+		panic("calcrun.NewRepo: db must not be nil")
 	}
-	return &CalcRunRepo{db: db}
+	return &Repo{db: db}
 }
 
 // IsSealedCalcRun implements the core.CalcRunSealChecker interface (F4 fix in M7).
 // Returns true if the calc_run row has status = 'SEALED'.
 // Returns false (not sealed) when the row does not exist.
-func (r *CalcRunRepo) IsSealedCalcRun(ctx context.Context, calcRunID uuid.UUID) (bool, error) {
+func (r *Repo) IsSealedCalcRun(ctx context.Context, calcRunID uuid.UUID) (bool, error) {
 	var status string
 	err := r.db.QueryRowContext(ctx,
 		`SELECT status FROM ecl.calc_run WHERE id = $1 AND deleted_at IS NULL`,
@@ -51,7 +51,7 @@ func (r *CalcRunRepo) IsSealedCalcRun(ctx context.Context, calcRunID uuid.UUID) 
 
 // Create inserts a new DRAFT calc_run within the provided transaction.
 // Returns the inserted CalcRun.
-func (r *CalcRunRepo) Create(ctx context.Context, tx *sql.Tx, run CalcRun) (CalcRun, error) {
+func (r *Repo) Create(ctx context.Context, tx *sql.Tx, run CalcRun) (CalcRun, error) {
 	run.Status = StatusDraft
 	run.ProcessedCount = 0
 	run.ErrorCount = 0
@@ -80,22 +80,22 @@ INSERT INTO ecl.calc_run (
 }
 
 // Get returns a CalcRun by ID. Returns ErrCalcRunNotFound if not found.
-func (r *CalcRunRepo) Get(ctx context.Context, id uuid.UUID) (CalcRun, error) {
+func (r *Repo) Get(ctx context.Context, id uuid.UUID) (CalcRun, error) {
 	return r.getByID(ctx, r.db, id)
 }
 
-func (r *CalcRunRepo) getByID(ctx context.Context, q queryer, id uuid.UUID) (CalcRun, error) {
+func (r *Repo) getByID(ctx context.Context, q queryer, id uuid.UUID) (CalcRun, error) {
 	row := q.QueryRowContext(ctx, calcRunSelectSQL+` WHERE id = $1 AND deleted_at IS NULL`, id)
 	return scanCalcRun(row)
 }
 
-func (r *CalcRunRepo) getByIDTx(ctx context.Context, tx *sql.Tx, id uuid.UUID) (CalcRun, error) {
+func (r *Repo) getByIDTx(ctx context.Context, tx *sql.Tx, id uuid.UUID) (CalcRun, error) {
 	return r.getByID(ctx, tx, id)
 }
 
 // List returns paginated CalcRun summaries, ordered by created_at DESC.
 // Simple implementation: cursor is an encoded created_at/id pair (offset-based fallback).
-func (r *CalcRunRepo) List(ctx context.Context, periodeID string, limit int, cursor string) ([]CalcRunSummary, string, bool, error) {
+func (r *Repo) List(ctx context.Context, periodeID string, limit int, cursor string) ([]Summary, string, bool, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -127,9 +127,9 @@ WHERE deleted_at IS NULL`
 	}
 	defer rows.Close() //nolint:errcheck
 
-	var items []CalcRunSummary
+	var items []Summary
 	for rows.Next() {
-		var s CalcRunSummary
+		var s Summary
 		var evalDate time.Time
 		var total sql.NullInt64
 		var startedAt, completedAt, sealedAt sql.NullTime
@@ -178,7 +178,7 @@ WHERE deleted_at IS NULL`
 
 // UpdateStatus transitions the status in the same transaction.
 // Returns the updated CalcRun.
-func (r *CalcRunRepo) UpdateStatus(ctx context.Context, tx *sql.Tx, id uuid.UUID, newStatus CalcRunStatus, updatedBy uuid.UUID) (CalcRun, error) {
+func (r *Repo) UpdateStatus(ctx context.Context, tx *sql.Tx, id uuid.UUID, newStatus Status, updatedBy uuid.UUID) (CalcRun, error) {
 	_, err := tx.ExecContext(ctx, `
 UPDATE ecl.calc_run
 SET status = $1, updated_by = $2, updated_at = now()
@@ -191,7 +191,7 @@ WHERE id = $3 AND deleted_at IS NULL`,
 }
 
 // UpdateStartFields sets status=IN_PROGRESS, parameter_snapshot_jsonb, job_id, started_at, total_instrumen.
-func (r *CalcRunRepo) UpdateStartFields(ctx context.Context, tx *sql.Tx, id uuid.UUID,
+func (r *Repo) UpdateStartFields(ctx context.Context, tx *sql.Tx, id uuid.UUID,
 	snapshot json.RawMessage, jobID string, totalCount int, updatedBy uuid.UUID) (CalcRun, error) {
 	_, err := tx.ExecContext(ctx, `
 UPDATE ecl.calc_run
@@ -211,7 +211,7 @@ WHERE id = $6 AND deleted_at IS NULL`,
 }
 
 // UpdateProgress increments processed_count and error_count (non-transactional for perf).
-func (r *CalcRunRepo) UpdateProgress(ctx context.Context, id uuid.UUID, processed, errors int, updatedBy uuid.UUID) error {
+func (r *Repo) UpdateProgress(ctx context.Context, id uuid.UUID, processed, errors int, updatedBy uuid.UUID) error {
 	_, err := r.db.ExecContext(ctx, `
 UPDATE ecl.calc_run
 SET processed_count = $1, error_count = $2, updated_by = $3, updated_at = now()
@@ -224,8 +224,8 @@ WHERE id = $4 AND deleted_at IS NULL`,
 }
 
 // UpdateCompletion sets status=COMPLETED or COMPLETED_WITH_ERRORS + completed_at.
-func (r *CalcRunRepo) UpdateCompletion(ctx context.Context, tx *sql.Tx, id uuid.UUID,
-	finalStatus CalcRunStatus, processed, errors int, updatedBy uuid.UUID) (CalcRun, error) {
+func (r *Repo) UpdateCompletion(ctx context.Context, tx *sql.Tx, id uuid.UUID,
+	finalStatus Status, processed, errors int, updatedBy uuid.UUID) (CalcRun, error) {
 	_, err := tx.ExecContext(ctx, `
 UPDATE ecl.calc_run
 SET status = $1,
@@ -243,7 +243,7 @@ WHERE id = $5 AND deleted_at IS NULL`,
 }
 
 // UpdateSealRequest sets status=SEAL_REQUESTED + seal_requested_by/at/comment.
-func (r *CalcRunRepo) UpdateSealRequest(ctx context.Context, tx *sql.Tx, id uuid.UUID,
+func (r *Repo) UpdateSealRequest(ctx context.Context, tx *sql.Tx, id uuid.UUID,
 	requestedBy uuid.UUID, comment string) (CalcRun, error) {
 	_, err := tx.ExecContext(ctx, `
 UPDATE ecl.calc_run
@@ -261,7 +261,7 @@ WHERE id = $3 AND deleted_at IS NULL`,
 }
 
 // UpdateSealApprove sets status=SEALED + seal_approved_by/at + sealed_at + signature.
-func (r *CalcRunRepo) UpdateSealApprove(ctx context.Context, tx *sql.Tx, id uuid.UUID,
+func (r *Repo) UpdateSealApprove(ctx context.Context, tx *sql.Tx, id uuid.UUID,
 	approverID uuid.UUID, signatureHash []byte) (CalcRun, error) {
 	_, err := tx.ExecContext(ctx, `
 UPDATE ecl.calc_run
@@ -282,7 +282,7 @@ WHERE id = $4 AND deleted_at IS NULL`,
 
 // UpdateSealReject sets status=COMPLETED + seal_rejected_by/at/reason.
 // Clears seal_requested_by/at so a re-request is possible.
-func (r *CalcRunRepo) UpdateSealReject(ctx context.Context, tx *sql.Tx, id uuid.UUID,
+func (r *Repo) UpdateSealReject(ctx context.Context, tx *sql.Tx, id uuid.UUID,
 	rejectedBy uuid.UUID, reason string) (CalcRun, error) {
 	_, err := tx.ExecContext(ctx, `
 UPDATE ecl.calc_run
@@ -303,7 +303,7 @@ WHERE id = $4 AND deleted_at IS NULL`,
 }
 
 // UpdateCancel sets status=CANCELLED + cancelled_by/at/reason.
-func (r *CalcRunRepo) UpdateCancel(ctx context.Context, tx *sql.Tx, id uuid.UUID,
+func (r *Repo) UpdateCancel(ctx context.Context, tx *sql.Tx, id uuid.UUID,
 	cancelledBy uuid.UUID, reason string) (CalcRun, error) {
 	_, err := tx.ExecContext(ctx, `
 UPDATE ecl.calc_run
@@ -323,7 +323,7 @@ WHERE id = $4 AND deleted_at IS NULL`,
 
 // CheckExistingInProgress returns id of an IN_PROGRESS calc_run for the given periodeID
 // (empty string if none).
-func (r *CalcRunRepo) CheckExistingInProgress(ctx context.Context, periodeID string) (string, error) {
+func (r *Repo) CheckExistingInProgress(ctx context.Context, periodeID string) (string, error) {
 	var id string
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id FROM ecl.calc_run
@@ -341,7 +341,7 @@ func (r *CalcRunRepo) CheckExistingInProgress(ctx context.Context, periodeID str
 
 // CheckExistingSealed returns id of a SEALED calc_run for the given periodeID
 // (empty string if none).
-func (r *CalcRunRepo) CheckExistingSealed(ctx context.Context, periodeID string) (string, error) {
+func (r *Repo) CheckExistingSealed(ctx context.Context, periodeID string) (string, error) {
 	var id string
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id FROM ecl.calc_run
@@ -358,7 +358,7 @@ func (r *CalcRunRepo) CheckExistingSealed(ctx context.Context, periodeID string)
 }
 
 // BeginTx starts a new database transaction.
-func (r *CalcRunRepo) BeginTx(ctx context.Context) (*sql.Tx, error) {
+func (r *Repo) BeginTx(ctx context.Context) (*sql.Tx, error) {
 	return r.db.BeginTx(ctx, nil)
 }
 
@@ -415,7 +415,7 @@ func scanCalcRun(row *sql.Row) (CalcRun, error) {
 	}
 
 	c.EvaluationDate = evalDate
-	c.Status = CalcRunStatus(status)
+	c.Status = Status(status)
 	if jobID.Valid {
 		c.JobID = &jobID.String
 	}
@@ -433,7 +433,10 @@ func scanCalcRun(row *sql.Row) (CalcRun, error) {
 	}
 	c.ParameterSnapshotJSONB = snapshot
 	if sealReqBy.Valid {
-		u, _ := uuid.Parse(sealReqBy.String)
+		u, err := uuid.Parse(sealReqBy.String)
+		if err != nil {
+			return CalcRun{}, fmt.Errorf("calcrun.repo.scan: seal_requested_by UUID: %w", err)
+		}
 		c.SealRequestedBy = &u
 	}
 	if sealReqAt.Valid {
@@ -441,7 +444,10 @@ func scanCalcRun(row *sql.Row) (CalcRun, error) {
 		c.SealRequestedAt = &t
 	}
 	if sealApprBy.Valid {
-		u, _ := uuid.Parse(sealApprBy.String)
+		u, err := uuid.Parse(sealApprBy.String)
+		if err != nil {
+			return CalcRun{}, fmt.Errorf("calcrun.repo.scan: seal_approved_by UUID: %w", err)
+		}
 		c.SealApprovedBy = &u
 	}
 	if sealApprAt.Valid {
@@ -454,7 +460,10 @@ func scanCalcRun(row *sql.Row) (CalcRun, error) {
 	}
 	c.SignatureHashSeal = sigHash
 	if sealRejBy.Valid {
-		u, _ := uuid.Parse(sealRejBy.String)
+		u, err := uuid.Parse(sealRejBy.String)
+		if err != nil {
+			return CalcRun{}, fmt.Errorf("calcrun.repo.scan: seal_rejected_by UUID: %w", err)
+		}
 		c.SealRejectedBy = &u
 	}
 	if sealRejAt.Valid {
@@ -465,7 +474,10 @@ func scanCalcRun(row *sql.Row) (CalcRun, error) {
 		c.RejectReason = &rejectReason.String
 	}
 	if cancelledBy.Valid {
-		u, _ := uuid.Parse(cancelledBy.String)
+		u, err := uuid.Parse(cancelledBy.String)
+		if err != nil {
+			return CalcRun{}, fmt.Errorf("calcrun.repo.scan: cancelled_by UUID: %w", err)
+		}
 		c.CancelledBy = &u
 	}
 	if cancelledAt.Valid {
@@ -476,7 +488,10 @@ func scanCalcRun(row *sql.Row) (CalcRun, error) {
 		c.CancelReason = &cancelReason.String
 	}
 	if supersededByRunID.Valid {
-		u, _ := uuid.Parse(supersededByRunID.String)
+		u, err := uuid.Parse(supersededByRunID.String)
+		if err != nil {
+			return CalcRun{}, fmt.Errorf("calcrun.repo.scan: superseded_by_run_id UUID: %w", err)
+		}
 		c.SupersededByRunID = &u
 	}
 	return c, nil

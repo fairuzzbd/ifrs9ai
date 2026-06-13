@@ -1418,16 +1418,16 @@ func buildCalcRunRow(id uuid.UUID, status string, errorCount int) *sqlmock.Rows 
 		"created_at", "created_by", "updated_at", "updated_by", "row_version", "tenant_id",
 	}).AddRow(
 		id, "periode-2026-06", evalDate, "ALL_ACTIVE", status,
-		nil,              // job_id
+		nil,                // job_id
 		nil, 0, errorCount, // total_instrumen, processed_count, error_count
-		nil, nil,         // started_at, completed_at
-		nil,              // parameter_snapshot_jsonb
-		nil, nil,         // seal_requested_by, seal_requested_at
-		nil, nil,         // seal_approved_by, seal_approved_at
-		nil, nil,         // sealed_at, signature_hash_seal
-		nil, nil, nil,    // seal_rejected_by, seal_rejected_at, reject_reason
-		nil, nil, nil,    // cancelled_by, cancelled_at, cancel_reason
-		nil,              // superseded_by_run_id
+		nil, nil, // started_at, completed_at
+		nil,      // parameter_snapshot_jsonb
+		nil, nil, // seal_requested_by, seal_requested_at
+		nil, nil, // seal_approved_by, seal_approved_at
+		nil, nil, // sealed_at, signature_hash_seal
+		nil, nil, nil, // seal_rejected_by, seal_rejected_at, reject_reason
+		nil, nil, nil, // cancelled_by, cancelled_at, cancel_reason
+		nil, // superseded_by_run_id
 		now, createdBy, now, createdBy, 1, "TUGURE",
 	)
 }
