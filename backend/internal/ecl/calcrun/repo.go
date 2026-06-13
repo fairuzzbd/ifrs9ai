@@ -242,7 +242,7 @@ WHERE id = $5 AND deleted_at IS NULL`,
 	return r.getByIDTx(ctx, tx, id)
 }
 
-// UpdateSealRequest sets status=SEAL_REQUESTED + seal_requested_by/at/comment.
+// UpdateSealRequest sets status=SEAL_REQUESTED + seal_requested_by/at + seal_request_comment.
 func (r *Repo) UpdateSealRequest(ctx context.Context, tx *sql.Tx, id uuid.UUID,
 	requestedBy uuid.UUID, comment string) (CalcRun, error) {
 	_, err := tx.ExecContext(ctx, `
@@ -250,24 +250,24 @@ UPDATE ecl.calc_run
 SET status = $1,
     seal_requested_by = $2,
     seal_requested_at = now(),
+    seal_request_comment = $3,
     updated_by = $2,
     updated_at = now()
-WHERE id = $3 AND deleted_at IS NULL`,
-		string(StatusSealRequested), requestedBy, id)
+WHERE id = $4 AND deleted_at IS NULL`,
+		string(StatusSealRequested), requestedBy, comment, id)
 	if err != nil {
 		return CalcRun{}, fmt.Errorf("calcrun.repo.UpdateSealRequest: %w", err)
 	}
 	return r.getByIDTx(ctx, tx, id)
 }
 
-// UpdateSealApprove sets status=SEALED + seal_approved_by/at + sealed_at + signature.
+// UpdateSealApprove sets status=SEALED + sealed_by + sealed_at + signature.
 func (r *Repo) UpdateSealApprove(ctx context.Context, tx *sql.Tx, id uuid.UUID,
 	approverID uuid.UUID, signatureHash []byte) (CalcRun, error) {
 	_, err := tx.ExecContext(ctx, `
 UPDATE ecl.calc_run
 SET status = $1,
-    seal_approved_by = $2,
-    seal_approved_at = now(),
+    sealed_by = $2,
     sealed_at = now(),
     signature_hash_seal = $3,
     updated_by = $2,
@@ -371,8 +371,8 @@ SELECT id, periode_id, evaluation_date, scope, status,
        started_at, completed_at,
        parameter_snapshot_jsonb,
        seal_requested_by, seal_requested_at,
-       seal_approved_by, seal_approved_at,
-       sealed_at, signature_hash_seal,
+       sealed_by, sealed_at,
+       signature_hash_seal,
        seal_rejected_by, seal_rejected_at, reject_reason,
        cancelled_by, cancelled_at, cancel_reason,
        superseded_by_run_id,
@@ -387,7 +387,7 @@ func scanCalcRun(row *sql.Row) (CalcRun, error) {
 	var startedAt, completedAt sql.NullTime
 	var snapshot []byte
 	var sealReqBy, sealApprBy, sealRejBy, cancelledBy sql.NullString
-	var sealReqAt, sealApprAt, sealedAt, sealRejAt, cancelledAt sql.NullTime
+	var sealReqAt, sealedAt, sealRejAt, cancelledAt sql.NullTime
 	var sigHash []byte
 	var rejectReason, cancelReason sql.NullString
 	var supersededByRunID sql.NullString
@@ -400,8 +400,8 @@ func scanCalcRun(row *sql.Row) (CalcRun, error) {
 		&startedAt, &completedAt,
 		&snapshot,
 		&sealReqBy, &sealReqAt,
-		&sealApprBy, &sealApprAt,
-		&sealedAt, &sigHash,
+		&sealApprBy, &sealedAt,
+		&sigHash,
 		&sealRejBy, &sealRejAt, &rejectReason,
 		&cancelledBy, &cancelledAt, &cancelReason,
 		&supersededByRunID,
@@ -446,16 +446,13 @@ func scanCalcRun(row *sql.Row) (CalcRun, error) {
 	if sealApprBy.Valid {
 		u, err := uuid.Parse(sealApprBy.String)
 		if err != nil {
-			return CalcRun{}, fmt.Errorf("calcrun.repo.scan: seal_approved_by UUID: %w", err)
+			return CalcRun{}, fmt.Errorf("calcrun.repo.scan: sealed_by UUID: %w", err)
 		}
 		c.SealApprovedBy = &u
 	}
-	if sealApprAt.Valid {
-		t := sealApprAt.Time
-		c.SealApprovedAt = &t
-	}
 	if sealedAt.Valid {
 		t := sealedAt.Time
+		c.SealApprovedAt = &t
 		c.SealedAt = &t
 	}
 	c.SignatureHashSeal = sigHash

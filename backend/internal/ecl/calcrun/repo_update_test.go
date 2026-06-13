@@ -29,8 +29,8 @@ func buildUpdateRows(id uuid.UUID, status string) *sqlmock.Rows {
 		"started_at", "completed_at",
 		"parameter_snapshot_jsonb",
 		"seal_requested_by", "seal_requested_at",
-		"seal_approved_by", "seal_approved_at",
-		"sealed_at", "signature_hash_seal",
+		"sealed_by", "sealed_at",
+		"signature_hash_seal",
 		"seal_rejected_by", "seal_rejected_at", "reject_reason",
 		"cancelled_by", "cancelled_at", "cancel_reason",
 		"superseded_by_run_id",
@@ -43,7 +43,7 @@ func buildUpdateRows(id uuid.UUID, status string) *sqlmock.Rows {
 		nil,
 		nil, nil,
 		nil, nil,
-		nil, nil,
+		nil,
 		nil, nil, nil,
 		nil, nil, nil,
 		nil,
@@ -288,6 +288,42 @@ func TestCalcRunRepo_UpdateSealRequest_DBError(t *testing.T) {
 	_, err = repo.UpdateSealRequest(context.Background(), tx, id, requestedBy, "comment")
 	if err == nil {
 		t.Error("expected error on DB failure")
+	}
+	_ = tx.Rollback()
+}
+
+// TestCalcRunRepo_UpdateSealRequest_CommentPersisted verifies that seal_request_comment
+// is written to the UPDATE statement (F-2 fix: column was previously omitted).
+func TestCalcRunRepo_UpdateSealRequest_CommentPersisted(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	repo := calcrun.NewRepo(db)
+
+	id := uuid.New()
+	requestedBy := uuid.New()
+	comment := "Meminta seal untuk audit periode Juni 2026."
+
+	mock.ExpectBegin()
+	// The UPDATE must include seal_request_comment = $3 (F-2 fix).
+	mock.ExpectExec(`seal_request_comment`).
+		WithArgs(string(calcrun.StatusSealRequested), requestedBy, comment, id).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery(`SELECT .+ FROM ecl.calc_run`).
+		WillReturnRows(buildUpdateRows(id, "SEAL_REQUESTED"))
+
+	tx, _ := db.BeginTx(context.Background(), nil)
+	updated, err := repo.UpdateSealRequest(context.Background(), tx, id, requestedBy, comment)
+	if err != nil {
+		t.Fatalf("UpdateSealRequest with comment: %v", err)
+	}
+	if string(updated.Status) != "SEAL_REQUESTED" {
+		t.Errorf("status = %q; want SEAL_REQUESTED", updated.Status)
+	}
+	if expectErr := mock.ExpectationsWereMet(); expectErr != nil {
+		t.Errorf("mock expectations not met (seal_request_comment not in UPDATE): %v", expectErr)
 	}
 	_ = tx.Rollback()
 }

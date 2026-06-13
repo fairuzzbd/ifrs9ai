@@ -481,8 +481,8 @@ func TestCalcRunRepo_Get_WithAllFields(t *testing.T) {
 			"started_at", "completed_at",
 			"parameter_snapshot_jsonb",
 			"seal_requested_by", "seal_requested_at",
-			"seal_approved_by", "seal_approved_at",
-			"sealed_at", "signature_hash_seal",
+			"sealed_by", "sealed_at",
+			"signature_hash_seal",
 			"seal_rejected_by", "seal_rejected_at", "reject_reason",
 			"cancelled_by", "cancelled_at", "cancel_reason",
 			"superseded_by_run_id",
@@ -495,7 +495,7 @@ func TestCalcRunRepo_Get_WithAllFields(t *testing.T) {
 			[]byte(`{"periodeId":"p-2026-06"}`),
 			sealReqBy.String(), now,
 			sealApprBy.String(), now,
-			now, sigHash,
+			sigHash,
 			sealRejBy.String(), now, rejectReason,
 			cancelledBy.String(), now, cancelReason,
 			supersededByID.String(),
@@ -598,8 +598,8 @@ func TestCalcRunRepo_Get_InvalidSealRequestedBy_UUID_Error(t *testing.T) {
 			"started_at", "completed_at",
 			"parameter_snapshot_jsonb",
 			"seal_requested_by", "seal_requested_at",
-			"seal_approved_by", "seal_approved_at",
-			"sealed_at", "signature_hash_seal",
+			"sealed_by", "sealed_at",
+			"signature_hash_seal",
 			"seal_rejected_by", "seal_rejected_at", "reject_reason",
 			"cancelled_by", "cancelled_at", "cancel_reason",
 			"superseded_by_run_id",
@@ -608,7 +608,7 @@ func TestCalcRunRepo_Get_InvalidSealRequestedBy_UUID_Error(t *testing.T) {
 			id, "p-2026-06", now, "ALL_ACTIVE", "SEAL_REQUESTED",
 			nil, nil, 0, 0, nil, nil, nil,
 			"not-a-valid-uuid", // invalid seal_requested_by
-			nil, nil, nil, nil, nil,
+			nil, nil, nil, nil, // seal_requested_at, sealed_by, sealed_at, signature_hash_seal
 			nil, nil, nil, nil, nil, nil, nil,
 			now, createdBy, now, createdBy, int64(1), "TUGURE",
 		))
@@ -641,8 +641,8 @@ func TestCalcRunRepo_Get_InvalidSealApprovedBy_UUID_Error(t *testing.T) {
 			"started_at", "completed_at",
 			"parameter_snapshot_jsonb",
 			"seal_requested_by", "seal_requested_at",
-			"seal_approved_by", "seal_approved_at",
-			"sealed_at", "signature_hash_seal",
+			"sealed_by", "sealed_at",
+			"signature_hash_seal",
 			"seal_rejected_by", "seal_rejected_at", "reject_reason",
 			"cancelled_by", "cancelled_at", "cancel_reason",
 			"superseded_by_run_id",
@@ -651,8 +651,8 @@ func TestCalcRunRepo_Get_InvalidSealApprovedBy_UUID_Error(t *testing.T) {
 			id, "p-2026-06", now, "ALL_ACTIVE", "SEALED",
 			nil, nil, 0, 0, nil, nil, nil,
 			sealReqBy.String(), nil,
-			"not-a-valid-uuid", // invalid seal_approved_by
-			nil, nil, nil,
+			"not-a-valid-uuid", nil, // sealed_by (invalid), sealed_at
+			nil,                     // signature_hash_seal
 			nil, nil, nil, nil, nil, nil, nil,
 			now, createdBy, now, createdBy, int64(1), "TUGURE",
 		))
