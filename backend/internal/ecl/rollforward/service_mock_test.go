@@ -84,14 +84,12 @@ func expectStageHistory(mock sqlmock.Sqlmock, calcRunID uuid.UUID) {
 		WillReturnRows(sqlmock.NewRows([]string{"instrumen_id", "calc_run_id", "trigger_type", "created_at"}))
 }
 
-// expectAuditTx adds mock expectations for the audit transaction opened by writeAuditEvent.
-// It accepts and rolls back or commits.
-func expectAuditTxCommit(mock sqlmock.Sqlmock, numEvents int) {
+// expectAuditTxCommit adds mock expectations for the audit transaction opened by writeAuditEvent.
+// Expects exactly one audit event per call (all current callers use 1 event).
+func expectAuditTxCommit(mock sqlmock.Sqlmock) {
 	mock.ExpectBegin()
-	for range numEvents {
-		mock.ExpectQuery(`SELECT current_hash`).WillReturnRows(sqlmock.NewRows([]string{"current_hash"}))
-		mock.ExpectExec(`INSERT INTO aud.audit_log`).WillReturnResult(sqlmock.NewResult(1, 1))
-	}
+	mock.ExpectQuery(`SELECT current_hash`).WillReturnRows(sqlmock.NewRows([]string{"current_hash"}))
+	mock.ExpectExec(`INSERT INTO aud.audit_log`).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 }
 
@@ -120,7 +118,7 @@ func TestComputeRollForward_FirstPeriod_AllOriginations(t *testing.T) {
 	expectResultLines(mock, currentRunID, currentLines)
 
 	// Step 9: audit tx
-	expectAuditTxCommit(mock, 1)
+	expectAuditTxCommit(mock)
 
 	report, err := svc.ComputeRollForward(context.Background(), rollforward.ComputeRequest{
 		CurrentCalcRunID: currentRunID,
@@ -287,7 +285,7 @@ func TestComputeRollForward_PriorNotSealed_AllowedWithWarning(t *testing.T) {
 	// No derecognitions — empty setDifference
 	// No instrumen status lookup needed
 
-	expectAuditTxCommit(mock, 1)
+	expectAuditTxCommit(mock)
 
 	report, err := svc.ComputeRollForward(context.Background(), rollforward.ComputeRequest{
 		CurrentCalcRunID:    currentRunID,
@@ -387,7 +385,7 @@ func TestComputeRollForward_NormalPeriod_Transfers_Reconciled(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id", "kode", "status", "tanggal_jatuh_tempo"}).
 			AddRow(derecID, "INST-DEC", "JATUH_TEMPO", nil))
 
-	expectAuditTxCommit(mock, 1)
+	expectAuditTxCommit(mock)
 
 	report, err := svc.ComputeRollForward(context.Background(), rollforward.ComputeRequest{
 		CurrentCalcRunID: currentRunID,
@@ -655,7 +653,7 @@ func TestGetRollForward_FirstPeriod(t *testing.T) {
 	expectCalcRunStatus(mock, currentRunID, "SEALED", "JUNI-2026")
 	currentLines := buildLines([]lineSpec{{id: instrID, stage: 1, ecl: "2000000.0000"}})
 	expectResultLines(mock, currentRunID, currentLines)
-	expectAuditTxCommit(mock, 1)
+	expectAuditTxCommit(mock)
 
 	report, err := svc.GetRollForward(context.Background(), currentRunID, nil, uuid.New())
 	if err != nil {
@@ -723,7 +721,7 @@ func TestValidatePeriodeOrdering_AllowsPriorBeforeCurrent_HappyPath(t *testing.T
 	expectResultLines(mock, currentRunID, lines)
 	expectStageHistory(mock, currentRunID)
 
-	expectAuditTxCommit(mock, 1)
+	expectAuditTxCommit(mock)
 
 	report, err := svc.ComputeRollForward(context.Background(), rollforward.ComputeRequest{
 		CurrentCalcRunID: currentRunID,
@@ -759,7 +757,7 @@ func TestExportXLSX_WritesAuditEvent(t *testing.T) {
 	}
 
 	// Export audit write: one BEGIN + SELECT current_hash + INSERT + COMMIT
-	expectAuditTxCommit(mock, 1)
+	expectAuditTxCommit(mock)
 
 	bytes, err := svc.ExportXLSX(context.Background(), report, false, actorID)
 	if err != nil {

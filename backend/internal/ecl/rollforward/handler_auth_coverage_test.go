@@ -365,7 +365,7 @@ func TestComputeRollForward_AuditTxRollback_StillReturnsReport(t *testing.T) {
 // ─── ExportDisclosure with prior calc run ID ──────────────────────────────────
 
 func TestExportDisclosure_WithPriorCalcRunId_Success(t *testing.T) {
-	r, mock, _ := buildFullTestEngine(t)
+	r, mock := buildFullTestEngine(t)
 
 	currentRunID := uuid.New()
 	priorRunID := uuid.New()
