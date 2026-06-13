@@ -58,6 +58,14 @@ const (
 	// StatusCancelled is a terminal state for calc runs that were abandoned.
 	// Partial ecl.calc_result_line rows are preserved for audit.
 	StatusCancelled Status = "CANCELLED"
+
+	// StatusSealRejected is set when ALCO/CFO rejects a seal request.
+	// Reserved for future audit trail enhancement; the service currently transitions
+	// back to COMPLETED after rejection (see RejectSeal). The constant is defined here
+	// so DB CHECK constraint values are mirrored in Go for consistency (DEC-016).
+	// A future story may surface SEAL_REJECTED as an intermediate state before allowing
+	// re-submission, enabling rejection history to be queried without scanning audit_log.
+	StatusSealRejected Status = "SEAL_REJECTED"
 )
 
 // IsTerminal returns true for terminal states (SEALED, CANCELLED).
@@ -72,7 +80,11 @@ func (s Status) CanStart() bool { return s == StatusDraft }
 func (s Status) CanCancel() bool { return s == StatusDraft || s == StatusInProgress }
 
 // CanRequestSeal returns true if this status allows a /seal/request transition.
-func (s Status) CanRequestSeal() bool { return s == StatusCompleted }
+// SEAL_REJECTED is also eligible: a rejected run may be re-submitted after the
+// underlying issues are addressed (FSD-APP-C §5.4, audit trail preserved).
+func (s Status) CanRequestSeal() bool {
+	return s == StatusCompleted || s == StatusSealRejected
+}
 
 // CanApproveSeal returns true if this status allows a /seal/approve or /seal/reject.
 func (s Status) CanApproveSeal() bool { return s == StatusSealRequested }

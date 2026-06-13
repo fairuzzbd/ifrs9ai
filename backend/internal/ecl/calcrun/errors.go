@@ -143,8 +143,9 @@ func ErrFXRateNotFound(date string) error {
 }
 
 // ErrCalcRunForbiddenNotMaker — HTTP 403. Only the creator (maker) can cancel a calc_run.
+// Uses specific code CALC_RUN_FORBIDDEN_NOT_MAKER (not generic FORBIDDEN) per api-conventions.md.
 func ErrCalcRunForbiddenNotMaker(creatorID string) error {
-	return domainErr("FORBIDDEN",
+	return domainErr("CALC_RUN_FORBIDDEN_NOT_MAKER",
 		"Hanya creator calc run ("+creatorID+") yang dapat membatalkannya.",
 		http.StatusForbidden)
 }
