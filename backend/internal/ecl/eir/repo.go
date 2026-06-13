@@ -73,6 +73,13 @@ type ScheduleRepoIface interface {
 
 	// List returns paginated schedule rows (DataTable).
 	List(ctx context.Context, instrumenID uuid.UUID, q listquery.Query, includeSuperseded bool, cursor string, limit int) ([]ScheduleRow, *response.PaginationMeta, error)
+
+	// GetGrossCarryingAtDate returns the closing_carrying of the latest active
+	// schedule row whose tanggal_posting <= asOf, for use in catch-up adjustment.
+	// Returns ErrEIRScheduleNotFound if no qualifying row exists.
+	// Per IFRS 9 §5.4.3: gross carrying at amendment date = book value before remeasurement.
+	// NUMERIC(20,4) read via ::text to avoid float64 (DEC-016).
+	GetGrossCarryingAtDate(ctx context.Context, instrumenID uuid.UUID, asOf time.Time) (decimal.Decimal, error)
 }
 
 // DBEIRScheduleRepo implements ScheduleRepoIface against ecl.eir_amortization_schedule.
@@ -211,6 +218,34 @@ func (r *DBEIRScheduleRepo) HasActiveRows(ctx context.Context, instrumenID uuid.
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// GetGrossCarryingAtDate returns closing_carrying from the latest active schedule row
+// with tanggal_posting <= asOf.  Used by computeCatchUpAdjustment (IFRS 9 §5.4.3).
+// NUMERIC read via ::text to avoid float64 (DEC-016).
+// Returns ErrEIRScheduleNotFound when no qualifying row exists.
+func (r *DBEIRScheduleRepo) GetGrossCarryingAtDate(ctx context.Context, instrumenID uuid.UUID, asOf time.Time) (decimal.Decimal, error) {
+	var closingStr string
+	q := `SELECT closing_carrying::text
+		FROM ecl.eir_amortization_schedule
+		WHERE instrumen_id     = $1
+		  AND recomputed_from_seq IS NULL
+		  AND deleted_at          IS NULL
+		  AND tanggal_posting     <= $2
+		ORDER BY tanggal_posting DESC, periode_seq DESC
+		LIMIT 1`
+	err := r.db.QueryRowContext(ctx, q, instrumenID, asOf).Scan(&closingStr)
+	if err == sql.ErrNoRows {
+		return decimal.Zero, ErrEIRScheduleNotFound(instrumenID.String())
+	}
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("GetGrossCarryingAtDate: %w", err)
+	}
+	v, err := decimal.NewFromString(closingStr)
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("GetGrossCarryingAtDate parse closing_carrying: %w", err)
+	}
+	return v, nil
 }
 
 // List returns a paginated list of schedule rows.

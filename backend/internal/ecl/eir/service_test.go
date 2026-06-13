@@ -86,9 +86,11 @@ func (r *stubInstrumenRepo) UpdateEIRAwal(_ context.Context, _ *sql.Tx, id uuid.
 }
 
 type stubScheduleRepo struct {
-	rows      []ScheduleRow
-	maxSeq    int
-	hasActive bool
+	rows          []ScheduleRow
+	maxSeq        int
+	hasActive     bool
+	grossCarrying decimal.Decimal // returned by GetGrossCarryingAtDate
+	errGrossCarry error           // if non-nil, GetGrossCarryingAtDate returns this error
 }
 
 func (r *stubScheduleRepo) InsertBatch(_ context.Context, _ *sql.Tx, rows []ScheduleRow) error {
@@ -128,6 +130,13 @@ func (r *stubScheduleRepo) GetMaxPeriodeSeq(_ context.Context, _ uuid.UUID) (int
 
 func (r *stubScheduleRepo) HasActiveRows(_ context.Context, _ uuid.UUID) (bool, error) {
 	return r.hasActive, nil
+}
+
+func (r *stubScheduleRepo) GetGrossCarryingAtDate(_ context.Context, _ uuid.UUID, _ time.Time) (decimal.Decimal, error) {
+	if r.errGrossCarry != nil {
+		return decimal.Zero, r.errGrossCarry
+	}
+	return r.grossCarrying, nil
 }
 
 func (r *stubScheduleRepo) List(_ context.Context, _ uuid.UUID, _ listquery.Query, _ bool, _ string, limit int) ([]ScheduleRow, *response.PaginationMeta, error) {
