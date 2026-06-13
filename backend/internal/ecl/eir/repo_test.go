@@ -1127,3 +1127,68 @@ func amendmentSelectCols() []string {
 
 // Suppress unused import.
 var _ = decimal.Zero
+
+// ─── DBEIRScheduleRepo.GetGrossCarryingAtDate ────────────────────────────────
+
+// TestDBEIRScheduleRepo_GetGrossCarryingAtDate_HappyPath verifies that the
+// closing_carrying from the latest active row on or before asOf is returned.
+// NUMERIC read via ::text to avoid float64 (DEC-016).
+func TestDBEIRScheduleRepo_GetGrossCarryingAtDate_HappyPath(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	instrID := uuid.New()
+	asOf := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	expectedCarrying := "1005000000.0000"
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT closing_carrying::text")).
+		WithArgs(instrID, asOf).
+		WillReturnRows(sqlmock.NewRows([]string{"closing_carrying"}).AddRow(expectedCarrying))
+
+	repo := NewDBEIRScheduleRepo(db)
+	got, err := repo.GetGrossCarryingAtDate(context.Background(), instrID, asOf)
+	if err != nil {
+		t.Fatalf("GetGrossCarryingAtDate: %v", err)
+	}
+
+	want, _ := decimal.NewFromString(expectedCarrying)
+	if !got.Equal(want) {
+		t.Errorf("want %s, got %s", want.StringFixed(4), got.StringFixed(4))
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("sqlmock: %v", err)
+	}
+}
+
+// TestDBEIRScheduleRepo_GetGrossCarryingAtDate_NoRows verifies that ErrEIRScheduleNotFound
+// is returned when no qualifying row exists (e.g., no prior schedule).
+func TestDBEIRScheduleRepo_GetGrossCarryingAtDate_NoRows(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	instrID := uuid.New()
+	asOf := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT closing_carrying::text")).
+		WithArgs(instrID, asOf).
+		WillReturnRows(sqlmock.NewRows([]string{"closing_carrying"})) // empty result set
+
+	repo := NewDBEIRScheduleRepo(db)
+	_, err := repo.GetGrossCarryingAtDate(context.Background(), instrID, asOf)
+	if err == nil {
+		t.Fatal("expected ErrEIRScheduleNotFound, got nil")
+	}
+
+	de, ok := err.(interface {
+		Code() interface{ String() string }
+	})
+	_ = de
+	_ = ok
+	// Verify it's a domain error with the schedule-not-found code
+	assertDomainErr(t, err, CodeEIRScheduleNotFound)
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("sqlmock: %v", err)
+	}
+}

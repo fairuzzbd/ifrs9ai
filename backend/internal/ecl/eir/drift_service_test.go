@@ -127,6 +127,13 @@ func (r *driftScheduleRepo) HasActiveRows(_ context.Context, instrID uuid.UUID) 
 func (r *driftScheduleRepo) List(_ context.Context, _ uuid.UUID, _ listquery.Query, _ bool, _ string, limit int) ([]ScheduleRow, *response.PaginationMeta, error) {
 	return nil, &response.PaginationMeta{Limit: limit}, nil
 }
+func (r *driftScheduleRepo) GetGrossCarryingAtDate(_ context.Context, instrID uuid.UUID, _ time.Time) (decimal.Decimal, error) {
+	rows := r.rows[instrID]
+	if len(rows) == 0 {
+		return decimal.Zero, ErrEIRScheduleNotFound(instrID.String())
+	}
+	return rows[len(rows)-1].ClosingCarrying, nil
+}
 
 // ─── streaming instrumen repo for drift ──────────────────────────────────────
 

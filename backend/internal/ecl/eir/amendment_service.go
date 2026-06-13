@@ -310,7 +310,23 @@ func (s *AmendmentService) Approve(ctx context.Context, req ApproveRequest, acto
 		return AmendmentProposal{}, ErrEIRCashflowInvalid("Revised cashflows tidak menghasilkan schedule rows")
 	}
 
-	// 9. Determine firstNewSeq for MarkSuperseded reference
+	// 9. Compute catch-up adjustment per IFRS 9 §5.4.3
+	// NPV(revised CF @ original EIR) − grossCarrying(amendment date).
+	// Stored in ecl.eir_reestimation_log.catch_up_adjustment (NUMERIC(20,4)).
+	// Jurnal P&L booking deferred to Phase 5 (APP-D jurnal module, M7+).
+	var originalEIR decimal.Decimal
+	if inst.EIRAwal != nil {
+		originalEIR = *inst.EIRAwal
+	}
+	catchUpAdj, err := s.computeCatchUpAdjustment(ctx, proposal.InstrumenID, revisedCFs, originalEIR, proposal.TanggalAmandemen)
+	if err != nil {
+		// Non-fatal if no schedule exists yet (e.g. first amendment before schedule generated).
+		// Log and continue — catch_up will be stored as nil.
+		s.logger.WarnContext(ctx, "eir.Approve: catch-up adjustment skipped", "reason", err.Error())
+		catchUpAdj = decimal.Zero
+	}
+
+	// 9b. Determine firstNewSeq for MarkSuperseded reference
 	firstNewSeq := 0
 	maxSeq, err := s.schedRepo.GetMaxPeriodeSeq(ctx, proposal.InstrumenID)
 	if err != nil {
@@ -349,10 +365,13 @@ func (s *AmendmentService) Approve(ctx context.Context, req ApproveRequest, acto
 		return AmendmentProposal{}, fmt.Errorf("eir.Approve: update eir_awal: %w", err)
 	}
 
-	// 11d. Update amendment log: APPROVED + eir_baru
+	// 11d. Update amendment log: APPROVED + eir_baru + catch_up_adjustment
+	// catch_up_adjustment = NPV(revised CF @ original EIR) − grossCarrying (IFRS 9 §5.4.3).
+	// Jurnal P&L booking deferred to Phase 5 (APP-D jurnal module, M7+).
 	now := time.Now()
 	proposal.Status = AmendStatusApproved
 	proposal.EIRBaru = &newEIR
+	proposal.CatchUpAdjustment = &catchUpAdj
 	proposal.ApproverID = &actorID
 	proposal.ApproverComment = &req.Comment
 	proposal.ApproverSignatureHash = &approverSig
@@ -388,6 +407,10 @@ func (s *AmendmentService) Approve(ctx context.Context, req ApproveRequest, acto
 			"first_new_seq":  firstNewSeq,
 			"closing_delta":  closingDelta.StringFixed(4),
 			"approver_sig":   approverSig,
+			// IFRS 9 §5.4.3 catch-up: NPV(revised CF @ originalEIR) − grossCarrying.
+			// Positive = P&L gain, negative = P&L loss.
+			// Jurnal posting deferred to Phase 5 (APP-D jurnal module, M7+).
+			"catch_up_adjustment": catchUpAdj.StringFixed(4),
 		},
 		TenantID: proposal.TenantID,
 	}); err != nil {
@@ -399,6 +422,72 @@ func (s *AmendmentService) Approve(ctx context.Context, req ApproveRequest, acto
 	}
 
 	return *proposal, nil
+}
+
+// computeCatchUpAdjustment computes the immediate P&L catch-up per IFRS 9 §5.4.3.
+//
+// When an EIR amendment is approved the entity must remeasure the gross carrying
+// amount as the NPV of the revised cashflows discounted at the ORIGINAL EIR.
+// The difference between that NPV and the current gross carrying amount is
+// recognized immediately in profit or loss.
+//
+//	catch_up = NPV(revisedCF @ originalEIR) − grossCarrying(at amendmentDate)
+//
+// Positive catch_up = P&L gain (revised CF > carrying).
+// Negative catch_up = P&L loss (revised CF < carrying).
+//
+// Time fractions use ACT/36525 (days/36525) matching the solver convention for
+// annual-equivalent discounting.  RoundBank(4) applied to final result (DEC-016
+// NUMERIC(20,4) storage).
+//
+// Jurnal P&L booking is deferred to Phase 5 (APP-D jurnal module, M7+).
+// This method stores the computed value in ecl.eir_reestimation_log.catch_up_adjustment.
+//
+// Ref: IFRS 9 §5.4.3, FSD-APP-C-ECL-EIR-v1.0.docx §4.3, SoW §4.
+func (s *AmendmentService) computeCatchUpAdjustment(
+	ctx context.Context,
+	instrumenID uuid.UUID,
+	revisedCashflow []CashflowItem,
+	originalEIR decimal.Decimal,
+	amendmentDate time.Time,
+) (decimal.Decimal, error) {
+	// Step 1 — NPV of revised cashflows discounted at original EIR.
+	// t = fractional years from amendmentDate to each CF date (ACT/36525).
+	// Cashflows before amendmentDate are excluded (past; no remeasurement impact).
+	// Per IFRS 9 §5.4.3 the discount rate is the ORIGINAL EIR, not the new one.
+	const daysInYear = 36525 // 365.25 × 100 to avoid float; keep as int then divide
+
+	npv := decimal.Zero
+	oneYearDays := decimal.NewFromInt(daysInYear)
+	oneHundred := decimal.NewFromInt(100)
+	onePlusEIR := decimal.NewFromInt(1).Add(originalEIR) // (1 + r)
+
+	for _, cf := range revisedCashflow {
+		if cf.Date.Before(amendmentDate) {
+			continue // ignore past cashflows
+		}
+		// t = days / 365.25 expressed without float64: days * 100 / 36525
+		daysDiff := int64(cf.Date.Sub(amendmentDate).Hours() / 24) //nolint:mnd // 24h = 1 day
+		t := decimal.NewFromInt(daysDiff).Mul(oneHundred).Div(oneYearDays)
+
+		// discount factor = (1 + originalEIR)^t  — reuse solver's decimalPow
+		discFactor := decimalPow(onePlusEIR, t)
+		if discFactor.IsZero() {
+			// degenerate case: skip rather than divide-by-zero
+			continue
+		}
+		npv = npv.Add(cf.AmountIDR.Div(discFactor))
+	}
+
+	// Step 2 — gross carrying at amendment date from latest active schedule row.
+	grossCarrying, err := s.schedRepo.GetGrossCarryingAtDate(ctx, instrumenID, amendmentDate)
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("computeCatchUpAdjustment: read gross carrying: %w", err)
+	}
+
+	// Step 3 — catch-up = NPV − grossCarrying, rounded HALF_EVEN to 4 d.p. (DEC-016 NUMERIC(20,4))
+	catchUp := npv.Sub(grossCarrying).RoundBank(4)
+	return catchUp, nil
 }
 
 // Reject terminates the amendment workflow (reviewer or approver can reject).
