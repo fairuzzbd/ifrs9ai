@@ -59,6 +59,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/ecl/helpers"
 	"blips-ifrs9.tugu-re.com/internal/ecl/lookthrough"
 	"blips-ifrs9.tugu-re.com/internal/ecl/lps"
+	"blips-ifrs9.tugu-re.com/internal/ecl/rollforward"
 	"blips-ifrs9.tugu-re.com/internal/ecl/staging"
 )
 
@@ -751,6 +752,28 @@ func main() {
 	calcRunHandler := calcrun.NewHandler(calcRunSvc)
 	calcrun.RegisterRoutes(v1, calcRunHandler, jwtVerifier, db)
 	_ = calcRunWorker // registered on asynqMux below
+
+	// -----------------------------------------------------------------------
+	// P4-M11 Roll-Forward CKPN (APP-C-M11-001..006)
+	// Computes CKPN movement table: opening → transfers → originations →
+	// derecognitions → remeasurements → closing. Reconcile: |delta| < IDR 1.
+	//
+	// Routes:
+	//   POST   /ecl/roll-forward/compute                     — compute full report (M11-001)
+	//   GET    /ecl/roll-forward                             — get report (M11-004)
+	//   GET    /ecl/roll-forward/:id/export                  — disclosure XLSX (M11-005)
+	//   GET    /ecl/roll-forward/portfolios/:pid             — per-portfolio breakdown (M11-004)
+	//   GET    /ecl/roll-forward/portfolios/:pid/instruments — instrument list (M11-004)
+	//   GET    /ecl/dashboard/ckpn-trend                     — trend dashboard (M11-006)
+	//
+	// Read-only: no schema migrations (reads M7 result lines).
+	// OQ resolutions: reconcile tolerance IDR 1.0000, sign convention, Stage 3→1 override only.
+	// Decisions: DEC-010, DEC-016, DEC-018, DEC-021, DEC-022.
+	// -----------------------------------------------------------------------
+	rfRepo := rollforward.NewRepo(db)
+	rfSvc := rollforward.NewService(rfRepo, db, auditWriter, logger)
+	rfHandler := rollforward.NewHandler(rfSvc)
+	rollforward.RegisterRoutes(v1, rfHandler, jwtVerifier, db)
 
 	// B1 fix: Register DriftCronHandler on Asynq mux + scheduler.
 	// Previously the handler was instantiated then discarded (_ = ...), making the
