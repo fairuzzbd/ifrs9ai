@@ -341,6 +341,18 @@ components:
         - CALC_RUN_CANCEL_AFTER_COMPLETED      # 422 — tidak bisa cancel setelah COMPLETED/SEALED
         - FX_RATE_NOT_FOUND                    # 422 — kurs BI JISDOR tidak tersedia untuk evaluation_date
         - ECL_PARAM_NOT_FOUND                  # 422 — parameter ECL tidak ditemukan atau belum APPROVED
+        # Roll-Forward CKPN (APP-C, P4-M11)
+        - ROLL_FORWARD_PRIOR_NOT_FOUND          # 404 — priorCalcRunId tidak ada di ecl.calc_run
+        - ROLL_FORWARD_PRIOR_NOT_SEALED         # 422 — prior bukan SEALED (DRAFT/COMPLETED = preview only, warning)
+        - ROLL_FORWARD_CURRENT_INVALID_STATE    # 422 — currentCalcRunId harus COMPLETED atau SEALED
+        - ROLL_FORWARD_PERIODE_MISMATCH         # 422 — current periode harus setelah prior periode
+        - ROLL_FORWARD_DETECTION_METHOD_INVALID # 422 — detectionMethod bukan nilai valid enum
+        - ROLL_FORWARD_EXPORT_MISMATCH_FORBIDDEN # 422 — export diblokir karena reconcileStatus=MISMATCH dan force_mismatch=false
+        - ROLL_FORWARD_PORTFOLIO_NOT_FOUND      # 404 — portofolioId tidak ditemukan di mst.portofolio
+        - ROLL_FORWARD_TREND_INSUFFICIENT_DATA  # 422 — butuh ≥ 2 SEALED calc run untuk menampilkan tren
+        - ROLL_FORWARD_SCOPE_MISMATCH           # 422 — scope run partial vs all-active tidak kompatibel untuk roll-forward
+        - ROLL_FORWARD_INVALID_CALC_RUN_STATUS  # 422 — currentCalcRunId berstatus DRAFT (alias untuk current_invalid_state, UI-facing)
+        - ROLL_FORWARD_INVALID_PRIOR_PERIOD     # 422 — priorCalcRunId dari periode yang sama atau lebih baru (alias periode_mismatch, UI-facing)
 
     # ---- Timestamps -------------------------------------------------------
     TimestampISO:

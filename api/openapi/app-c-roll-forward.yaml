@@ -1,0 +1,1558 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-C Roll-Forward CKPN (P4-M11)
+  version: "1.0.0"
+  description: |
+    Roll-forward CKPN endpoints: compute full movement report, read cached/on-demand,
+    export disclosure (PSAK 71 §5.5), per-portfolio breakdown, and multi-period trend dashboard.
+
+    Story set: APP-C-M11-001..006
+    FSD: FSD-APP-C-ECL-EIR-v1.0.docx §5 (calc run orchestration), §3 (staging + transfers), §6 (seal)
+    FSD: FSD-BLIPS-MASTER-v1.1.docx §9 (PSAK 71 §5.5 disclosure)
+    BRD: §8.3 (CKPN Roll-Forward), §9.4 (Laporan posisi reconcile)
+
+    ## Depends on (harus MERGED sebelum M11)
+    - P4-M7 merged (PR #72) — ecl.calc_header, ecl.calc_detail_skenario, ecl.stage_history
+    - P4-M8 merged (PR #76) — ecl.calc_run, sealing lifecycle
+
+    ## Phase boundary
+    M11 implements proper stage transfer detection (replaces M7 PARTIAL_PHASE_5_DEFER).
+    Origination/derecognition detection via BASIC_STATUS_DIFF (mst.instrumen.status +
+    ecl.calc_header presence/absence). Full lifecycle-event detection = Phase 5 enhancement.
+
+    ## OQ Resolutions (locked)
+    - Reconcile tolerance: IDR 1.0000 absolute
+    - Sign convention: positive = INCREASE in allowance (loss); negative = DECREASE (cure/release)
+    - Stage 3→1: only via management override (no auto-cure)
+    - FVTPL→AC reclassification: treat as origination
+    - Disclosure table: use ead_idr (gross_carrying defer Phase 5)
+    - Detection method: BASIC_STATUS_DIFF
+    - priorCalcRunId: nullable for first-ever periode (opening = 0)
+
+    ## Formula kanonik (DEC-010)
+    ECL_closing = ECL_opening
+               + Σ stage_transfers (net, signed per bucket)
+               + new_originations
+               − derecognitions
+               ± remeasurements
+    Reconcile: |ECL_closing − Σ ecl.calc_header.ecl_fl_idr (current run)| < IDR 1.0000
+
+    ## Transfer buckets (6 directional)
+    stage_1_to_2 (+SICR), stage_2_to_1 (−cure), stage_2_to_3 (+default),
+    stage_1_to_3 (+rare direct default), stage_3_to_2 (−override reverse),
+    stage_3_to_1 (−override, management only)
+    ECL movement per bucket: current_ecl_stage_Y − prior_ecl_stage_X (signed)
+
+    ## Permissions
+    ecl.roll_forward.read      — ROLE-RISK, ROLE-AKUN-CTL, ROLE-CFO, ROLE-AUDIT, ROLE-ALCO
+    ecl.roll_forward.compute   — ROLE-RISK, ROLE-AKUN-CTL
+    ecl.roll_forward.export    — ROLE-RISK, ROLE-AKUN-CTL, ROLE-CFO, ROLE-AUDIT
+    ecl.portfolio_aggregate.read — ROLE-RISK, ROLE-CFO
+
+    ## Audit events
+    ECL.ROLL_FORWARD_COMPUTE, ECL.ROLL_FORWARD_MISMATCH,
+    ECL.ROLL_FORWARD_VIEW, ECL.ROLL_FORWARD_DISCLOSURE_EXPORT,
+    ECL.ROLL_FORWARD_DISCLOSURE_EXPORT_MISMATCH
+
+    ## Precision (DEC-016)
+    IDR amounts: NUMERIC(20,4) — represented as string "1234567890.0000" for precision.
+    No float64. shopspring/decimal throughout.
+
+    ## UX §3 compliance
+    Compute endpoint: if >2s for 1000 instruments → 202 + jobId + SSE stream.
+    Sync compute (≤1000 instruments, estimated <2s): 200 with full payload.
+    Export: inline ≤10k rows; async 202+jobId for ≥10k rows.
+
+    ## review-required
+    Entire file requires BLOCKING gate from ifrs9-compliance-reviewer before merge:
+    reconcile invariant, PSAK 71 §5.5 disclosure format, sign convention per bucket,
+    Stage 3→1 override restriction, FVTPL→AC as origination.
+
+servers:
+  - url: /api/v1
+    description: BLIPS REST API v1
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: roll-forward-compute
+    description: |
+      Compute roll-forward report (full movement table).
+      Stories APP-C-M11-001, M11-002, M11-003.
+  - name: roll-forward-read
+    description: |
+      Read roll-forward: latest cached or on-demand compute.
+      Story APP-C-M11-004.
+  - name: roll-forward-export
+    description: |
+      Disclosure export (PSAK 71 §5.5): XLSX multi-sheet + CSV.
+      Story APP-C-M11-005.
+  - name: roll-forward-portfolio
+    description: |
+      Per-portfolio breakdown DataTable.
+      Story APP-C-M11-004 (per-portfolio tab).
+  - name: roll-forward-trend
+    description: |
+      Multi-period CKPN trend dashboard (last N SEALED calc runs).
+      Story APP-C-M11-006.
+
+paths:
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/roll-forward/compute — Generate full roll-forward report (M11-001)
+  # ---------------------------------------------------------------------------
+  /ecl/roll-forward/compute:
+    post:
+      operationId: computeRollForward
+      tags: [roll-forward-compute]
+      summary: Hitung roll-forward CKPN lengkap — 6 transfer buckets + origination + derecognition
+      description: |
+        Menghasilkan laporan roll-forward CKPN dengan semua komponen:
+        opening → stage transfers (6 buckets) → originations → derecognitions →
+        remeasurements → closing, plus reconcile check.
+
+        Menggantikan PARTIAL_PHASE_5_DEFER dari M7. Semua komponen non-null.
+
+        Detection method: BASIC_STATUS_DIFF (Phase 4).
+        - Stage transfers: compare ecl.calc_header.stage (prior vs current) per instrumen_id.
+        - Originations: instrumen_id di current NOT IN prior ecl.calc_header.
+        - Derecognitions: instrumen_id di prior NOT IN current ecl.calc_header.
+        - Remeasurement (residual): closing − opening − Σ transfers − originations + derecognitions.
+        - Stage history: ecl.stage_history untuk konfirmasi trigger_type per instrumen (override detection).
+
+        Sync vs async:
+        - Estimated ≤1000 active instruments: synchronous 200 response (≤5s SLA).
+        - Estimated >1000 instruments: 202 Accepted + jobId + SSE stream (UX §3).
+        - Client should check Content-Type or HTTP status to distinguish.
+
+        priorCalcRunId = null → periode pertama, opening = 0, all instruments = originations.
+
+        Guard rules:
+        - currentCalcRunId must be COMPLETED or SEALED.
+        - priorCalcRunId (if provided) must be SEALED and from periode strictly before current.
+        - priorCalcRunId NOT from same or later periode → ROLL_FORWARD_PERIODE_MISMATCH.
+        - Both runs must cover same instrument scope → ROLL_FORWARD_SCOPE_MISMATCH if partial scope mismatch detected.
+
+        Reconcile: |closingEclIdr − Σ ecl.calc_header.ecl_fl_idr for currentCalcRunId| < IDR 1.0000.
+        If delta ≥ 1.0000: reconcileStatus = MISMATCH; also audit ECL.ROLL_FORWARD_MISMATCH.
+
+        Permission: ecl.roll_forward.compute
+        Audit: ECL.ROLL_FORWARD_COMPUTE (always); ECL.ROLL_FORWARD_MISMATCH (on MISMATCH)
+        Idempotency-Key: wajib (DEC-021). Same key = return original response.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ComputeRollForwardRequest'
+            examples:
+              normal_period:
+                summary: Periode normal — current vs prior SEALED
+                value:
+                  currentCalcRunId: "b1c2d3e4-JUNI-0000-0000-000000000001"
+                  priorCalcRunId: "b1c2d3e4-MEI0-0000-0000-000000000001"
+                  options:
+                    detectionMethod: "BASIC_STATUS_DIFF"
+              first_period:
+                summary: Periode pertama — tidak ada prior SEALED run
+                value:
+                  currentCalcRunId: "b1c2d3e4-JAN0-0000-0000-000000000001"
+                  priorCalcRunId: null
+      responses:
+        "200":
+          description: |
+            Roll-forward computed synchronously (≤1000 instrumen atau kecil).
+            Full movement table dalam satu response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RollForwardReportResponse'
+              examples:
+                reconciled:
+                  summary: Roll-forward RECONCILED dengan semua komponen
+                  value:
+                    data:
+                      reportId: "rf-b1c2d3e4-JUNI-2026"
+                      currentCalcRunId: "b1c2d3e4-JUNI-0000-0000-000000000001"
+                      priorCalcRunId: "b1c2d3e4-MEI0-0000-0000-000000000001"
+                      currentPeriodeId: "JUNI-2026"
+                      priorPeriodeId: "MEI-2026"
+                      openingEclIdr: "13500000000.0000"
+                      transfers:
+                        stage1To2:
+                          count: 45
+                          eclMovementIdr: "2000000000.0000"
+                          countOverride: 0
+                        stage2To1:
+                          count: 12
+                          eclMovementIdr: "-500000000.0000"
+                          countOverride: 0
+                        stage2To3:
+                          count: 8
+                          eclMovementIdr: "800000000.0000"
+                          countOverride: 0
+                        stage1To3:
+                          count: 2
+                          eclMovementIdr: "100000000.0000"
+                          countOverride: 0
+                        stage3To2:
+                          count: 3
+                          eclMovementIdr: "-300000000.0000"
+                          countOverride: 3
+                        stage3To1:
+                          count: 0
+                          eclMovementIdr: "0.0000"
+                          countOverride: 0
+                      newOriginations:
+                        count: 15
+                        eclIdr: "1200000000.0000"
+                      derecognitions:
+                        count: 7
+                        priorEclIdr: "800000000.0000"
+                      remeasurementsIdr: "500000000.0000"
+                      closingEclIdr: "16500000000.0000"
+                      reconcileStatus: "RECONCILED"
+                      reconcileDeltaIdr: "0.0000"
+                      reconcileTolerance: "1.0000"
+                      detectionMethod: "BASIC_STATUS_DIFF"
+                      phase5LimitationNote: "Deteksi origination/derecognition menggunakan perubahan status instrumen dan kehadiran di calc_run result. Untuk deteksi berbasis transaction lifecycle events (penempatan, penjualan, jatuh tempo), update ke Phase 5 (APP-B integration)."
+                      computedAt: "2026-06-13T09:00:00+07:00"
+                      warnings: []
+                    meta:
+                      traceId: "trace-rf-001"
+                first_period:
+                  summary: Periode pertama — opening = 0
+                  value:
+                    data:
+                      reportId: "rf-b1c2d3e4-JAN-2026"
+                      currentCalcRunId: "b1c2d3e4-JAN0-0000-0000-000000000001"
+                      priorCalcRunId: null
+                      currentPeriodeId: "JANUARI-2026"
+                      priorPeriodeId: null
+                      openingEclIdr: "0.0000"
+                      transfers:
+                        stage1To2:
+                          count: 0
+                          eclMovementIdr: "0.0000"
+                          countOverride: 0
+                        stage2To1:
+                          count: 0
+                          eclMovementIdr: "0.0000"
+                          countOverride: 0
+                        stage2To3:
+                          count: 0
+                          eclMovementIdr: "0.0000"
+                          countOverride: 0
+                        stage1To3:
+                          count: 0
+                          eclMovementIdr: "0.0000"
+                          countOverride: 0
+                        stage3To2:
+                          count: 0
+                          eclMovementIdr: "0.0000"
+                          countOverride: 0
+                        stage3To1:
+                          count: 0
+                          eclMovementIdr: "0.0000"
+                          countOverride: 0
+                      newOriginations:
+                        count: 850
+                        eclIdr: "9500000000.0000"
+                      derecognitions:
+                        count: 0
+                        priorEclIdr: "0.0000"
+                      remeasurementsIdr: "0.0000"
+                      closingEclIdr: "9500000000.0000"
+                      reconcileStatus: "RECONCILED"
+                      reconcileDeltaIdr: "0.0000"
+                      reconcileTolerance: "1.0000"
+                      detectionMethod: "BASIC_STATUS_DIFF"
+                      phase5LimitationNote: "Deteksi origination/derecognition menggunakan perubahan status instrumen dan kehadiran di calc_run result. Untuk deteksi berbasis transaction lifecycle events (penempatan, penjualan, jatuh tempo), update ke Phase 5 (APP-B integration)."
+                      computedAt: "2026-06-13T09:00:00+07:00"
+                      warnings: ["ROLL_FORWARD_FIRST_PERIOD_OPENING_ZERO"]
+                    meta:
+                      traceId: "trace-rf-002"
+        "202":
+          description: |
+            Roll-forward computation dispatched async (>1000 instrumen, UX §3).
+            Poll /api/v1/jobs/{jobId} atau subscribe SSE /api/v1/jobs/{jobId}/stream.
+            Result di job.result saat completed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RollForwardJobAcceptedResponse'
+              example:
+                data:
+                  jobId: "job_01HXYZ_RF_COMPUTE"
+                  type: "ROLL_FORWARD_COMPUTE"
+                  statusUrl: "/api/v1/jobs/job_01HXYZ_RF_COMPUTE"
+                  streamUrl: "/api/v1/jobs/job_01HXYZ_RF_COMPUTE/stream"
+                  currentCalcRunId: "b1c2d3e4-JUNI-0000-0000-000000000001"
+                  priorCalcRunId: "b1c2d3e4-MEI0-0000-0000-000000000001"
+                meta:
+                  traceId: "trace-rf-async-001"
+        "400":
+          $ref: '#/components/responses/ValidationFailed'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          description: |
+            currentCalcRunId atau priorCalcRunId tidak ditemukan.
+            Error code: ROLL_FORWARD_PRIOR_NOT_FOUND atau NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        "422":
+          description: |
+            Business rule validation failure. Error codes:
+            ROLL_FORWARD_CURRENT_INVALID_STATE — current bukan COMPLETED atau SEALED
+            ROLL_FORWARD_PRIOR_NOT_SEALED — prior bukan SEALED (DRAFT OK untuk preview tapi warning)
+            ROLL_FORWARD_PERIODE_MISMATCH — current periode tidak setelah prior periode
+            ROLL_FORWARD_DETECTION_METHOD_INVALID — detectionMethod bukan nilai valid
+            ROLL_FORWARD_SCOPE_MISMATCH — scope run berbeda (partial vs all-active)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/roll-forward — Read latest roll-forward (M11-004)
+  # ---------------------------------------------------------------------------
+  /ecl/roll-forward:
+    get:
+      operationId: getRollForward
+      tags: [roll-forward-read]
+      summary: Baca roll-forward CKPN (on-demand compute, tidak disimpan ke cache table)
+      description: |
+        Membaca roll-forward CKPN untuk kombinasi currentCalcRunId + priorCalcRunId.
+        Tidak ada cache table — selalu computed on-demand dari ecl.calc_header + ecl.stage_history.
+
+        Jika computation memerlukan >2s (estimasi >1000 instrumen): redirect response
+        ke 202 Accepted dengan jobId (sama seperti POST /ecl/roll-forward/compute).
+        Frontend harus handle 200 (sync) dan 202 (async) gracefully.
+
+        URL state: parameter currentCalcRunId + priorCalcRunId di-preserve di URL
+        (deep-link friendly per UX §1).
+
+        Audit: ECL.ROLL_FORWARD_VIEW setiap panggilan berhasil.
+        Permission: ecl.roll_forward.read
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: currentCalcRunId
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID calc run current (COMPLETED atau SEALED)
+        - name: priorCalcRunId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: |
+            UUID calc run prior (SEALED). Null/omit = periode pertama (opening = 0).
+      responses:
+        "200":
+          description: Roll-forward computed synchronously
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RollForwardReportResponse'
+        "202":
+          description: |
+            Computation dispatched async (>1000 instrumen).
+            SSE stream tersedia di streamUrl.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RollForwardJobAcceptedResponse'
+        "400":
+          $ref: '#/components/responses/ValidationFailed'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          description: currentCalcRunId tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        "422":
+          description: |
+            ROLL_FORWARD_CURRENT_INVALID_STATE, ROLL_FORWARD_PERIODE_MISMATCH
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/roll-forward/{reportId}/export — Disclosure export (M11-005)
+  # ---------------------------------------------------------------------------
+  /ecl/roll-forward/{reportId}/export:
+    get:
+      operationId: exportRollForwardDisclosure
+      tags: [roll-forward-export]
+      summary: Export disclosure PSAK 71 §5.5 — XLSX multi-sheet atau CSV
+      description: |
+        Menghasilkan file disclosure sesuai PSAK 71 §5.5.
+
+        XLSX format (default):
+        - Sheet "Movement Table": matrix Stage 1/2/3/Total × komponen roll-forward.
+          Header bold, freeze row 1, money format "Rp #.##0,0000".
+        - Sheet "Gross Carrying Amount": Stage 1/2/3 × (ead_idr, ecl_allowance, net_carrying).
+          Note: ead_idr dipakai sebagai proxy gross_carrying (Phase 4; Phase 5 pisah).
+        - Sheet "Sign-Off": metadata export (preparer, periode, calc_run_id, reconcile_status,
+          detection_method, phase5 note). Kolom Approved By dikosongkan (manual sign).
+
+        CSV format:
+        - Flat header: Komponen,Stage_1_IDR,Stage_2_IDR,Stage_3_IDR,Total_IDR
+        - UTF-8 with BOM (Excel-compatible)
+        - Footer row: metadata export
+
+        Export block: jika reconcileStatus = MISMATCH dan ?force_mismatch=false (default) →
+        ROLL_FORWARD_EXPORT_MISMATCH_FORBIDDEN.
+        Jika ?force_mismatch=true → export dengan catatan "TIDAK UNTUK PUBLIKASI" di Sign-Off.
+
+        Inline export (≤10k rows): stream file langsung.
+        Async export (>10k rows atau PDF): 202 Accepted + jobId (UX §3).
+
+        reportId: opaque identifier dari POST /ecl/roll-forward/compute response (data.reportId).
+        Alternatif: supply ?currentCalcRunId + ?priorCalcRunId jika reportId tidak ada.
+
+        Permission: ecl.roll_forward.export
+        Audit: ECL.ROLL_FORWARD_DISCLOSURE_EXPORT atau ECL.ROLL_FORWARD_DISCLOSURE_EXPORT_MISMATCH
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: reportId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: |
+            Report identifier dari compute response (data.reportId).
+            Format: "rf-{calcRunId}-{periodeId}" atau UUID.
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [xlsx, csv, pdf]
+            default: xlsx
+          description: Format file export. PDF = Phase 5.
+        - name: force_mismatch
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: |
+            true = allow export meskipun reconcileStatus = MISMATCH.
+            Dokumen Sign-Off akan mencantumkan "TIDAK UNTUK PUBLIKASI".
+            Hanya untuk keperluan analisis internal.
+      responses:
+        "200":
+          description: File export berhasil (inline streaming, ≤10k rows)
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              example: 'attachment; filename="ckpn-roll-forward-JUNI-2026-20260613.xlsx"'
+            X-Total-Rows:
+              schema:
+                type: integer
+              description: Jumlah total baris dalam export (untuk validasi client-side)
+            X-Reconcile-Status:
+              schema:
+                type: string
+                enum: [RECONCILED, MISMATCH]
+              description: Status reconcile dari roll-forward yang di-export
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        "202":
+          description: |
+            Export async dispatched (>10k rows atau PDF).
+            Download link tersedia setelah job selesai via signed MinIO URL.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RollForwardJobAcceptedResponse'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          description: reportId tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        "422":
+          description: |
+            ROLL_FORWARD_EXPORT_MISMATCH_FORBIDDEN — reconcileStatus = MISMATCH dan force_mismatch = false.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                error:
+                  code: "ROLL_FORWARD_EXPORT_MISMATCH_FORBIDDEN"
+                  message: "Roll-forward tidak reconcile (delta = Rp 5.000,0000). Export disclosure formal diblokir. Gunakan ?force_mismatch=true untuk export analisis internal saja."
+                  details:
+                    - field: "reconcileStatus"
+                      rule: "must_be_reconciled"
+                      message: "reconcileStatus harus RECONCILED untuk export disclosure formal"
+                  traceId: "trace-rf-exp-001"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/roll-forward/portfolios/{portofolioId} — Per-portfolio breakdown (M11-004)
+  # ---------------------------------------------------------------------------
+  /ecl/roll-forward/portfolios/{portofolioId}:
+    get:
+      operationId: getRollForwardByPortfolio
+      tags: [roll-forward-portfolio]
+      summary: Roll-forward CKPN per portofolio — breakdown semua komponen
+      description: |
+        Mengembalikan roll-forward breakdown untuk satu portofolio:
+        opening, transfers (6 buckets), originations, derecognitions, remeasurements, closing.
+
+        Subset dari total roll-forward: instrumen difilter berdasarkan portofolio_id
+        (join ecl.calc_header → mst.instrumen → mst.portofolio).
+
+        DataTable support: sort + cursor pagination (untuk instrument-level drill-down).
+        Endpoint ini mengembalikan aggregate per portofolio (satu objek, bukan list).
+        Drill-down ke instrumen: GET /ecl/roll-forward/portfolios/{id}/instruments?...
+
+        Permission: ecl.roll_forward.read (ecl.portfolio_aggregate.read untuk context)
+        Audit: ECL.ROLL_FORWARD_VIEW
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: portofolioId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: currentCalcRunId
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: priorCalcRunId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Null/omit = periode pertama
+      responses:
+        "200":
+          description: Roll-forward breakdown untuk satu portofolio
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortfolioRollForwardResponse'
+              example:
+                data:
+                  portofolioId: "ptf-obligasi-001"
+                  portofolioNama: "Portofolio Obligasi Korporasi"
+                  currentCalcRunId: "b1c2d3e4-JUNI-0000-0000-000000000001"
+                  priorCalcRunId: "b1c2d3e4-MEI0-0000-0000-000000000001"
+                  instrumentCount: 120
+                  openingEclIdr: "5000000000.0000"
+                  transfers:
+                    stage1To2:
+                      count: 10
+                      eclMovementIdr: "800000000.0000"
+                      countOverride: 0
+                    stage2To1:
+                      count: 3
+                      eclMovementIdr: "-150000000.0000"
+                      countOverride: 0
+                    stage2To3:
+                      count: 2
+                      eclMovementIdr: "300000000.0000"
+                      countOverride: 0
+                    stage1To3:
+                      count: 0
+                      eclMovementIdr: "0.0000"
+                      countOverride: 0
+                    stage3To2:
+                      count: 1
+                      eclMovementIdr: "-100000000.0000"
+                      countOverride: 1
+                    stage3To1:
+                      count: 0
+                      eclMovementIdr: "0.0000"
+                      countOverride: 0
+                  newOriginations:
+                    count: 5
+                    eclIdr: "400000000.0000"
+                  derecognitions:
+                    count: 2
+                    priorEclIdr: "200000000.0000"
+                  remeasurementsIdr: "150000000.0000"
+                  closingEclIdr: "6200000000.0000"
+                  detectionMethod: "BASIC_STATUS_DIFF"
+                  dataQualityWarnings: []
+                meta:
+                  traceId: "trace-rf-ptf-001"
+        "400":
+          $ref: '#/components/responses/ValidationFailed'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          description: |
+            portofolioId tidak ditemukan.
+            Error code: ROLL_FORWARD_PORTFOLIO_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        "422":
+          description: |
+            ROLL_FORWARD_CURRENT_INVALID_STATE, ROLL_FORWARD_PERIODE_MISMATCH
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/roll-forward/portfolios/{portofolioId}/instruments — Drill-down instruments (M11-004)
+  # ---------------------------------------------------------------------------
+  /ecl/roll-forward/portfolios/{portofolioId}/instruments:
+    get:
+      operationId: listRollForwardInstruments
+      tags: [roll-forward-portfolio]
+      summary: DataTable instrumen dalam satu bucket roll-forward per portofolio (UX §1)
+      description: |
+        Mengembalikan list instrumen per transfer bucket atau lifecycle event
+        dalam konteks roll-forward untuk satu portofolio.
+
+        Digunakan untuk drill-down dari waterfall baris atau per-portfolio DataTable.
+
+        DataTable UX §1: sort + cursor pagination + filter + export.
+        Allowed sort columns: instrumen_kode, instrumen_nama, ecl_prior_idr,
+          ecl_current_idr, ecl_movement_idr, override_flag.
+        Allowed filter: bucket (transfer bucket atau event), override_flag,
+          instrumen_id, instrumen_kode.
+
+        Export: inline CSV/XLSX ≤10k rows; async 202+jobId >10k rows.
+
+        Permission: ecl.roll_forward.read
+        Audit: ECL.ROLL_FORWARD_VIEW
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: portofolioId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: currentCalcRunId
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: priorCalcRunId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: bucket
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - stage_1_to_2
+              - stage_2_to_1
+              - stage_2_to_3
+              - stage_1_to_3
+              - stage_3_to_2
+              - stage_3_to_1
+              - new_origination
+              - derecognition
+              - stage_same
+            description: |
+              Filter ke bucket spesifik.
+              stage_same = instrumen yang tidak berubah stage (remeasurement pool).
+              Omit = semua instrumen dalam portofolio.
+        - name: "filter[override_flag]"
+          in: query
+          schema:
+            type: boolean
+          description: Filter instrumen yang transfer-nya karena management override
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Q'
+        - name: export
+          in: query
+          schema:
+            type: string
+            enum: [csv, xlsx]
+          description: Export format. Async jika >10k rows.
+      responses:
+        "200":
+          description: List instrumen dalam bucket roll-forward
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RollForwardInstrumentListResponse'
+        "202":
+          description: Export async — >10k rows
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RollForwardJobAcceptedResponse'
+        "400":
+          $ref: '#/components/responses/ValidationFailed'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          description: portofolioId tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  # ---------------------------------------------------------------------------
+  # GET /dashboard/ckpn-trend — Multi-period CKPN trend (M11-006)
+  # ---------------------------------------------------------------------------
+  /dashboard/ckpn-trend:
+    get:
+      operationId: getCKPNTrend
+      tags: [roll-forward-trend]
+      summary: Tren ECL CKPN multi-periode (last N SEALED calc runs) — chart + DataTable
+      description: |
+        Mengembalikan data tren CKPN dari semua SEALED calc run, hingga `periods` terakhir.
+        Setiap data point berisi: total ECL, ECL per stage (1/2/3), delta vs periode sebelumnya.
+
+        Minimum 2 SEALED calc runs diperlukan untuk menampilkan tren.
+        Jika hanya 1 SEALED run tersedia: 422 ROLL_FORWARD_TREND_INSUFFICIENT_DATA.
+
+        Data point auto-sorted ascending by periode (x-axis kronologis).
+        "Delta vs sebelumnya" = periode tepat sebelumnya dalam urutan mst.periode_buku
+        (bukan minus 1 bulan kalender — mengikuti urutan record yang ada).
+
+        DataTable support (UX §1): sort + cursor + filter + export.
+        Drill-down: setiap data point memiliki currentCalcRunId + priorCalcRunId
+        untuk navigasi ke /ecl/roll-forward?currentCalcRunId=...&priorCalcRunId=...
+
+        Permission: ecl.roll_forward.read, ecl.portfolio_aggregate.read
+        Audit: tidak ada (read-only dashboard)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: periods
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 2
+            maximum: 24
+            default: 12
+          description: |
+            Jumlah periode SEALED terakhir yang dikembalikan. Default 12, max 24.
+            Jika data tersedia < periods, kembalikan semua yang ada.
+        - name: "filter[portofolio_id]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Filter tren untuk satu portofolio saja. Omit = semua (total).
+        - $ref: '#/components/parameters/Sort'
+        - name: export
+          in: query
+          schema:
+            type: string
+            enum: [csv, xlsx]
+          description: Export underlying DataTable data
+      responses:
+        "200":
+          description: Tren CKPN multi-periode
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CKPNTrendResponse'
+              example:
+                data:
+                  periods:
+                    - periodeId: "NOVEMBER-2025"
+                      calcRunId: "b1c2d3e4-NOV5-0000-0000-000000000001"
+                      priorCalcRunId: null
+                      eclTotalIdr: "10500000000.0000"
+                      eclByStage:
+                        stage1: "8000000000.0000"
+                        stage2: "2000000000.0000"
+                        stage3: "500000000.0000"
+                      deltaVsPriorIdr: null
+                      deltaPct: null
+                    - periodeId: "JUNI-2026"
+                      calcRunId: "b1c2d3e4-JUNI-0000-0000-000000000001"
+                      priorCalcRunId: "b1c2d3e4-MEI0-0000-0000-000000000001"
+                      eclTotalIdr: "15000000000.0000"
+                      eclByStage:
+                        stage1: "10500000000.0000"
+                        stage2: "3600000000.0000"
+                        stage3: "900000000.0000"
+                      deltaVsPriorIdr: "800000000.0000"
+                      deltaPct: "5.634"
+                  totalPeriodsAvailable: 8
+                  periodsRequested: 12
+                  note: "Menampilkan 8 periode (data tersedia dari NOVEMBER-2025)"
+                meta:
+                  traceId: "trace-trend-001"
+        "400":
+          $ref: '#/components/responses/ValidationFailed'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "422":
+          description: |
+            ROLL_FORWARD_TREND_INSUFFICIENT_DATA — tersedia < 2 SEALED calc run.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                error:
+                  code: "ROLL_FORWARD_TREND_INSUFFICIENT_DATA"
+                  message: "Minimal 2 periode SEALED diperlukan untuk menampilkan tren ECL. Saat ini hanya 1 SEALED calc run tersedia."
+                  details: []
+                  traceId: "trace-trend-err-001"
+
+# ===========================================================================
+# Components
+# ===========================================================================
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: UUID v4 untuk mencegah double-submit (DEC-021)
+      schema:
+        type: string
+        format: uuid
+        example: "550e8400-e29b-41d4-a716-446655440000"
+
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque base64 cursor dari pagination.nextCursor sebelumnya (DEC-022)
+      schema:
+        type: string
+
+    Limit:
+      name: limit
+      in: query
+      description: Jumlah rows per halaman (default 50, max 200)
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+
+    Sort:
+      name: sort
+      in: query
+      description: "Multi-column sort: col1:asc,col2:desc. Max 3 kolom."
+      schema:
+        type: string
+        example: "ecl_movement_idr:desc"
+
+    Q:
+      name: q
+      in: query
+      description: Global text search
+      schema:
+        type: string
+
+  schemas:
+
+    # -------------------------------------------------------------------------
+    # Request schemas
+    # -------------------------------------------------------------------------
+
+    ComputeRollForwardRequest:
+      type: object
+      required: [currentCalcRunId]
+      properties:
+        currentCalcRunId:
+          type: string
+          format: uuid
+          description: |
+            UUID dari ecl.calc_run dengan status COMPLETED atau SEALED.
+            Status DRAFT → ROLL_FORWARD_CURRENT_INVALID_STATE 422.
+        priorCalcRunId:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            UUID dari ecl.calc_run prior dengan status SEALED.
+            Null = periode pertama (opening = 0, all instruments = originations).
+            Periode prior harus < periode current → sinon ROLL_FORWARD_PERIODE_MISMATCH.
+        options:
+          type: object
+          description: Opsi komputasi (opsional)
+          properties:
+            detectionMethod:
+              type: string
+              enum: [BASIC_STATUS_DIFF]
+              default: BASIC_STATUS_DIFF
+              description: |
+                Metode deteksi origination/derecognition.
+                BASIC_STATUS_DIFF (Phase 4): compare ecl.calc_header presence + mst.instrumen.status.
+                FULL_LIFECYCLE_PHASE_5: reserved for Phase 5 (APP-B integration).
+
+    # -------------------------------------------------------------------------
+    # Roll-forward domain schemas
+    # -------------------------------------------------------------------------
+
+    TransferBucket:
+      type: object
+      description: |
+        Satu directional bucket transfer stage. ECL movement signed:
+        positive = increase in allowance (loss), negative = decrease (cure/recovery).
+      required: [count, eclMovementIdr, countOverride]
+      properties:
+        count:
+          type: integer
+          minimum: 0
+          description: Jumlah instrumen yang mengalami transfer dalam bucket ini
+        eclMovementIdr:
+          type: string
+          pattern: "^-?\\d+\\.\\d{4}$"
+          description: |
+            Net ECL movement untuk bucket ini. NUMERIC(20,4) as string.
+            Sign convention:
+            - Positive: increase in ECL allowance (stage upgrades: 1→2, 2→3, 1→3)
+            - Negative: decrease in ECL allowance (cures: 2→1, 3→2, 3→1)
+            Formula: Σ(ecl_current_stage_Y − ecl_prior_stage_X) per instrumen dalam bucket
+        countOverride:
+          type: integer
+          minimum: 0
+          description: |
+            Jumlah instrumen dalam bucket ini yang transfer-nya karena management override
+            (trigger_type = "MANAGEMENT_OVERRIDE" di ecl.stage_history).
+            Stage 3→1 selalu override (tidak ada auto-cure dari Stage 3).
+
+    TransferBuckets:
+      type: object
+      description: Semua 6 directional transfer buckets
+      required: [stage1To2, stage2To1, stage2To3, stage1To3, stage3To2, stage3To1]
+      properties:
+        stage1To2:
+          $ref: '#/components/schemas/TransferBucket'
+          description: "Stage 1 → Stage 2 (SICR). ECL movement positive."
+        stage2To1:
+          $ref: '#/components/schemas/TransferBucket'
+          description: "Stage 2 → Stage 1 (Cure). ECL movement negative."
+        stage2To3:
+          $ref: '#/components/schemas/TransferBucket'
+          description: "Stage 2 → Stage 3 (Default). ECL movement positive."
+        stage1To3:
+          $ref: '#/components/schemas/TransferBucket'
+          description: "Stage 1 → Stage 3 (Rare direct default). ECL movement positive."
+        stage3To2:
+          $ref: '#/components/schemas/TransferBucket'
+          description: "Stage 3 → Stage 2 (Management override reverse). ECL movement negative. countOverride ≈ count."
+        stage3To1:
+          $ref: '#/components/schemas/TransferBucket'
+          description: "Stage 3 → Stage 1 (Management override only). ECL movement negative. countOverride = count always."
+
+    OriginationSummary:
+      type: object
+      required: [count, eclIdr]
+      properties:
+        count:
+          type: integer
+          minimum: 0
+          description: Jumlah instrumen baru (ada di current, tidak ada di prior)
+        eclIdr:
+          type: string
+          pattern: "^\\d+\\.\\d{4}$"
+          description: |
+            Total ECL current untuk instrumen originations. NUMERIC(20,4) as string.
+            Positive always. Termasuk FVTPL→AC reklasifikasi sebagai origination.
+
+    DerecognitionSummary:
+      type: object
+      required: [count, priorEclIdr]
+      properties:
+        count:
+          type: integer
+          minimum: 0
+          description: Jumlah instrumen yang keluar (ada di prior, tidak ada di current)
+        priorEclIdr:
+          type: string
+          pattern: "^\\d+\\.\\d{4}$"
+          description: |
+            Total ECL prior untuk instrumen derecognitions. NUMERIC(20,4) as string.
+            Positive always (ECL di-reverse, mengurangi closing ECL via formula).
+
+    DataQualityWarning:
+      type: object
+      description: Warning kualitas data per instrumen dalam roll-forward computation
+      required: [instrumenId, warningCode, message]
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+        instrumenKode:
+          type: string
+          nullable: true
+        warningCode:
+          type: string
+          enum:
+            - STAGE_HISTORY_MISSING_FALLBACK_CALC_HEADER
+            - INSTRUMEN_AKTIF_NOT_IN_CURRENT_RUN
+            - DERECOGNITION_REASON_UNKNOWN
+          description: |
+            STAGE_HISTORY_MISSING_FALLBACK_CALC_HEADER — stage transition dari calc_header, tidak ada stage_history entry.
+            INSTRUMEN_AKTIF_NOT_IN_CURRENT_RUN — instrumen AKTIF di mst.instrumen tapi tidak ada di current run.
+            DERECOGNITION_REASON_UNKNOWN — tidak bisa menentukan alasan derecognition dari status instrumen.
+        message:
+          type: string
+          description: Pesan detail untuk auditor / ROLE-RISK verifikasi manual
+
+    RollForwardReport:
+      type: object
+      description: Full roll-forward CKPN report — semua komponen movement
+      required:
+        - reportId
+        - currentCalcRunId
+        - currentPeriodeId
+        - openingEclIdr
+        - transfers
+        - newOriginations
+        - derecognitions
+        - remeasurementsIdr
+        - closingEclIdr
+        - reconcileStatus
+        - reconcileDeltaIdr
+        - reconcileTolerance
+        - detectionMethod
+        - phase5LimitationNote
+        - computedAt
+        - warnings
+      properties:
+        reportId:
+          type: string
+          description: |
+            Opaque identifier untuk report ini. Dipakai di /ecl/roll-forward/{reportId}/export.
+            Format: "rf-{currentCalcRunId}" atau UUID stable.
+        currentCalcRunId:
+          type: string
+          format: uuid
+        priorCalcRunId:
+          type: string
+          format: uuid
+          nullable: true
+          description: "null = periode pertama"
+        currentPeriodeId:
+          type: string
+          example: "JUNI-2026"
+        priorPeriodeId:
+          type: string
+          nullable: true
+          example: "MEI-2026"
+        openingEclIdr:
+          type: string
+          pattern: "^\\d+\\.\\d{4}$"
+          description: |
+            ECL closing dari priorCalcRunId. 0.0000 jika priorCalcRunId = null.
+            NUMERIC(20,4) as string (precision-safe).
+        transfers:
+          $ref: '#/components/schemas/TransferBuckets'
+        newOriginations:
+          $ref: '#/components/schemas/OriginationSummary'
+        derecognitions:
+          $ref: '#/components/schemas/DerecognitionSummary'
+        remeasurementsIdr:
+          type: string
+          pattern: "^-?\\d+\\.\\d{4}$"
+          description: |
+            Residual ECL movement setelah transfers, originations, derecognitions.
+            Formula: closingEclIdr − openingEclIdr − Σtransfer_ecl_movements
+                     − newOriginations.eclIdr + derecognitions.priorEclIdr
+            Can be negative (net release). NUMERIC(20,4) as string.
+        closingEclIdr:
+          type: string
+          pattern: "^\\d+\\.\\d{4}$"
+          description: |
+            = Σ ecl.calc_header.ecl_fl_idr untuk currentCalcRunId.
+            NUMERIC(20,4) as string.
+        reconcileStatus:
+          type: string
+          enum: [RECONCILED, MISMATCH]
+          description: |
+            RECONCILED: |closingEclIdr − Σcalc_header.ecl_fl_idr| < IDR 1.0000
+            MISMATCH: delta ≥ IDR 1.0000 — audit ECL.ROLL_FORWARD_MISMATCH ditulis
+        reconcileDeltaIdr:
+          type: string
+          pattern: "^-?\\d+\\.\\d{4}$"
+          description: |
+            closingEclIdr − Σ(komponen roll-forward).
+            0.0000 jika RECONCILED. Selalu di-expose untuk transparansi.
+        reconcileTolerance:
+          type: string
+          example: "1.0000"
+          description: Tolerance threshold yang digunakan. Selalu "1.0000" (IDR 1 absolute).
+        detectionMethod:
+          type: string
+          enum: [BASIC_STATUS_DIFF, FULL_LIFECYCLE_PHASE_5]
+          description: |
+            Metode deteksi yang digunakan.
+            Phase 4: selalu BASIC_STATUS_DIFF.
+        phase5LimitationNote:
+          type: string
+          description: |
+            Notice keterbatasan Phase 4 yang harus ditampilkan di UI.
+            Bahasa Indonesia. Muncul sebagai amber banner di seksi origination/derecognition.
+        computedAt:
+          type: string
+          format: date-time
+          description: Timestamp compute selesai (ISO 8601 dengan TZ)
+        warnings:
+          type: array
+          items:
+            type: string
+            enum:
+              - ROLL_FORWARD_FIRST_PERIOD_OPENING_ZERO
+              - ROLL_FORWARD_MISMATCH_DETECTED
+              - ROLL_FORWARD_PRIOR_NOT_SEALED_PREVIEW
+              - ROLL_FORWARD_HAS_DATA_QUALITY_WARNINGS
+          description: |
+            Warning-level flags (bukan error). Surface di UI sebagai alert.
+            ROLL_FORWARD_FIRST_PERIOD_OPENING_ZERO: priorCalcRunId = null, opening = 0.
+            ROLL_FORWARD_MISMATCH_DETECTED: reconcileStatus = MISMATCH.
+            ROLL_FORWARD_PRIOR_NOT_SEALED_PREVIEW: prior bukan SEALED (DRAFT preview mode).
+            ROLL_FORWARD_HAS_DATA_QUALITY_WARNINGS: ada instrumen dengan data quality issues.
+        dataQualityWarnings:
+          type: array
+          nullable: true
+          items:
+            $ref: '#/components/schemas/DataQualityWarning'
+          description: |
+            Per-instrumen data quality warnings (mis. stage_history missing).
+            Populated jika warnings[] berisi ROLL_FORWARD_HAS_DATA_QUALITY_WARNINGS.
+            null jika tidak ada warning.
+
+    RollForwardReportResponse:
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/RollForwardReport'
+        meta:
+          $ref: '#/components/schemas/Meta'
+
+    RollForwardJobAcceptedResponse:
+      type: object
+      description: Async computation dispatched (UX §3)
+      properties:
+        data:
+          type: object
+          required: [jobId, type, statusUrl, streamUrl]
+          properties:
+            jobId:
+              type: string
+              description: Asynq job ID
+            type:
+              type: string
+              enum: [ROLL_FORWARD_COMPUTE, ROLL_FORWARD_EXPORT]
+            statusUrl:
+              type: string
+              example: "/api/v1/jobs/job_01HXYZ_RF_COMPUTE"
+            streamUrl:
+              type: string
+              example: "/api/v1/jobs/job_01HXYZ_RF_COMPUTE/stream"
+            currentCalcRunId:
+              type: string
+              format: uuid
+            priorCalcRunId:
+              type: string
+              format: uuid
+              nullable: true
+        meta:
+          $ref: '#/components/schemas/Meta'
+
+    # -------------------------------------------------------------------------
+    # Per-portfolio schemas
+    # -------------------------------------------------------------------------
+
+    PortfolioRollForward:
+      type: object
+      required:
+        - portofolioId
+        - currentCalcRunId
+        - instrumentCount
+        - openingEclIdr
+        - transfers
+        - newOriginations
+        - derecognitions
+        - remeasurementsIdr
+        - closingEclIdr
+        - detectionMethod
+      properties:
+        portofolioId:
+          type: string
+          format: uuid
+        portofolioNama:
+          type: string
+          nullable: true
+        currentCalcRunId:
+          type: string
+          format: uuid
+        priorCalcRunId:
+          type: string
+          format: uuid
+          nullable: true
+        instrumentCount:
+          type: integer
+          description: Jumlah instrumen dalam portofolio yang masuk scope run
+        openingEclIdr:
+          type: string
+          pattern: "^\\d+\\.\\d{4}$"
+        transfers:
+          $ref: '#/components/schemas/TransferBuckets'
+        newOriginations:
+          $ref: '#/components/schemas/OriginationSummary'
+        derecognitions:
+          $ref: '#/components/schemas/DerecognitionSummary'
+        remeasurementsIdr:
+          type: string
+          pattern: "^-?\\d+\\.\\d{4}$"
+        closingEclIdr:
+          type: string
+          pattern: "^\\d+\\.\\d{4}$"
+        detectionMethod:
+          type: string
+          enum: [BASIC_STATUS_DIFF, FULL_LIFECYCLE_PHASE_5]
+        dataQualityWarnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/DataQualityWarning'
+
+    PortfolioRollForwardResponse:
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/PortfolioRollForward'
+        meta:
+          $ref: '#/components/schemas/Meta'
+
+    # -------------------------------------------------------------------------
+    # Instrument drill-down schemas
+    # -------------------------------------------------------------------------
+
+    RollForwardInstrumentLine:
+      type: object
+      description: Satu instrumen dalam konteks roll-forward bucket
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+        instrumenKode:
+          type: string
+        instrumenNama:
+          type: string
+        portofolioId:
+          type: string
+          format: uuid
+        stagePrior:
+          type: string
+          nullable: true
+          enum: [STAGE_1, STAGE_2, STAGE_3]
+          description: "Stage di prior calc run. null jika origination (tidak ada di prior)."
+        stageCurrent:
+          type: string
+          nullable: true
+          enum: [STAGE_1, STAGE_2, STAGE_3]
+          description: "Stage di current calc run. null jika derecognition (tidak ada di current)."
+        eclPriorIdr:
+          type: string
+          pattern: "^-?\\d+\\.\\d{4}$"
+          nullable: true
+          description: "ECL dari prior run. null jika origination."
+        eclCurrentIdr:
+          type: string
+          pattern: "^-?\\d+\\.\\d{4}$"
+          nullable: true
+          description: "ECL dari current run. null jika derecognition."
+        eclMovementIdr:
+          type: string
+          pattern: "^-?\\d+\\.\\d{4}$"
+          description: |
+            eclCurrentIdr − eclPriorIdr (signed, per OQ resolution sign convention).
+            Untuk derecognition: negative (ECL di-reverse).
+            Untuk origination: positive (ECL baru ditambahkan).
+        overrideFlag:
+          type: boolean
+          description: "true = transfer karena management override (dari ecl.stage_history.trigger_type)"
+        triggerType:
+          type: string
+          nullable: true
+          description: "ecl.stage_history.trigger_type untuk instrumen ini (mis. SICR_RATING, DPD, MANAGEMENT_OVERRIDE)"
+        derecognitionReason:
+          type: string
+          nullable: true
+          enum: [MATURED, SOLD, UNKNOWN]
+          description: "Hanya untuk bucket=derecognition. Dari mst.instrumen.status fallback."
+        bucket:
+          type: string
+          enum:
+            - stage_1_to_2
+            - stage_2_to_1
+            - stage_2_to_3
+            - stage_1_to_3
+            - stage_3_to_2
+            - stage_3_to_1
+            - new_origination
+            - derecognition
+            - stage_same
+
+    RollForwardInstrumentListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/RollForwardInstrumentLine'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+        appliedSort:
+          type: array
+          items:
+            type: object
+            properties:
+              col:
+                type: string
+              dir:
+                type: string
+                enum: [asc, desc]
+        appliedFilter:
+          type: object
+          additionalProperties: true
+        meta:
+          $ref: '#/components/schemas/Meta'
+
+    # -------------------------------------------------------------------------
+    # Trend dashboard schemas
+    # -------------------------------------------------------------------------
+
+    CKPNTrendPeriod:
+      type: object
+      description: Satu data point tren CKPN per periode SEALED
+      required: [periodeId, calcRunId, eclTotalIdr, eclByStage]
+      properties:
+        periodeId:
+          type: string
+          example: "JUNI-2026"
+        calcRunId:
+          type: string
+          format: uuid
+          description: SEALED calc run ID untuk periode ini
+        priorCalcRunId:
+          type: string
+          format: uuid
+          nullable: true
+          description: SEALED calc run ID periode sebelumnya (untuk drill-down ke roll-forward)
+        eclTotalIdr:
+          type: string
+          pattern: "^\\d+\\.\\d{4}$"
+          description: "Σ ecl.calc_header.ecl_fl_idr untuk periode ini. NUMERIC(20,4) as string."
+        eclByStage:
+          type: object
+          required: [stage1, stage2, stage3]
+          properties:
+            stage1:
+              type: string
+              pattern: "^\\d+\\.\\d{4}$"
+            stage2:
+              type: string
+              pattern: "^\\d+\\.\\d{4}$"
+            stage3:
+              type: string
+              pattern: "^\\d+\\.\\d{4}$"
+        deltaVsPriorIdr:
+          type: string
+          pattern: "^-?\\d+\\.\\d{4}$"
+          nullable: true
+          description: |
+            eclTotalIdr − eclTotalIdr periode sebelumnya.
+            null untuk data point pertama dalam range.
+            Negatif jika ECL turun (release).
+        deltaPct:
+          type: string
+          nullable: true
+          description: |
+            deltaVsPriorIdr / eclTotalIdr periode sebelumnya × 100, format "5.634".
+            null untuk data point pertama.
+
+    CKPNTrendResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          required: [periods, totalPeriodsAvailable, periodsRequested]
+          properties:
+            periods:
+              type: array
+              items:
+                $ref: '#/components/schemas/CKPNTrendPeriod'
+              description: "Diurutkan ascending by periode (kronologis, x-axis chart)."
+            totalPeriodsAvailable:
+              type: integer
+              description: Jumlah total SEALED calc run yang tersedia
+            periodsRequested:
+              type: integer
+              description: Jumlah periode yang di-request (?periods param)
+            note:
+              type: string
+              nullable: true
+              description: |
+                Info text jika data < periodsRequested.
+                Mis. "Menampilkan 8 periode (data tersedia dari NOVEMBER-2025)"
+        meta:
+          $ref: '#/components/schemas/Meta'
+
+    # -------------------------------------------------------------------------
+    # Shared schemas
+    # -------------------------------------------------------------------------
+
+    Pagination:
+      type: object
+      properties:
+        nextCursor:
+          type: string
+          nullable: true
+        hasMore:
+          type: boolean
+        totalEstimate:
+          type: integer
+        limit:
+          type: integer
+
+    Meta:
+      type: object
+      properties:
+        traceId:
+          type: string
+
+    ErrorEnvelope:
+      type: object
+      properties:
+        error:
+          type: object
+          required: [code, message, traceId]
+          properties:
+            code:
+              type: string
+              enum:
+                # Roll-forward specific (M11)
+                - ROLL_FORWARD_PRIOR_NOT_FOUND
+                - ROLL_FORWARD_PRIOR_NOT_SEALED
+                - ROLL_FORWARD_CURRENT_INVALID_STATE
+                - ROLL_FORWARD_PERIODE_MISMATCH
+                - ROLL_FORWARD_DETECTION_METHOD_INVALID
+                - ROLL_FORWARD_EXPORT_MISMATCH_FORBIDDEN
+                - ROLL_FORWARD_PORTFOLIO_NOT_FOUND
+                - ROLL_FORWARD_TREND_INSUFFICIENT_DATA
+                - ROLL_FORWARD_SCOPE_MISMATCH
+                - ROLL_FORWARD_INVALID_CALC_RUN_STATUS
+                - ROLL_FORWARD_INVALID_PRIOR_PERIOD
+                # Generic
+                - FORBIDDEN
+                - NOT_FOUND
+                - VALIDATION_FAILED
+                - IDEMPOTENCY_REPLAY
+                - IDEMPOTENCY_MISMATCH
+                - INTERNAL
+                - INVALID_SORT_COL
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  rule:
+                    type: string
+                  message:
+                    type: string
+            traceId:
+              type: string
+
+  responses:
+
+    ValidationFailed:
+      description: Validasi gagal (field-level atau cross-field)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error:
+              code: "VALIDATION_FAILED"
+              message: "currentCalcRunId wajib diisi"
+              details:
+                - field: "currentCalcRunId"
+                  rule: "required"
+                  message: "currentCalcRunId tidak boleh kosong"
+              traceId: "trace-val-rf-001"
+
+    Forbidden:
+      description: Permission tidak terpenuhi
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error:
+              code: "FORBIDDEN"
+              message: "Permission ecl.roll_forward.compute diperlukan"
+              details: []
+              traceId: "trace-forbidden-rf-001"
+
+    NotFound:
+      description: Entity tidak ditemukan
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error:
+              code: "ROLL_FORWARD_PRIOR_NOT_FOUND"
+              message: "priorCalcRunId tidak ditemukan di ecl.calc_run."
+              details: []
+              traceId: "trace-nf-rf-001"
