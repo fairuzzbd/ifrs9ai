@@ -182,10 +182,10 @@ LIMIT $1`
 			return nil, fmt.Errorf("rollforward.GetSealedCalcRunsByPeriode scan: %w", err)
 		}
 		cr := CalcRunSummary{
-			ID:       id,
+			ID:        id,
 			PeriodeID: periodeID,
-			Status:   status,
-			TenantID: tenantID,
+			Status:    status,
+			TenantID:  tenantID,
 		}
 		if sealedAt.Valid {
 			t := sealedAt.Time
@@ -262,10 +262,10 @@ ORDER BY instrumen_id, created_at DESC`
 	result := make(map[uuid.UUID]StageHistoryRow)
 	for rows.Next() {
 		var (
-			instrumenID uuid.UUID
+			instrumenID  uuid.UUID
 			calcRunIDRow uuid.UUID
-			triggerType string
-			createdAt   time.Time
+			triggerType  string
+			createdAt    time.Time
 		)
 		if err := rows.Scan(&instrumenID, &calcRunIDRow, &triggerType, &createdAt); err != nil {
 			return nil, fmt.Errorf("rollforward.GetStageHistoryForCalcRun scan: %w", err)
@@ -320,9 +320,9 @@ WHERE id IN (%s)
 	result := make(map[uuid.UUID]InstrumenStatusSnapshot, len(ids))
 	for rows.Next() {
 		var (
-			id           uuid.UUID
-			kode         string
-			status       string
+			id            uuid.UUID
+			kode          string
+			status        string
 			jatuhTempoRaw sql.NullTime
 		)
 		if err := rows.Scan(&id, &kode, &status, &jatuhTempoRaw); err != nil {

@@ -58,10 +58,10 @@ func NewService(repo *Repo, db *sql.DB, auditWriter *audit.Writer, logger *slog.
 // validCurrentStatuses are the calc run statuses allowed for currentCalcRunID.
 // DRAFT and IN_PROGRESS are rejected per validation rules §5.1.
 var validCurrentStatuses = map[string]bool{
-	"COMPLETED":              true,
-	"COMPLETED_WITH_ERRORS":  true,
-	"SEALED":                 true,
-	"SEAL_REQUESTED":         true,
+	"COMPLETED":             true,
+	"COMPLETED_WITH_ERRORS": true,
+	"SEALED":                true,
+	"SEAL_REQUESTED":        true,
 }
 
 // ComputeRollForward computes the full CKPN roll-forward report.
@@ -77,8 +77,8 @@ var validCurrentStatuses = map[string]bool{
 //  8. Reconcile check (|delta| < IDR 1.0000).
 //  9. Audit in-transaction (single summary event).
 //
-// Returns the complete RollForwardReport. Never returns partial (replaces PARTIAL_PHASE_5_DEFER).
-func (s *Service) ComputeRollForward(ctx context.Context, req ComputeRequest) (*RollForwardReport, error) {
+// Returns the complete Report. Never returns partial (replaces PARTIAL_PHASE_5_DEFER).
+func (s *Service) ComputeRollForward(ctx context.Context, req ComputeRequest) (*Report, error) {
 	if req.DetectionMethod == "" {
 		req.DetectionMethod = DetectionMethodBasicStatusDiff
 	}
@@ -116,7 +116,7 @@ func (s *Service) ComputeRollForward(ctx context.Context, req ComputeRequest) (*
 			EclIdr: closing,
 		}
 
-		report := &RollForwardReport{
+		report := &Report{
 			ReportID:             fmt.Sprintf("rf-%s", req.CurrentCalcRunID),
 			CurrentCalcRunID:     req.CurrentCalcRunID,
 			PriorCalcRunID:       nil,
@@ -234,7 +234,7 @@ func (s *Service) ComputeRollForward(ctx context.Context, req ComputeRequest) (*
 		warnings = append(warnings, WarnHasDataQualityWarnings)
 	}
 
-	report := &RollForwardReport{
+	report := &Report{
 		ReportID:             fmt.Sprintf("rf-%s", req.CurrentCalcRunID),
 		CurrentCalcRunID:     req.CurrentCalcRunID,
 		PriorCalcRunID:       req.PriorCalcRunID,
@@ -265,7 +265,7 @@ func (s *Service) ComputeRollForward(ctx context.Context, req ComputeRequest) (*
 
 // GetRollForward is an alias for ComputeRollForward (no cache table per OQ-M11-001-A).
 // Computes on-demand from ecl.calc_result_line + ecl.stage_history.
-func (s *Service) GetRollForward(ctx context.Context, currentID uuid.UUID, priorID *uuid.UUID, actorID uuid.UUID) (*RollForwardReport, error) {
+func (s *Service) GetRollForward(ctx context.Context, currentID uuid.UUID, priorID *uuid.UUID, actorID uuid.UUID) (*Report, error) {
 	return s.ComputeRollForward(ctx, ComputeRequest{
 		CurrentCalcRunID: currentID,
 		PriorCalcRunID:   priorID,
@@ -332,7 +332,8 @@ func (s *Service) GetPortfolioRollForward(ctx context.Context, portofolioID, cur
 		priorLines, currentLines, instrumenStatuses, currentID, time.Now(),
 	)
 
-	dqWarnings := append(transferDQWarnings, lifecycleDQWarnings...)
+	transferDQWarnings = append(transferDQWarnings, lifecycleDQWarnings...)
+	dqWarnings := transferDQWarnings
 	remeasurements := closing.
 		Sub(opening).
 		Sub(transfers.SumMovement()).
@@ -426,7 +427,7 @@ func (s *Service) GetCKPNTrend(ctx context.Context, periods int) ([]CKPNTrendPoi
 //   - "Sign-Off": metadata, preparer, reconcile_status, detection_method, Phase 5 note
 //
 // Uses ead_idr as proxy for gross_carrying per OQ-M11-005-A (Phase 4).
-func (s *Service) ExportXLSX(ctx context.Context, report *RollForwardReport, forceMismatch bool) ([]byte, error) {
+func (s *Service) ExportXLSX(ctx context.Context, report *Report, forceMismatch bool) ([]byte, error) {
 	if report.ReconcileStatus == ReconcileStatusMismatch && !forceMismatch {
 		return nil, errDomain(CodeRollForwardExportMismatchForbidden,
 			fmt.Sprintf("Roll-forward tidak reconcile (delta = Rp %s). Export disclosure formal diblokir. "+
@@ -694,7 +695,7 @@ func setDifference(priorLines, currentLines []ResultLineHeader) []uuid.UUID {
 // Also writes ECL.ROLL_FORWARD_MISMATCH if isMismatch = true.
 // Roll-forward is read-only (no mutation tx). We open a short-lived tx solely for the
 // audit write. Best-effort: failures are logged, never returned to caller (DEC-018).
-func (s *Service) writeAuditEvent(ctx context.Context, req ComputeRequest, report *RollForwardReport, isMismatch bool) {
+func (s *Service) writeAuditEvent(ctx context.Context, req ComputeRequest, report *Report, isMismatch bool) {
 	afterPayload := map[string]any{
 		"current_calc_run_id":   req.CurrentCalcRunID,
 		"prior_calc_run_id":     req.PriorCalcRunID,
@@ -732,19 +733,26 @@ func (s *Service) writeAuditEvent(ctx context.Context, req ComputeRequest, repor
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		s.logger.Warn("rollforward: cannot begin audit tx", "error", err)
+		s.logger.WarnContext(ctx, "rollforward: cannot begin audit tx", "error", err)
 		return
 	}
 	txWriter := s.auditWriter.WithTx(tx)
-	for _, evt := range events {
-		evt = audit.EventFromContext(ctx, evt)
-		if werr := txWriter.Write(ctx, evt); werr != nil {
-			s.logger.Warn("rollforward: audit write failed", "error", werr, "action", evt.Action)
-			_ = tx.Rollback()
+	for i := range events {
+		events[i] = audit.EventFromContext(ctx, events[i])
+		if werr := txWriter.Write(ctx, events[i]); werr != nil {
+			s.logger.WarnContext(ctx, "rollforward: audit write failed", "error", werr, "action", events[i].Action)
+			rollbackTx(ctx, s.logger, tx)
 			return
 		}
 	}
 	if cerr := tx.Commit(); cerr != nil {
-		s.logger.Warn("rollforward: audit tx commit failed", "error", cerr)
+		s.logger.WarnContext(ctx, "rollforward: audit tx commit failed", "error", cerr)
+	}
+}
+
+// rollbackTx rolls back tx and logs any rollback error (errcheck compliant).
+func rollbackTx(ctx context.Context, logger *slog.Logger, tx interface{ Rollback() error }) {
+	if rerr := tx.Rollback(); rerr != nil {
+		logger.WarnContext(ctx, "rollforward: tx rollback failed", "error", rerr)
 	}
 }

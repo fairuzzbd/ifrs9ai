@@ -415,7 +415,10 @@ func TestDomainError_CodeAndMessage(t *testing.T) {
 	if err.Error() != "ROLL_FORWARD_PRIOR_NOT_FOUND: prior not found" {
 		t.Errorf("unexpected error string: %s", err.Error())
 	}
-	de := err
+	de, ok := err.(*rollforward.DomainErrorExported)
+	if !ok {
+		t.Fatalf("expected *domainError, got %T", err)
+	}
 	if de.Code() != rollforward.CodeRollForwardPriorNotFound {
 		t.Errorf("unexpected code: %s", de.Code())
 	}
@@ -434,10 +437,10 @@ func TestPhase5LimitationNote_NotEmpty(t *testing.T) {
 func TestExportXLSX_MismatchForbidden(t *testing.T) {
 	// We can't easily instantiate a full Service without a DB, but we can test
 	// the guard logic through the exported stub function.
-	report := &rollforward.RollForwardReport{
-		ReconcileStatus:  rollforward.ReconcileStatusMismatch,
+	report := &rollforward.Report{
+		ReconcileStatus:   rollforward.ReconcileStatusMismatch,
 		ReconcileDeltaIdr: decimal.RequireFromString("5.0000"),
-		CurrentPeriodeID: "JUNI-2026",
+		CurrentPeriodeID:  "JUNI-2026",
 	}
 	// Use exported test helper to call ExportXLSX logic.
 	err := rollforward.ExportXLSXGuardCheck(report, false)
@@ -454,10 +457,10 @@ func TestExportXLSX_MismatchForbidden(t *testing.T) {
 }
 
 func TestExportXLSX_MismatchAllowedWithForce(t *testing.T) {
-	report := &rollforward.RollForwardReport{
-		ReconcileStatus:  rollforward.ReconcileStatusMismatch,
+	report := &rollforward.Report{
+		ReconcileStatus:   rollforward.ReconcileStatusMismatch,
 		ReconcileDeltaIdr: decimal.RequireFromString("5.0000"),
-		CurrentPeriodeID: "JUNI-2026",
+		CurrentPeriodeID:  "JUNI-2026",
 	}
 	err := rollforward.ExportXLSXGuardCheck(report, true)
 	if err != nil {
@@ -466,10 +469,10 @@ func TestExportXLSX_MismatchAllowedWithForce(t *testing.T) {
 }
 
 func TestExportXLSX_ReconciledAllowed(t *testing.T) {
-	report := &rollforward.RollForwardReport{
-		ReconcileStatus:  rollforward.ReconcileStatusReconciled,
+	report := &rollforward.Report{
+		ReconcileStatus:   rollforward.ReconcileStatusReconciled,
 		ReconcileDeltaIdr: decimal.Zero,
-		CurrentPeriodeID: "JUNI-2026",
+		CurrentPeriodeID:  "JUNI-2026",
 	}
 	err := rollforward.ExportXLSXGuardCheck(report, false)
 	if err != nil {

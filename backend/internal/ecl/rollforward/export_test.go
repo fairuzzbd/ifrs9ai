@@ -41,7 +41,7 @@ func ExportSetDifference(prior, current []ResultLineHeader) []uuid.UUID {
 }
 
 // ExportErrDomain exposes the internal errDomain for testing.
-func ExportErrDomain(code, message string) *domainError {
+func ExportErrDomain(code, message string) error {
 	return errDomain(code, message)
 }
 
@@ -51,7 +51,7 @@ type DomainErrorExported = domainError
 
 // ExportXLSXGuardCheck exposes the MISMATCH guard logic from ExportXLSX for testing
 // without needing a full Service with a DB connection.
-func ExportXLSXGuardCheck(report *RollForwardReport, forceMismatch bool) error {
+func ExportXLSXGuardCheck(report *Report, forceMismatch bool) error {
 	if report.ReconcileStatus == ReconcileStatusMismatch && !forceMismatch {
 		return errDomain(CodeRollForwardExportMismatchForbidden,
 			"Roll-forward tidak reconcile (delta = Rp "+report.ReconcileDeltaIdr.StringFixed(4)+"). Export disclosure formal diblokir.")

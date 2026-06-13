@@ -107,7 +107,7 @@ func TestDetectLifecycle_DerecognitionReason_Unknown_NoStatus(t *testing.T) {
 
 func TestDetectTransfers_POCIInstrument_ZeroECLMovement(t *testing.T) {
 	id := uuid.New()
-	prior := buildLines([]lineSpec{{id: id, stage: 1, ecl: ""}})  // POCI nil
+	prior := buildLines([]lineSpec{{id: id, stage: 1, ecl: ""}})   // POCI nil
 	current := buildLines([]lineSpec{{id: id, stage: 2, ecl: ""}}) // POCI nil
 	stageHistory := map[uuid.UUID]rollforward.StageHistoryRow{
 		id: {InstrumenID: id, TriggerType: "SICR_RATING"},

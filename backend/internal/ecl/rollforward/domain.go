@@ -256,9 +256,9 @@ type DataQualityWarning struct {
 	Message string `json:"message"`
 }
 
-// ─── RollForwardReport ───────────────────────────────────────────────────────
+// ─── Report ──────────────────────────────────────────────────────────────────
 
-// RollForwardReport is the full CKPN roll-forward report with all components.
+// Report is the full CKPN roll-forward report with all components.
 //
 // Formula (SoW §4, formulas.md §Roll-forward):
 //
@@ -267,7 +267,7 @@ type DataQualityWarning struct {
 // Reconcile invariant: |closing − Σcalc_header.ecl_fl_idr| < IDR 1.0000
 //
 // All IDR amounts: NUMERIC(20,4) — decimal.Decimal, serialize via .StringFixed(4).
-type RollForwardReport struct {
+type Report struct {
 	// ReportID is the stable identifier used for export endpoint routing.
 	// Format: "rf-{currentCalcRunID}".
 	ReportID string `json:"reportId"`
@@ -487,15 +487,15 @@ type StageHistoryRow struct {
 type InstrumentBucket string
 
 const (
-	BucketStage1To2     InstrumentBucket = "stage_1_to_2"
-	BucketStage2To1     InstrumentBucket = "stage_2_to_1"
-	BucketStage2To3     InstrumentBucket = "stage_2_to_3"
-	BucketStage1To3     InstrumentBucket = "stage_1_to_3"
-	BucketStage3To2     InstrumentBucket = "stage_3_to_2"
-	BucketStage3To1     InstrumentBucket = "stage_3_to_1"
+	BucketStage1To2      InstrumentBucket = "stage_1_to_2"
+	BucketStage2To1      InstrumentBucket = "stage_2_to_1"
+	BucketStage2To3      InstrumentBucket = "stage_2_to_3"
+	BucketStage1To3      InstrumentBucket = "stage_1_to_3"
+	BucketStage3To2      InstrumentBucket = "stage_3_to_2"
+	BucketStage3To1      InstrumentBucket = "stage_3_to_1"
 	BucketNewOrigination InstrumentBucket = "new_origination"
-	BucketDerecognition InstrumentBucket = "derecognition"
-	BucketStageSame     InstrumentBucket = "stage_same"
+	BucketDerecognition  InstrumentBucket = "derecognition"
+	BucketStageSame      InstrumentBucket = "stage_same"
 )
 
 // ─── InstrumentLine ──────────────────────────────────────────────────────────
@@ -507,8 +507,8 @@ type InstrumentLine struct {
 	InstrumenKode       string
 	InstrumenNama       string
 	PortofolioID        *uuid.UUID
-	StagePrior          *int  // nil = origination (not in prior)
-	StageCurrent        *int  // nil = derecognition (not in current)
+	StagePrior          *int // nil = origination (not in prior)
+	StageCurrent        *int // nil = derecognition (not in current)
 	EclPriorIdr         *decimal.Decimal
 	EclCurrentIdr       *decimal.Decimal
 	EclMovementIdr      decimal.Decimal // signed per sign convention
@@ -521,7 +521,7 @@ type InstrumentLine struct {
 // ─── PortfolioRollForward ────────────────────────────────────────────────────
 
 // PortfolioRollForward is the roll-forward breakdown for one portfolio.
-// Same components as RollForwardReport but scoped to instruments in portofolioID.
+// Same components as Report but scoped to instruments in portofolioID.
 type PortfolioRollForward struct {
 	PortofolioID        uuid.UUID
 	PortofolioNama      string

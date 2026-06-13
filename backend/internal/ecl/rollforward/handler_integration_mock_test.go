@@ -168,7 +168,7 @@ func TestComputeRollForward_ServiceSuccess_Returns200(t *testing.T) {
 	mock.ExpectExec(`INSERT INTO aud.audit_log`).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
-	body := fmt.Sprintf(`{"currentCalcRunId":"%s"}`, currentRunID)
+	body := `{"currentCalcRunId":` + fmt.Sprintf("%q", currentRunID.String()) + `}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/ecl/roll-forward/compute", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()

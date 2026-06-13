@@ -350,9 +350,9 @@ func TestComputeRollForward_NormalPeriod_Transfers_Reconciled(t *testing.T) {
 		{id: derecID, stage: 1, ecl: "100000.0000"},
 	})
 	currentLines := buildLines([]lineSpec{
-		{id: sameID, stage: 1, ecl: "600000.0000"},    // same stage, ECL increased (remeasurement)
+		{id: sameID, stage: 1, ecl: "600000.0000"},     // same stage, ECL increased (remeasurement)
 		{id: upgradeID, stage: 2, ecl: "1000000.0000"}, // Stage 1→2 transfer
-		{id: newID, stage: 1, ecl: "300000.0000"},       // origination
+		{id: newID, stage: 1, ecl: "300000.0000"},      // origination
 		// derecID absent → derecognition
 	})
 
@@ -564,7 +564,7 @@ func TestGetPortfolioRollForward_FirstPeriod(t *testing.T) {
 func TestExportXLSX_Reconciled_ReturnsBytes(t *testing.T) {
 	svc, _ := buildServiceWithMock(t)
 
-	report := &rollforward.RollForwardReport{
+	report := &rollforward.Report{
 		ReportID:         "rf-test-run",
 		ReconcileStatus:  rollforward.ReconcileStatusReconciled,
 		CurrentPeriodeID: "JUNI-2026",
@@ -584,7 +584,7 @@ func TestExportXLSX_Reconciled_ReturnsBytes(t *testing.T) {
 func TestExportXLSX_Mismatch_BlockedWithoutForce(t *testing.T) {
 	svc, _ := buildServiceWithMock(t)
 
-	report := &rollforward.RollForwardReport{
+	report := &rollforward.Report{
 		ReportID:          "rf-mismatch",
 		ReconcileStatus:   rollforward.ReconcileStatusMismatch,
 		ReconcileDeltaIdr: rollforward.ReconcileTolerance.Mul(rollforward.ReconcileTolerance), // > 1.0000
@@ -609,7 +609,7 @@ func TestExportXLSX_Mismatch_BlockedWithoutForce(t *testing.T) {
 func TestExportXLSX_Mismatch_AllowedWithForce(t *testing.T) {
 	svc, _ := buildServiceWithMock(t)
 
-	report := &rollforward.RollForwardReport{
+	report := &rollforward.Report{
 		ReportID:          "rf-mismatch-force",
 		ReconcileStatus:   rollforward.ReconcileStatusMismatch,
 		ReconcileDeltaIdr: rollforward.ReconcileTolerance,
