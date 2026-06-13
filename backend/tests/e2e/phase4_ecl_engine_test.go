@@ -37,6 +37,7 @@
 // DEC-013 follow-up. M2 helpers return CodePOCIDeferredToM7; M7 sets
 // RoutingPath=POCI_DEFERRED with warning. Full credit-adjusted EIR
 // implementation tracked as Phase 5 sprint 1 backlog item.
+// See: https://github.com/fairuzzbd/ifrs9ai/issues/96
 //
 // Run:
 //
