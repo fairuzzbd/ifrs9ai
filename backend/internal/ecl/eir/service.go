@@ -154,8 +154,18 @@ func (s *Service) Compute(ctx context.Context, req ComputeRequest, actorID uuid.
 		seed = inst.Kupon
 	}
 
-	// 7. Run Newton-Raphson
-	eirPerPeriod, detail, solveErr := s.solver.Solve(req.CashflowProjection, seed)
+	// 7. Run Newton-Raphson.
+	// POCI instruments: use SolveCreditAdjusted — cashflows MUST be PD-adjusted at origination.
+	// Standard instruments: use Solve with contractual cashflows.
+	// DEC-POCI-001: CA-EIR computes via identical NR math but carries IsCreditAdjusted=true flag.
+	var eirPerPeriod decimal.Decimal
+	var detail SolveDetail
+	var solveErr error
+	if req.POCIMode {
+		eirPerPeriod, detail, solveErr = s.solver.SolveCreditAdjusted(req.CashflowProjection, seed)
+	} else {
+		eirPerPeriod, detail, solveErr = s.solver.Solve(req.CashflowProjection, seed)
+	}
 
 	// 8. If persistResult: open tx for audit + update
 	if req.PersistResult {
@@ -204,11 +214,13 @@ func (s *Service) Compute(ctx context.Context, req ComputeRequest, actorID uuid.
 			EntityID:    req.InstrumenID,
 			BeforeJSON:  map[string]any{"eir_awal": nil},
 			AfterJSON: map[string]any{
-				"eir_awal":   eirPerPeriod.StringFixed(8),
-				"eir_type":   eirType,
-				"poci_mode":  req.POCIMode,
-				"iterations": detail.IterationsUsed,
-				"residual":   detail.ConvergenceResidual.String(),
+				"eir_awal":           eirPerPeriod.StringFixed(8),
+				"eir_type":           eirType,
+				"poci_mode":          req.POCIMode,
+				"is_credit_adjusted": detail.IsCreditAdjusted,
+				"algorithm":          detail.Algorithm,
+				"iterations":         detail.IterationsUsed,
+				"residual":           detail.ConvergenceResidual.String(),
 			},
 			TenantID: inst.TenantID,
 		}); err != nil {
@@ -234,6 +246,12 @@ func (s *Service) Compute(ctx context.Context, req ComputeRequest, actorID uuid.
 		eirType = EIRTypeCreditAdjusted
 	}
 
+	// Build warnings for POCI mode — signals CA-EIR was applied.
+	var warnings []string
+	if req.POCIMode {
+		warnings = append(warnings, WarnPOCICAEIRComputed)
+	}
+
 	return ComputeResult{
 		InstrumenID:         req.InstrumenID,
 		EIRPerPeriod:        eirPerPeriod,
@@ -242,6 +260,8 @@ func (s *Service) Compute(ctx context.Context, req ComputeRequest, actorID uuid.
 		ConvergenceResidual: detail.ConvergenceResidual,
 		FlagPOCI:            inst.FlagPOCI,
 		EIRType:             eirType,
+		Algorithm:           detail.Algorithm,
+		Warnings:            warnings,
 		Persisted:           req.PersistResult,
 		ComputedAt:          time.Now(),
 	}, nil

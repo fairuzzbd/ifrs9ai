@@ -102,7 +102,7 @@ func (s *Solver) Solve(cashflows []CashflowItem, seed *decimal.Decimal) (decimal
 	}
 
 	var prevResidual decimal.Decimal
-	detail := SolveDetail{}
+	detail := SolveDetail{Algorithm: AlgorithmNewtonRaphson}
 
 	for iter := 0; iter < maxIterations; iter++ {
 		// f(r)  = Σ CF_t / (1+r)^t
@@ -281,6 +281,44 @@ func decimalLn(x decimal.Decimal) decimal.Decimal {
 		}
 	}
 	return result.Mul(decimal.NewFromInt(2))
+}
+
+// SolveCreditAdjusted finds the credit-adjusted EIR (CA-EIR) per PSAK 71 §5.5.13.
+//
+// Semantic contract (POCI — Purchased or Originated Credit Impaired):
+//
+//	The cashflows supplied MUST already be PD-adjusted at origination, i.e.,
+//	they represent expected cashflows (probability-weighted), not contractual cashflows.
+//	This is the defining difference from Solve: the Newton-Raphson math is identical,
+//	but the interpretation of the resulting rate is "credit-adjusted EIR" (CA-EIR).
+//
+//	Per PSAK 71 §5.5.13 / IFRS 9 B5.4.7: for POCI assets, the entity uses the
+//	credit-adjusted EIR calculated at initial recognition. ECL allowance is then
+//	measured as the change in lifetime expected losses since origination (not the
+//	full lifetime ECL). Phase 4.5 persists initial baseline; delta computation
+//	is deferred to Phase 5 per DEC-POCI-001.
+//
+// Cashflow requirement: CF[0] must be negative (initial outflow). CF[1..N] are
+// PD-weighted expected inflows (PD × contractual_CF, not raw contractual).
+// Callers MUST NOT pass contractual cashflows — the solver cannot verify PD-adjustment.
+//
+// The method reuses Newton-Raphson identical to Solve — only the semantic label
+// and metadata flag differ:
+//   - detail.IsCreditAdjusted = true
+//   - detail.Algorithm = "NEWTON_RAPHSON_CREDIT_ADJUSTED"
+//
+// Returns (CA-EIR per period rounded HALF_EVEN 8dp, SolveDetail, error).
+// All convergence/divergence error types from Solve apply identically.
+//
+// DEC-013: tolerance 1e-10, max 100 iter, precision 8 dp.
+// DEC-016: shopspring/decimal throughout — never float64.
+// DEC-POCI-001: Phase 4.5 CA-EIR computation. Phase 5 adds delta + jurnal booking.
+func (s *Solver) SolveCreditAdjusted(cashflows []CashflowItem, seed *decimal.Decimal) (decimal.Decimal, SolveDetail, error) {
+	eir, detail, err := s.Solve(cashflows, seed)
+	// Tag the detail with CA-EIR semantics regardless of convergence (audit trail).
+	detail.IsCreditAdjusted = true
+	detail.Algorithm = AlgorithmNewtonRaphsonCreditAdjusted
+	return eir, detail, err
 }
 
 // decimalExp computes e^x using the Taylor series:
