@@ -181,6 +181,21 @@ const (
 	CodeCalcRunFXRateNotFound           Code = "CALC_RUN_FX_RATE_NOT_FOUND"          // 422 — BI JISDOR rate missing for eval date
 	CodeCalcRunForbiddenNotMaker        Code = "CALC_RUN_FORBIDDEN_NOT_MAKER"        // 403 — cancel attempted by non-maker
 	CodeCalcRunSealed                   Code = "CALC_RUN_SEALED"                     // 423 — run is SEALED, immutable
+
+	// P4-M11 Roll-Forward CKPN codes (APP-C-M11-001..006).
+	// State machine: docs/state-machines/p4-m11-roll-forward.md §8.
+	CodeRollForwardPriorNotFound           Code = "ROLL_FORWARD_PRIOR_NOT_FOUND"           // 404 — priorCalcRunId not found
+	CodeRollForwardPriorNotSealed          Code = "ROLL_FORWARD_PRIOR_NOT_SEALED"          // 422 — prior not SEALED
+	CodeRollForwardCurrentInvalidState     Code = "ROLL_FORWARD_CURRENT_INVALID_STATE"     // 422 — current not COMPLETED/SEALED
+	CodeRollForwardPeriodeMismatch         Code = "ROLL_FORWARD_PERIODE_MISMATCH"          // 422 — current periode not after prior
+	CodeRollForwardDetectionMethodInvalid  Code = "ROLL_FORWARD_DETECTION_METHOD_INVALID"  // 422 — unknown detectionMethod
+	CodeRollForwardExportMismatchForbidden Code = "ROLL_FORWARD_EXPORT_MISMATCH_FORBIDDEN" // 422 — export blocked on MISMATCH
+	CodeRollForwardPortfolioNotFound       Code = "ROLL_FORWARD_PORTFOLIO_NOT_FOUND"       // 404 — portofolioId not found
+	CodeRollForwardTrendInsufficientData   Code = "ROLL_FORWARD_TREND_INSUFFICIENT_DATA"   // 422 — < 2 SEALED runs
+	CodeRollForwardScopeMismatch           Code = "ROLL_FORWARD_SCOPE_MISMATCH"            // 422 — run scope incompatible
+	CodeRollForwardInvalidCalcRunStatus    Code = "ROLL_FORWARD_INVALID_CALC_RUN_STATUS"   // 422 — alias CURRENT_INVALID_STATE
+	CodeRollForwardInvalidPriorPeriod      Code = "ROLL_FORWARD_INVALID_PRIOR_PERIOD"      // 422 — alias PERIODE_MISMATCH
+	CodeRollForwardMismatch                Code = "ROLL_FORWARD_MISMATCH"                  // 422 — reconcile delta ≥ IDR 1.0000
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
@@ -302,6 +317,15 @@ func (c Code) HTTPStatus() int {
 	case CodeCalcRunSealSoDViolation, CodeCalcRunSealStepUpRequired,
 		CodeCalcRunForbiddenNotMaker:
 		return http.StatusForbidden
+	// P4-M11 Roll-Forward CKPN codes.
+	case CodeRollForwardPriorNotFound, CodeRollForwardPortfolioNotFound:
+		return http.StatusNotFound
+	case CodeRollForwardPriorNotSealed, CodeRollForwardCurrentInvalidState,
+		CodeRollForwardPeriodeMismatch, CodeRollForwardDetectionMethodInvalid,
+		CodeRollForwardExportMismatchForbidden, CodeRollForwardTrendInsufficientData,
+		CodeRollForwardScopeMismatch, CodeRollForwardInvalidCalcRunStatus,
+		CodeRollForwardInvalidPriorPeriod, CodeRollForwardMismatch:
+		return http.StatusUnprocessableEntity
 	case CodePeriodeClosed, CodeECLParamFrozen:
 		return 423 // Locked
 	case CodeRateLimited:
