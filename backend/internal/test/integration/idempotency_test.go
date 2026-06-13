@@ -198,3 +198,99 @@ func TestIdempotency_GetSkipped(t *testing.T) {
 		t.Errorf("GET should not require Idempotency-Key, got %d", w.Code)
 	}
 }
+
+// TestIdempotency_CalcRunCreate_HandlerLevel verifies handler-level idempotency
+// semantics for the POST /api/v1/ecl/calc-runs endpoint (F5, DEC-021).
+//
+// Sequence:
+//  1. POST with Idempotency-Key=X + body A → 201 Created (first call through).
+//  2. POST with Idempotency-Key=X + body A → 200 (IDEMPOTENCY_REPLAY, no new row).
+//  3. POST with Idempotency-Key=X + body B (different payload) → 422 IDEMPOTENCY_MISMATCH.
+//
+// Uses the generic Idempotency middleware wired to the real DB, mirroring the
+// production route wiring in calcrun/routes.go RegisterRoutes.
+// The handler is a stub that mimics the 201 response shape of CreateCalcRun —
+// full handler wiring would require testcontainers; this test validates the
+// middleware contract (DEC-021) at the HTTP boundary.
+func TestIdempotency_CalcRunCreate_HandlerLevel(t *testing.T) {
+	SkipIfShort(t)
+	infra := Setup(t)
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(middleware.RequestID())
+	router.Use(middleware.Idempotency(infra.DB))
+
+	handlerCallCount := 0
+	// Stub handler that mimics calcrun.Handler.CreateCalcRun 201 response shape.
+	router.POST("/api/v1/ecl/calc-runs", func(c *gin.Context) {
+		handlerCallCount++
+		c.JSON(http.StatusCreated, map[string]any{
+			"data": map[string]any{
+				"id":       "00000000-0000-0000-0000-000000000099",
+				"status":   "DRAFT",
+				"periodeId": "PBUKU-2026-06",
+			},
+			"meta": map[string]any{"traceId": "trace-calcrun-001"},
+		})
+	})
+
+	key := uuid.New().String()
+	bodyA := `{"periodeId":"PBUKU-2026-06","evaluationDate":"2026-06-30","scope":"ALL_ACTIVE","comment":"ECL run Juni 2026"}`
+	bodyB := `{"periodeId":"PBUKU-2026-07","evaluationDate":"2026-07-31","scope":"ALL_ACTIVE","comment":"ECL run Juli 2026"}` // different
+
+	// ── Call 1: fresh key + body A → 201 Created ─────────────────────────────
+	w1 := httptest.NewRecorder()
+	req1, _ := http.NewRequest(http.MethodPost, "/api/v1/ecl/calc-runs", strings.NewReader(bodyA))
+	req1.Header.Set("Content-Type", "application/json")
+	req1.Header.Set("Idempotency-Key", key)
+	router.ServeHTTP(w1, req1)
+
+	if w1.Code != http.StatusCreated {
+		t.Fatalf("CalcRunCreate F5: call 1 expected 201, got %d body=%s", w1.Code, w1.Body.String())
+	}
+	if handlerCallCount != 1 {
+		t.Errorf("CalcRunCreate F5: expected handler called once, got %d", handlerCallCount)
+	}
+
+	// ── Call 2: same key + same body A → IDEMPOTENCY_REPLAY ─────────────────
+	w2 := httptest.NewRecorder()
+	req2, _ := http.NewRequest(http.MethodPost, "/api/v1/ecl/calc-runs", strings.NewReader(bodyA))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Idempotency-Key", key)
+	router.ServeHTTP(w2, req2)
+
+	// Middleware must return the original 201 response without calling handler again.
+	if w2.Code != http.StatusCreated {
+		t.Errorf("CalcRunCreate F5: replay expected 201 (original status), got %d body=%s",
+			w2.Code, w2.Body.String())
+	}
+	if handlerCallCount != 1 {
+		t.Errorf("CalcRunCreate F5: handler must NOT be called on replay, call count=%d", handlerCallCount)
+	}
+	// Responses must be byte-identical (DEC-021 contract).
+	if w1.Body.String() != w2.Body.String() {
+		t.Errorf("CalcRunCreate F5: replay body differs from original:\n  original=%s\n  replay=%s",
+			w1.Body.String(), w2.Body.String())
+	}
+
+	// ── Call 3: same key + body B (different) → 422 IDEMPOTENCY_MISMATCH ───
+	w3 := httptest.NewRecorder()
+	req3, _ := http.NewRequest(http.MethodPost, "/api/v1/ecl/calc-runs", strings.NewReader(bodyB))
+	req3.Header.Set("Content-Type", "application/json")
+	req3.Header.Set("Idempotency-Key", key)
+	router.ServeHTTP(w3, req3)
+
+	if w3.Code != http.StatusUnprocessableEntity {
+		t.Errorf("CalcRunCreate F5: mismatch expected 422, got %d body=%s", w3.Code, w3.Body.String())
+	}
+	var mismatchResp map[string]any
+	if err := json.Unmarshal(w3.Body.Bytes(), &mismatchResp); err != nil {
+		t.Fatalf("CalcRunCreate F5: parse mismatch response: %v", err)
+	}
+	errObj, _ := mismatchResp["error"].(map[string]any)
+	if code, _ := errObj["code"].(string); code != "IDEMPOTENCY_MISMATCH" {
+		t.Errorf("CalcRunCreate F5: expected IDEMPOTENCY_MISMATCH code, got %q", code)
+	}
+	t.Logf("CalcRunCreate F5: handler calls=%d (want 1), mismatch code=%s", handlerCallCount, errObj["code"])
+}
