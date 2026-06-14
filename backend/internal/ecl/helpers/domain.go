@@ -211,9 +211,13 @@ type PDLookupService interface {
 	//          apply same FL multipliers.
 	// Stage 3: PD = 1.00000000 (fixed, no FL applied per DEC-010).
 	// FVTPL / FVOCI_ELECTION: returns INSTRUMENT_ECL_NOT_APPLICABLE.
+	// POCI: returns POCI_DEFERRED_TO_M7 by default. Pass AllowPOCI=true (variadic) to
+	//        bypass the deferral guard and proceed with normal PD lookup using PD curve.
+	//        Used by M7 handlePOCI (Phase 4.5). All other callers omit the flag (default false).
+	//        F1 fix, DEC-POCI-001.
 	// No float64. All decimal.Decimal.
 	GetPD(ctx context.Context, instrumenID uuid.UUID, stage EclStage, scenario EclScenario,
-		periodeID string, evaluationDate time.Time) (decimal.Decimal, PDDetail, error)
+		periodeID string, evaluationDate time.Time, allowPOCI ...bool) (decimal.Decimal, PDDetail, error)
 }
 
 // ─── LGD types ────────────────────────────────────────────────────────────────
@@ -547,4 +551,9 @@ type BatchParams struct {
 
 	// CurrentStages maps instrumenID → EclStage (from ecl.stage_history).
 	CurrentStages map[uuid.UUID]EclStage
+
+	// AllowPOCI controls whether POCI instruments bypass the deferral guard in
+	// GetPDFromBatchParams. Default false (preserves backward compat).
+	// Set to true by M7 handlePOCI (Phase 4.5). F1 fix, DEC-POCI-001.
+	AllowPOCI bool
 }

@@ -56,8 +56,18 @@ func NewPDLookupService(pdRepo PDRepository, instrRepo InstrumenSnapshotRepo) PD
 
 // GetPD returns PD for one instrument per stage/scenario per period.
 // See domain.go PDLookupService for full contract.
+//
+// allowPOCI (variadic, optional): when true, bypasses the POCI deferral guard and
+// proceeds with normal PD curve lookup. Used exclusively by M7 handlePOCI (Phase 4.5).
+// All other callers omit this flag (default false). F1 fix, DEC-POCI-001.
 func (s *pdService) GetPD(ctx context.Context, instrumenID uuid.UUID, stage EclStage,
-	scenario EclScenario, periodeID string, evaluationDate time.Time) (decimal.Decimal, PDDetail, error) {
+	scenario EclScenario, periodeID string, evaluationDate time.Time, allowPOCI ...bool) (decimal.Decimal, PDDetail, error) {
+
+	// Extract optional AllowPOCI flag — false by default (backward compat).
+	var allowPOCIFlag bool
+	if len(allowPOCI) > 0 {
+		allowPOCIFlag = allowPOCI[0]
+	}
 
 	var detail PDDetail
 	detail.Stage = stage
@@ -83,7 +93,11 @@ func (s *pdService) GetPD(ctx context.Context, instrumenID uuid.UUID, stage EclS
 	}
 
 	// 2b. Guard POCI — requires credit-adjusted EIR from P4-M7 (F3, FSD-APP-C §3.5).
-	if isPOCI(inst.KlasifikasiPsak71) {
+	// Exception: when the caller is M7 handlePOCI (Phase 4.5), AllowPOCI=true is passed
+	// so the normal PD curve lookup proceeds. Default (AllowPOCI=false) preserves the
+	// deferral guard for all other callers. See GetPDOptions.AllowPOCI.
+	// Ref: F1 fix, DEC-POCI-001.
+	if isPOCI(inst.KlasifikasiPsak71) && !allowPOCIFlag {
 		return decimal.Zero, detail, domainerrors.New(domainerrors.CodePOCIDeferredToM7,
 			fmt.Sprintf("Instrumen %s adalah POCI — memerlukan credit-adjusted EIR dari P4-M7. "+
 				"Deferred ke modul P4-M7.", instrumenID))
@@ -320,7 +334,11 @@ func GetPDFromBatchParams(
 	// Must precede Stage 3 check so POCI takes precedence in all stages, mirroring
 	// GetPD ordering. POCI instruments at Stage 3 still require credit-adjusted EIR,
 	// not the standard PD=1.0 path. See FSD-APP-C §3.5 + IFRS9 §5.5.13.
-	if isPOCI(inst.KlasifikasiPsak71) {
+	//
+	// Exception (F1 fix, DEC-POCI-001): when params.AllowPOCI=true (set by M7 handlePOCI
+	// in Phase 4.5), bypass the guard and proceed with normal PD curve lookup.
+	// Default params.AllowPOCI=false preserves backward compat for all other callers.
+	if isPOCI(inst.KlasifikasiPsak71) && !params.AllowPOCI {
 		return decimal.Zero, detail, domainerrors.New(domainerrors.CodePOCIDeferredToM7,
 			fmt.Sprintf("Instrumen %s adalah POCI — memerlukan credit-adjusted EIR dari P4-M7. "+
 				"Deferred ke modul P4-M7.", instrID))
