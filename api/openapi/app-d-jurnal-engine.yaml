@@ -1,0 +1,2471 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-D Jurnal Event Resolver & Posting Engine
+  version: "1.0.0"
+  description: |
+    Modul APP-D — Jurnal Engine (Phase 5, Module 2).
+
+    Cakupan:
+      - Mapping Jurnal Header CRUD (4-eyes operational / 6-eyes regulated)
+      - Jurnal Resolver (preview debit/kredit lines tanpa posting)
+      - Jurnal Posting otomatis via Asynq subscribers
+      - Jurnal Posting Manual (PERIODE_ADJUSTMENT + CORRECTION_PERIODE_CLOSED)
+      - Read Jurnal — list + drill-down + export
+      - DLQ Inspection + Replay
+
+    Workflow Mapping:
+      - 4-eyes (operational):  ROLE-AKUN → ROLE-AKUN-CTL (review) → ROLE-AKUN-CTL (approve)
+      - 6-eyes (regulated):    ROLE-AKUN → ROLE-AKUN-CTL (review) → ROLE-AKUN-CTL (approve) → ROLE-RISK (approve-2)
+      - Regulated codes (14):  ECL_PEMBENTUKAN, ECL_REVERSAL, EIR_CATCH_UP_ADJUSTMENT, STAGE_MIGRATION,
+                               POCI_DELTA_ECL, MTM_FVTPL, MTM_FVOCI, MTM_FVOCI_ELECTION,
+                               REKLAS_OCI_PL, MODIFIKASI_MATERIAL, REKLASIFIKASI_AC_FVOCI,
+                               REKLASIFIKASI_FVOCI_AC, FX_UNREALIZED (13 by DEC-P5-M1-003 list)
+      - Operational codes (14): PENEMPATAN, AKRUAL_BUNGA, PEMBAYARAN_BUNGA, PEMBAYARAN_POKOK,
+                                PENERIMAAN_DIVIDEN, DISTRIBUSI_REKSADANA, JATUH_TEMPO,
+                                RENEWAL_DEPOSITO, FX_REALIZED, AMORTISASI_PREMI_DISKONTO,
+                                PENJUALAN_PENCAIRAN, PENGHAPUSAN, PERIODE_ADJUSTMENT,
+                                CORRECTION_PERIODE_CLOSED
+
+    Keputusan:
+      - DEC-P5-M1-002 — 27 master event codes
+      - DEC-P5-M1-003 — 6-eyes regulated vs 4-eyes operational classification
+      - DEC-017 — 4-eyes/6-eyes SoD; maker ≠ reviewer ≠ approver ≠ approver_2
+      - DEC-018 — audit trail append-only, 10+10 tahun retensi
+      - DEC-021 — Idempotency-Key wajib di setiap mutating endpoint
+      - DEC-022 — cursor-only pagination
+      - DEC-027 — MFA step-up wajib pada approve regulated + approve-2
+
+    Invariant:
+      - jrnl.header + jrnl.detail APPEND-ONLY (DDL trigger menolak UPDATE/DELETE)
+      - CHECK CONSTRAINT: jrnl.header.total_debit = jrnl.header.total_kredit
+      - JURNAL.POST ditulis ke aud.audit_log di transaksi yang sama dengan INSERT jrnl.header
+      - JURNAL_PERIODE_HARD_CLOSED: server-side check, tidak bisa di-bypass
+
+    Performance SLA:
+      - POST /jurnal/resolve:          ≤ 100 ms
+      - POST /jurnal/post (sync):      ≤ 300 ms
+      - POST /jurnal/dlq/{id}/replay:  ≤ 500 ms
+      - Asynq subscriber per event:    ≤ 5 s
+      - GET list endpoints:            ≤ 500 ms
+
+    Depends on:
+      - Phase 3: mst.mapping_jurnal_header, mst.mapping_jurnal_detail, mst.chart_of_accounts,
+                 mst.periode_buku, mst.instrumen
+      - Phase 5 M1: trx.penempatan_deposito, Asynq events penempatan:approved/matured/terminated
+      - Migration 000035: sys.dlq_jurnal_post, seed 27 event codes, 6-eyes columns on mapping header
+
+servers:
+  - url: /api/v1
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: mapping-jurnal
+    description: "Mapping Jurnal Header CRUD — 4-eyes (operational) / 6-eyes (regulated)"
+  - name: mapping-jurnal-workflow
+    description: "Workflow transitions untuk mapping jurnal header"
+  - name: jurnal-resolver
+    description: "Resolver preview — input event payload, output debit/kredit lines (no posting)"
+  - name: jurnal-posting
+    description: "Manual jurnal posting (PERIODE_ADJUSTMENT + CORRECTION_PERIODE_CLOSED)"
+  - name: jurnal-posting-workflow
+    description: "Workflow transitions untuk manual jurnal posting"
+  - name: jurnal-query
+    description: "Read jurnal header + detail + export"
+  - name: jurnal-dlq
+    description: "DLQ inspection + replay + discard"
+
+paths:
+
+  # ===========================================================================
+  # MAPPING JURNAL HEADER — CRUD
+  # ===========================================================================
+
+  /jurnal/mapping-headers:
+    post:
+      operationId: createMappingJurnalHeader
+      summary: Buat mapping jurnal header baru (DRAFT)
+      description: |
+        ROLE-AKUN membuat template mapping jurnal baru.
+        Server menentukan workflow path (4-eyes vs 6-eyes) berdasarkan event_code
+        terhadap regulated codes whitelist (DEC-P5-M1-003).
+        event_code harus UNIQUE di mst.mapping_jurnal_header.
+        Detail rows wajib minimal 1 DEBIT + 1 KREDIT.
+
+        Permission: jurnal_mapping.create
+        Audit event: JURNAL_MAPPING.CREATE (in-tx)
+      tags: [mapping-jurnal]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MappingHeaderCreateRequest"
+            example:
+              eventCode: "PENEMPATAN"
+              namaEvent: "Penempatan Instrumen Keuangan"
+              kategoriEvent: "PENEMPATAN"
+              triggerSource: "SYSTEM_JOB"
+              klasifikasiBerlaku: ["AC", "FVOCI", "FVTPL", "FVOCI_ELECTION", "POCI"]
+              deskripsi: "Template posting jurnal saat penempatan instrumen baru di-approve"
+              detailRows:
+                - urutan: 1
+                  kodeAkunId: "550e8400-e29b-41d4-a716-446655440010"
+                  dkIndicator: "DEBIT"
+                  sumberAmount: "nominal_idr"
+                  multiplier: 1.0000
+                - urutan: 2
+                  kodeAkunId: "550e8400-e29b-41d4-a716-446655440011"
+                  dkIndicator: "KREDIT"
+                  sumberAmount: "nominal_idr"
+                  multiplier: 1.0000
+      responses:
+        "201":
+          description: Mapping header berhasil dibuat (DRAFT)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/MappingHeaderDetail"
+                  meta:
+                    $ref: "./  _common.yaml#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "./_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "409":
+          description: event_code sudah ada (UNIQUE violation)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: CONFLICT
+                  message: "event_code 'PENEMPATAN' sudah terdaftar di mst.mapping_jurnal_header."
+                  details: []
+                  traceId: "01HXY..."
+        "422":
+          description: "Validation gagal — mis. detail_rows tidak punya DEBIT + KREDIT"
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: JURNAL_BALANCE_INVARIANT
+                  message: "Template harus memiliki minimal 1 baris DEBIT dan 1 baris KREDIT untuk menjamin balance jurnal."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+    get:
+      operationId: listMappingJurnalHeaders
+      summary: List mapping jurnal header (DataTable)
+      description: |
+        Cursor-paginated list dengan sort + filter + export.
+        Default filter: deleted_at IS NULL, aktif_flag semua.
+
+        Permission: jurnal_mapping.read
+        Sort allowed: event_code, kategori_event, workflow_status, aktif_flag, created_at
+        Filter: event_code (like), kategori_event (eq/in), workflow_status (in), aktif_flag (bool)
+      tags: [mapping-jurnal]
+      parameters:
+        - $ref: "./_common.yaml#/components/parameters/cursor"
+        - $ref: "./_common.yaml#/components/parameters/limit"
+        - $ref: "./_common.yaml#/components/parameters/sortParam"
+        - $ref: "./_common.yaml#/components/parameters/searchParam"
+        - name: "filter[event_code]"
+          in: query
+          schema:
+            type: string
+        - name: "filter[kategori_event]"
+          in: query
+          schema:
+            type: string
+        - name: "filter[workflow_status]"
+          in: query
+          schema:
+            type: string
+        - name: "filter[aktif_flag]"
+          in: query
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "./_common.yaml#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/MappingHeaderSummary"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/mapping-headers/{id}:
+    get:
+      operationId: getMappingJurnalHeaderDetail
+      summary: Detail mapping jurnal header + detail rows
+      description: |
+        Menampilkan header dan semua detail rows.
+
+        Permission: jurnal_mapping.read
+      tags: [mapping-jurnal]
+      parameters:
+        - $ref: "#/components/parameters/MappingHeaderIdPath"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/MappingHeaderDetail"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          description: Mapping header tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: JURNAL_HEADER_NOT_FOUND
+                  message: "Mapping jurnal header tidak ditemukan."
+                  details: []
+                  traceId: "01HXY..."
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+    patch:
+      operationId: editMappingJurnalHeader
+      summary: Edit mapping jurnal header (hanya status DRAFT)
+      description: |
+        Hanya header dengan workflow_status = DRAFT yang bisa di-edit.
+        Header APPROVED tidak bisa di-PATCH langsung — submit versi baru
+        (buat record baru, row lama di-soft-delete + aktif_flag = false).
+
+        Server menolak PATCH jika workflow_status ≠ DRAFT dengan error MASTER_APPROVED_NO_EDIT.
+
+        Permission: jurnal_mapping.create (maker saja)
+        Audit event: JURNAL_MAPPING.UPDATE (in-tx)
+      tags: [mapping-jurnal]
+      parameters:
+        - $ref: "#/components/parameters/MappingHeaderIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MappingHeaderEditRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/MappingHeaderDetail"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "./_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          description: "Permission denied atau header sudah bukan DRAFT"
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: MASTER_APPROVED_NO_EDIT
+                  message: "Mapping jurnal header sudah APPROVED. Tidak bisa diedit langsung. Buat versi baru."
+                  details: []
+                  traceId: "01HXY..."
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "./_common.yaml#/components/responses/Conflict"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # MAPPING JURNAL — WORKFLOW TRANSITIONS
+  # ---------------------------------------------------------------------------
+
+  /jurnal/mapping-headers/{id}/submit:
+    post:
+      operationId: submitMappingJurnalHeader
+      summary: Submit mapping ke review (DRAFT → PENDING_REVIEW)
+      description: |
+        Maker (ROLE-AKUN) submit mapping untuk di-review oleh ROLE-AKUN-CTL.
+        Hanya maker_id yang bisa submit (SoD: reviewer tidak boleh sama dengan maker).
+
+        Guards:
+          - workflow_status = DRAFT
+          - current_user = maker_id
+          - ≥ 1 detail row DEBIT + ≥ 1 detail row KREDIT
+
+        Permission: jurnal_mapping.create (maker)
+        Audit event: JURNAL_MAPPING.SUBMIT (in-tx)
+      tags: [mapping-jurnal-workflow]
+      parameters:
+        - $ref: "#/components/parameters/MappingHeaderIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowTransitionRequest"
+      responses:
+        "200":
+          description: "Status berubah ke PENDING_REVIEW"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowTransitionResponse"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          description: "Transition tidak valid atau guards tidak terpenuhi"
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: JURNAL_INVALID_TRANSITION
+                  message: "Tidak bisa submit dari status PENDING_REVIEW."
+                  details: []
+                  traceId: "01HXY..."
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/mapping-headers/{id}/review:
+    post:
+      operationId: reviewMappingJurnalHeader
+      summary: Review mapping (PENDING_REVIEW → PENDING_APPROVAL atau PENDING_APPROVAL_2 jika regulated)
+      description: |
+        ROLE-AKUN-CTL mereview template mapping jurnal.
+        Jika event_code regulated (DEC-P5-M1-003): next state = PENDING_APPROVAL_2.
+        Jika operational: next state = PENDING_APPROVAL (4-eyes selesai di approve).
+
+        Guards:
+          - workflow_status = PENDING_REVIEW
+          - current_user ≠ maker_id (SoD)
+
+        Permission: jurnal_mapping.review
+        Audit event: JURNAL_MAPPING.REVIEW (in-tx)
+      tags: [mapping-jurnal-workflow]
+      parameters:
+        - $ref: "#/components/parameters/MappingHeaderIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowSigningRequest"
+      responses:
+        "200":
+          description: "Status berubah ke PENDING_APPROVAL (operational) atau PENDING_APPROVAL_2 (regulated)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowTransitionResponse"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/SodViolation"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          $ref: "./_common.yaml#/components/responses/WorkflowInvalidTransition"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/mapping-headers/{id}/approve:
+    post:
+      operationId: approveMappingJurnalHeader
+      summary: "Approve mapping (PENDING_APPROVAL → APPROVED_ACTIVE) — 4-eyes final atau regulated approver-1"
+      description: |
+        ROLE-AKUN-CTL approve template mapping.
+
+        Path 4-eyes (operational): PENDING_APPROVAL → APPROVED_ACTIVE + aktif_flag = true.
+        Path 6-eyes (regulated): PENDING_APPROVAL → PENDING_APPROVAL_2 (menunggu ROLE-RISK).
+        Server menentukan path berdasarkan event_code terhadap regulated whitelist.
+
+        MFA step-up diperlukan jika event_code regulated (DEC-027).
+
+        Guards:
+          - workflow_status = PENDING_APPROVAL
+          - current_user ≠ maker_id (SoD)
+          - current_user ≠ reviewer_id (SoD)
+          - X-Step-Up-Token valid ≤ 5 menit (jika regulated)
+
+        Permission: jurnal_mapping.approve
+        Audit event: JURNAL_MAPPING.APPROVE (in-tx)
+        Notif ke ROLE-RISK (jika regulated, setelah approve-1)
+      tags: [mapping-jurnal-workflow]
+      parameters:
+        - $ref: "#/components/parameters/MappingHeaderIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+        - $ref: "#/components/parameters/XStepUpTokenHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowSigningRequest"
+      responses:
+        "200":
+          description: "APPROVED_ACTIVE (4-eyes) atau PENDING_APPROVAL_2 (6-eyes regulated)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowTransitionResponse"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          description: "SoD violation atau step-up MFA diperlukan"
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                sod:
+                  value:
+                    error:
+                      code: SOD_VIOLATION
+                      message: "Anda tidak bisa menjadi approver untuk mapping yang Anda buat sendiri (DEC-017)."
+                      details: []
+                      traceId: "01HXY..."
+                stepUp:
+                  value:
+                    error:
+                      code: JURNAL_STEP_UP_REQUIRED
+                      message: "Event code regulated memerlukan step-up MFA (DEC-027). Panggil POST /auth/step-up terlebih dahulu."
+                      details: []
+                      traceId: "01HXY..."
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          $ref: "./_common.yaml#/components/responses/WorkflowInvalidTransition"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/mapping-headers/{id}/approve-2:
+    post:
+      operationId: approve2MappingJurnalHeader
+      summary: "Second approve mapping regulated (PENDING_APPROVAL_2 → APPROVED_ACTIVE) — 6-eyes ROLE-RISK"
+      description: |
+        ROLE-RISK memberikan second approval untuk regulated mapping.
+        Hanya berlaku untuk event_code regulated (DEC-P5-M1-003).
+        MFA step-up WAJIB (DEC-027) — X-Step-Up-Token required.
+
+        Guards:
+          - workflow_status = PENDING_APPROVAL_2
+          - event_code dalam regulated whitelist
+          - current_user memiliki permission jurnal_mapping.approve_2 (ROLE-RISK)
+          - current_user ≠ maker_id, reviewer_id, approver_id (SoD 6-eyes)
+          - X-Step-Up-Token valid ≤ 5 menit
+
+        Side effects:
+          - SET approver_2_id, approver_2_signed_at, approver_2_signature_hash
+          - SET aktif_flag = true
+          - workflow_status = APPROVED_ACTIVE
+
+        Permission: jurnal_mapping.approve_2 (ROLE-RISK only)
+        Audit event: JURNAL_MAPPING.APPROVE_2 (in-tx)
+      tags: [mapping-jurnal-workflow]
+      parameters:
+        - $ref: "#/components/parameters/MappingHeaderIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+        - $ref: "#/components/parameters/XStepUpTokenHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowSigningRequest"
+      responses:
+        "200":
+          description: "APPROVED_ACTIVE — mapping aktif untuk resolver"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowTransitionResponse"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          description: "SoD violation atau step-up MFA missing/expired"
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: JURNAL_STEP_UP_REQUIRED
+                  message: "approve-2 wajib step-up MFA (DEC-027). X-Step-Up-Token missing atau expired."
+                  details: []
+                  traceId: "01HXY..."
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          description: "Transition tidak valid atau event_code bukan regulated"
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: JURNAL_INVALID_TRANSITION
+                  message: "Event code PENEMPATAN adalah operational — tidak ada approve-2 path. Gunakan /approve."
+                  details: []
+                  traceId: "01HXY..."
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/mapping-headers/{id}/reject:
+    post:
+      operationId: rejectMappingJurnalHeader
+      summary: Reject mapping — kembali ke DRAFT, reason wajib ≥ 30 karakter
+      description: |
+        Reviewer atau approver (siapapun yang berada di step aktif) bisa reject.
+        Mapping kembali ke DRAFT dengan reject_reason tercatat.
+        Signature fields yang sudah terisi di-reset ke NULL.
+
+        Guards:
+          - workflow_status IN (PENDING_REVIEW, PENDING_APPROVAL, PENDING_APPROVAL_2)
+          - reject_reason.length ≥ 30
+
+        Permission: jurnal_mapping.review (untuk reviewer) / jurnal_mapping.approve (untuk approver)
+        Audit event: JURNAL_MAPPING.REJECT (in-tx)
+        Notif: maker
+      tags: [mapping-jurnal-workflow]
+      parameters:
+        - $ref: "#/components/parameters/MappingHeaderIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rejectReason, signatureMethod]
+              properties:
+                rejectReason:
+                  type: string
+                  minLength: 30
+                  description: "Alasan penolakan, minimum 30 karakter"
+                signatureMethod:
+                  type: string
+                  enum: [JWT_STEP_UP, JWT_STANDARD]
+      responses:
+        "200":
+          description: "Mapping kembali ke DRAFT"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowTransitionResponse"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          description: "Reason terlalu pendek atau transisi tidak valid"
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: JURNAL_DLQ_DISCARD_REASON_TOO_SHORT
+                  message: "rejectReason minimal 30 karakter."
+                  details:
+                    - field: rejectReason
+                      rule: minLength
+                      message: "Minimal 30 karakter"
+                  traceId: "01HXY..."
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/mapping-headers/{id}/withdraw:
+    post:
+      operationId: withdrawMappingJurnalHeader
+      summary: Withdraw mapping (hanya DRAFT, maker only)
+      description: |
+        Maker menarik kembali mapping yang masih DRAFT.
+        Soft-delete: deleted_at, deleted_by terisi. Record tidak dihapus.
+
+        Guards:
+          - workflow_status = DRAFT
+          - current_user = maker_id
+
+        Permission: jurnal_mapping.create (maker)
+        Audit event: JURNAL_MAPPING.WITHDRAW (in-tx)
+      tags: [mapping-jurnal-workflow]
+      parameters:
+        - $ref: "#/components/parameters/MappingHeaderIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 500
+      responses:
+        "200":
+          description: "Mapping di-soft-delete"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      workflowStatus:
+                        type: string
+                        example: "WITHDRAWN"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          $ref: "./_common.yaml#/components/responses/WorkflowInvalidTransition"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/mapping-headers/{id}/deactivate:
+    patch:
+      operationId: deactivateMappingJurnalHeader
+      summary: Non-aktifkan mapping yang sudah APPROVED (aktif_flag = false)
+      description: |
+        ROLE-AKUN-CTL men-deactivate mapping yang tidak lagi relevan.
+        workflow_status tidak berubah (tetap APPROVED_ACTIVE).
+        Resolver engine tidak akan menggunakan mapping ini setelah deactivate.
+
+        Guards:
+          - workflow_status = APPROVED_ACTIVE
+          - aktif_flag saat ini = true
+
+        Permission: jurnal_mapping.approve (ROLE-AKUN-CTL)
+        Audit event: JURNAL_MAPPING.DEACTIVATE (in-tx)
+      tags: [mapping-jurnal]
+      parameters:
+        - $ref: "#/components/parameters/MappingHeaderIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 500
+      responses:
+        "200":
+          description: "aktif_flag di-set false"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      aktifFlag:
+                        type: boolean
+                        example: false
+                      workflowStatus:
+                        type: string
+                        example: "APPROVED_ACTIVE"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          $ref: "./_common.yaml#/components/responses/WorkflowInvalidTransition"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/mapping-headers/export:
+    get:
+      operationId: exportMappingJurnalHeaders
+      summary: Export mapping jurnal header ke CSV/XLSX
+      description: |
+        Export semua mapping yang match filter aktif.
+        Dataset > 10k row → async export ke MinIO + notif download link (UX rule §1.4).
+        Dataset ≤ 10k row → synchronous file stream.
+
+        Permission: jurnal_mapping.export
+        Audit event: JURNAL_MAPPING.EXPORT (in-tx, dengan filter + row_count)
+      tags: [mapping-jurnal]
+      parameters:
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [csv, xlsx]
+            default: xlsx
+        - name: "filter[event_code]"
+          in: query
+          schema:
+            type: string
+        - name: "filter[workflow_status]"
+          in: query
+          schema:
+            type: string
+        - name: "filter[aktif_flag]"
+          in: query
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: "Synchronous file stream (≤ 10k rows)"
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+                example: 'attachment; filename="mapping-jurnal-20260614.xlsx"'
+            X-Total-Rows:
+              schema:
+                type: integer
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "202":
+          description: "Async export submitted (> 10k rows)"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      jobId:
+                        type: string
+                      statusUrl:
+                        type: string
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # JURNAL RESOLVER
+  # ===========================================================================
+
+  /jurnal/resolve:
+    post:
+      operationId: resolveJurnalEvent
+      summary: Resolve event ke preview debit/kredit lines (tanpa posting)
+      description: |
+        Input event payload → output array JurnalLine yang siap diposting.
+        Ini adalah READ-ONLY preview — tidak ada INSERT ke jrnl.header.
+        Digunakan oleh:
+          1. UI form manual entry untuk preview sebelum submit
+          2. Service internal (Asynq worker) sebelum posting
+          3. Testing/debug template mapping
+
+        Resolver logic:
+          1. Lookup mst.mapping_jurnal_header WHERE event_code = input.eventCode
+             AND workflow_status = 'APPROVED_ACTIVE' AND aktif_flag = true
+          2. Cek input.klasifikasiPsak71 ∈ header.klasifikasi_berlaku (atau NULL = ALL)
+          3. Fetch mst.mapping_jurnal_detail ORDER BY urutan, WHERE aktif_flag = true
+          4. Compute each line: amount = amountIdr × detail.multiplier
+          5. Invariant check: SUM(DEBIT) = SUM(KREDIT)
+          6. Return preview
+
+        AUDIT: Resolver TIDAK menulis ke aud.audit_log. Audit ditulis oleh Posting Service.
+
+        Permission: jurnal_mapping.read (atau internal service call — no RBAC)
+        Performance SLA: ≤ 100 ms
+      tags: [jurnal-resolver]
+      parameters:
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolverRequest"
+            example:
+              eventCode: "PENEMPATAN"
+              klasifikasiPsak71: "AC"
+              instrumenId: "550e8400-e29b-41d4-a716-446655440001"
+              periodeId: "660e8400-e29b-41d4-a716-446655440020"
+              amountIdr: 5000000000.0000
+              currency: "IDR"
+              fxRate: 1.00000000
+              sourceEventId: "770e8400-e29b-41d4-a716-446655440030"
+              sourceEventType: "penempatan_deposito"
+              metadataJson: {}
+      responses:
+        "200":
+          description: Preview debit/kredit lines
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/ResolverResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  lines:
+                    - urutan: 1
+                      posisi: "DEBIT"
+                      akunId: "550e8400-e29b-41d4-a716-446655440010"
+                      akunKode: "1110-DEP"
+                      akunNama: "Deposito Berjangka"
+                      amountIdr: 5000000000.0000
+                      narasi: "Penempatan Deposito BCA 6m"
+                      klasifikasiEligible: "AC"
+                    - urutan: 2
+                      posisi: "KREDIT"
+                      akunId: "550e8400-e29b-41d4-a716-446655440011"
+                      akunKode: "1001-KAS"
+                      akunNama: "Kas dan Setara Kas"
+                      amountIdr: 5000000000.0000
+                      narasi: "Penempatan Deposito BCA 6m"
+                      klasifikasiEligible: "AC"
+                  totalDebitIdr: 5000000000.0000
+                  totalKreditIdr: 5000000000.0000
+                  isBalanced: true
+                  headerUsed:
+                    id: "880e8400-e29b-41d4-a716-446655440040"
+                    eventCode: "PENEMPATAN"
+                    kategoriEvent: "PENEMPATAN"
+                meta:
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "422":
+          description: "Resolver error — event tidak mapped, klasifikasi tidak match, atau balance gagal"
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                notMapped:
+                  value:
+                    error:
+                      code: JURNAL_EVENT_NOT_MAPPED
+                      message: "Tidak ada mapping jurnal APPROVED untuk event code 'DISTRIBUSI_REKSADANA'. Pastikan template sudah dibuat dan di-approve."
+                      details: []
+                      traceId: "01HXY..."
+                klasifikasiMismatch:
+                  value:
+                    error:
+                      code: JURNAL_KLASIFIKASI_NOT_ELIGIBLE
+                      message: "Event code 'AKRUAL_BUNGA' tidak berlaku untuk klasifikasi PSAK 71 'FVTPL'. Mapping hanya untuk: AC, FVOCI."
+                      details: []
+                      traceId: "01HXY..."
+                balanceFail:
+                  value:
+                    error:
+                      code: JURNAL_BALANCE_INVARIANT
+                      message: "Resolver menghasilkan imbalance: DEBIT 1000.0000 ≠ KREDIT 900.0000. Template mapping harus diperbaiki oleh ROLE-AKUN."
+                      details: []
+                      traceId: "01HXY..."
+                amountInvalid:
+                  value:
+                    error:
+                      code: JURNAL_AMOUNT_INVALID
+                      message: "amountIdr harus > 0."
+                      details:
+                        - field: amountIdr
+                          rule: gt
+                          message: "Harus lebih dari 0"
+                      traceId: "01HXY..."
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # JURNAL POSTING MANUAL
+  # ===========================================================================
+
+  /jurnal/post:
+    post:
+      operationId: createManualJurnalPost
+      summary: Buat jurnal posting manual (DRAFT/PENDING_APPROVAL)
+      description: |
+        ROLE-AKUN membuat jurnal manual untuk PERIODE_ADJUSTMENT atau CORRECTION_PERIODE_CLOSED.
+        event_code di-restrict hanya 2 operational codes ini — event lain harus dari sistem (Asynq).
+        Periode target: OPEN atau SOFT_CLOSED (HARD_CLOSED → 423).
+        Dokumen pendukung wajib dilampirkan sebelum submit ke workflow.
+
+        Alur posting manual (4-eyes):
+          ROLE-AKUN create → status_internal = PENDING_APPROVAL (draft state)
+          ROLE-AKUN submit → ROLE-AKUN-CTL review+approve → status_internal = POSTED + jrnl.detail INSERT
+
+        Resolver dipanggil di-background saat create untuk generate preview debit/kredit.
+
+        Permission: jurnal.post
+        Audit event: JURNAL.MANUAL_DRAFT (in-tx pada create)
+      tags: [jurnal-posting]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ManualPostRequest"
+            example:
+              eventCode: "PERIODE_ADJUSTMENT"
+              periodeId: "660e8400-e29b-41d4-a716-446655440020"
+              instrumenId: null
+              amountIdr: 500000.0000
+              narasi: "Koreksi akrual bunga Juni 2026 karena perubahan rounding"
+              dokumenDocId: "990e8400-e29b-41d4-a716-446655440050"
+      responses:
+        "201":
+          description: "Jurnal manual dibuat — status PENDING_APPROVAL (menunggu submit)"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/JurnalHeaderDetail"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "422":
+          description: "Validasi gagal atau periode HARD_CLOSED"
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                periodeClosed:
+                  value:
+                    error:
+                      code: JURNAL_PERIODE_HARD_CLOSED
+                      message: "Periode Maret-2026 sudah HARD_CLOSED. Posting manual tidak dapat dilakukan."
+                      details: []
+                      traceId: "01HXY..."
+                invalidEventCode:
+                  value:
+                    error:
+                      code: JURNAL_EVENT_NOT_MAPPED
+                      message: "Manual posting hanya diperbolehkan untuk event_code PERIODE_ADJUSTMENT dan CORRECTION_PERIODE_CLOSED."
+                      details:
+                        - field: eventCode
+                          rule: enum
+                          message: "Nilai harus PERIODE_ADJUSTMENT atau CORRECTION_PERIODE_CLOSED"
+                      traceId: "01HXY..."
+        "423":
+          $ref: "./_common.yaml#/components/responses/PeriodeClosed"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # MANUAL JURNAL POSTING WORKFLOW
+  # ---------------------------------------------------------------------------
+
+  /jurnal/{jurnalHeaderId}/submit:
+    post:
+      operationId: submitManualJurnal
+      summary: Submit jurnal manual ke review (PENDING_APPROVAL → menunggu ROLE-AKUN-CTL)
+      description: |
+        Maker submit jurnal manual untuk di-approve oleh ROLE-AKUN-CTL.
+        Dokumen pendukung wajib ada sebelum submit.
+
+        Guards:
+          - status_internal = PENDING_APPROVAL (draft state)
+          - current_user = maker_id (dari jrnl.header.created_by)
+          - dokumen_doc_id terisi
+
+        Permission: jurnal.post
+        Audit event: JURNAL.MANUAL_SUBMIT (in-tx)
+      tags: [jurnal-posting-workflow]
+      parameters:
+        - $ref: "#/components/parameters/JurnalHeaderIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowTransitionRequest"
+      responses:
+        "200":
+          description: "Submit sukses — menunggu approve ROLE-AKUN-CTL"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JurnalWorkflowTransitionResponse"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          description: "Dokumen belum dilampirkan atau transisi tidak valid"
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: VALIDATION_FAILED
+                  message: "Dokumen pendukung wajib dilampirkan sebelum submit."
+                  details:
+                    - field: dokumenDocId
+                      rule: required
+                      message: "Lampirkan dokumen pendukung sebelum submit"
+                  traceId: "01HXY..."
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/{jurnalHeaderId}/approve:
+    post:
+      operationId: approveManualJurnal
+      summary: Approve jurnal manual — jurnal POSTED + jrnl.detail INSERT (in-tx)
+      description: |
+        ROLE-AKUN-CTL approve jurnal manual.
+        Saat approve:
+          1. Jalankan resolver untuk generate debit/kredit lines (validasi ulang)
+          2. INSERT jrnl.detail rows dalam transaksi yang sama
+          3. UPDATE jrnl.header status_internal = 'POSTED'
+          4. Tulis audit JURNAL.POST (in-tx)
+
+        Guards:
+          - status_internal dalam pending approval state
+          - current_user ≠ created_by (SoD)
+
+        Permission: jurnal.approve
+        Audit event: JURNAL.MANUAL_APPROVE + JURNAL.POST (keduanya in-tx)
+      tags: [jurnal-posting-workflow]
+      parameters:
+        - $ref: "#/components/parameters/JurnalHeaderIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowSigningRequest"
+      responses:
+        "200":
+          description: "Jurnal POSTED — jrnl.detail ter-INSERT"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/JurnalHeaderDetail"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/SodViolation"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          $ref: "./_common.yaml#/components/responses/WorkflowInvalidTransition"
+        "423":
+          description: "Periode sudah HARD_CLOSED saat approval dilakukan"
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: JURNAL_PERIODE_HARD_CLOSED
+                  message: "Periode sudah HARD_CLOSED. Approve tidak bisa dilakukan."
+                  details: []
+                  traceId: "01HXY..."
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/{jurnalHeaderId}/reject:
+    post:
+      operationId: rejectManualJurnal
+      summary: Reject jurnal manual — kembali ke DRAFT, reason wajib ≥ 30 karakter
+      description: |
+        ROLE-AKUN-CTL reject jurnal manual. Maker dapat merevisi dan re-submit.
+
+        Guards:
+          - status_internal dalam pending approval state
+          - reject_reason.length ≥ 30
+
+        Permission: jurnal.approve
+        Audit event: JURNAL.MANUAL_REJECT (in-tx)
+      tags: [jurnal-posting-workflow]
+      parameters:
+        - $ref: "#/components/parameters/JurnalHeaderIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rejectReason, signatureMethod]
+              properties:
+                rejectReason:
+                  type: string
+                  minLength: 30
+                signatureMethod:
+                  type: string
+                  enum: [JWT_STEP_UP, JWT_STANDARD]
+      responses:
+        "200":
+          description: "Jurnal manual kembali ke DRAFT state"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JurnalWorkflowTransitionResponse"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          $ref: "./_common.yaml#/components/responses/WorkflowInvalidTransition"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # JURNAL READ
+  # ===========================================================================
+
+  /jurnal:
+    get:
+      operationId: listJurnalHeaders
+      summary: List jurnal header (DataTable)
+      description: |
+        Cursor-paginated list jurnal dengan filter komprehensif.
+        jrnl.header adalah append-only — tidak ada soft-delete (tidak ada filter deleted_at).
+
+        Permission: jurnal.read
+        Sort allowed: no_jurnal, tanggal_posting, event_code, total_debit, created_at
+        Filter: periode_id, event_code (multi), instrumen_id, status_internal (multi),
+                tanggal_posting (between), total_debit (gte/lte), q (no_jurnal, narrative)
+        Audit event: tidak ada (read only)
+      tags: [jurnal-query]
+      parameters:
+        - $ref: "./_common.yaml#/components/parameters/cursor"
+        - $ref: "./_common.yaml#/components/parameters/limit"
+        - $ref: "./_common.yaml#/components/parameters/sortParam"
+        - $ref: "./_common.yaml#/components/parameters/searchParam"
+        - name: "filter[periode_id]"
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: "filter[event_code]"
+          in: query
+          schema:
+            type: string
+          description: "Single atau multi-value: PENEMPATAN,ECL_PEMBENTUKAN"
+        - name: "filter[instrumen_id]"
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: "filter[status_internal]"
+          in: query
+          schema:
+            type: string
+          description: "Single atau multi-value: POSTED,REVERSED"
+        - name: "filter[tanggal_posting]"
+          in: query
+          schema:
+            type: string
+          description: "Format: between:2026-06-01,2026-06-30"
+        - name: "filter[total_debit]"
+          in: query
+          schema:
+            type: string
+          description: "Format: gte:1000000 atau lte:5000000000"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "./_common.yaml#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/JurnalHeaderSummary"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/{id}:
+    get:
+      operationId: getJurnalHeaderDetail
+      summary: Detail jurnal header + detail rows + source event metadata
+      description: |
+        Drill-down ke jurnal lengkap dengan semua baris debit/kredit.
+        Termasuk link ke source event (penempatan, calc_run, dst).
+
+        Permission: jurnal.read
+      tags: [jurnal-query]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "UUID atau no_jurnal (mis. JRN-2026-000001)"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/JurnalHeaderDetail"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          description: Jurnal tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: JURNAL_INSTRUMEN_NOT_FOUND
+                  message: "Jurnal header tidak ditemukan."
+                  details: []
+                  traceId: "01HXY..."
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/{id}/export:
+    get:
+      operationId: exportJurnalDetail
+      summary: Export jurnal detail ke CSV/XLSX
+      description: |
+        Export satu jurnal header beserta detail rows.
+        Permission: jurnal.export (ROLE-AKUN, ROLE-AKUN-CTL, ROLE-CFO, ROLE-AUDIT)
+        Audit event: JURNAL.EXPORT
+      tags: [jurnal-query]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [csv, xlsx]
+            default: xlsx
+      responses:
+        "200":
+          description: File stream
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/export:
+    get:
+      operationId: exportJurnalList
+      summary: Export list jurnal ke CSV/XLSX (respects filter aktif)
+      description: |
+        Export dengan filter yang sama seperti GET /jurnal.
+        Dataset > 10k row → async export (202 + jobId).
+        Dataset ≤ 10k row → sync stream.
+
+        Permission: jurnal.export
+        Audit event: JURNAL.EXPORT (filter + row_count dicatat)
+      tags: [jurnal-query]
+      parameters:
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [csv, xlsx]
+            default: xlsx
+        - name: "filter[periode_id]"
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: "filter[event_code]"
+          in: query
+          schema:
+            type: string
+        - name: "filter[status_internal]"
+          in: query
+          schema:
+            type: string
+        - name: "filter[tanggal_posting]"
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Sync file stream (≤ 10k rows)"
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+            X-Total-Rows:
+              schema:
+                type: integer
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "202":
+          description: "Async export submitted"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      jobId:
+                        type: string
+                      statusUrl:
+                        type: string
+                      streamUrl:
+                        type: string
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # DLQ — DEAD LETTER QUEUE
+  # ===========================================================================
+
+  /jurnal/dlq:
+    get:
+      operationId: listJurnalDlq
+      summary: List DLQ jurnal posting yang gagal (DataTable)
+      description: |
+        Cursor-paginated list sys.dlq_jurnal_post.
+        Default filter: status IN ('FAILED', 'REPLAYING') — exclude REPLAYED_OK + ABANDONED.
+        Permission: jurnal.dlq.read (ROLE-IT-ADMIN, ROLE-AKUN-CTL)
+        Sort allowed: last_attempt_at, attempt_count, source_event_type, event_code, status
+      tags: [jurnal-dlq]
+      parameters:
+        - $ref: "./_common.yaml#/components/parameters/cursor"
+        - $ref: "./_common.yaml#/components/parameters/limit"
+        - $ref: "./_common.yaml#/components/parameters/sortParam"
+        - $ref: "./_common.yaml#/components/parameters/searchParam"
+        - name: "filter[status]"
+          in: query
+          schema:
+            type: string
+          description: "FAILED, REPLAYING, REPLAYED_OK, ABANDONED"
+        - name: "filter[event_code]"
+          in: query
+          schema:
+            type: string
+        - name: "filter[source_event_type]"
+          in: query
+          schema:
+            type: string
+        - name: "filter[error_code]"
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "./_common.yaml#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/DlqEntrySummary"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/dlq/{id}:
+    get:
+      operationId: getJurnalDlqDetail
+      summary: Detail DLQ entry dengan error reason + retry count
+      description: |
+        Menampilkan detail DLQ entry lengkap termasuk payload_jsonb (untuk debugging).
+        Permission: jurnal.dlq.read
+      tags: [jurnal-dlq]
+      parameters:
+        - $ref: "#/components/parameters/DlqIdPath"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/DlqEntryDetail"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          description: DLQ entry tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: JURNAL_DLQ_NOT_FOUND
+                  message: "DLQ entry tidak ditemukan."
+                  details: []
+                  traceId: "01HXY..."
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/dlq/{id}/replay:
+    post:
+      operationId: replayJurnalDlq
+      summary: Replay DLQ entry — re-enqueue Asynq task dengan payload original
+      description: |
+        Memicu ulang posting jurnal yang gagal.
+        Idempotency dijaga via uq_jrnl_idempotency di jrnl.header.
+        Jika DLQ entry sudah REPLAYED_OK → 409 JURNAL_DLQ_ALREADY_REPLAYED.
+        Jika attempt_count ≥ max_attempts (default 5, konfigurabel via sys.config) → 422.
+
+        Flow:
+          1. Set DLQ status = REPLAYING (atomic update + row_version check)
+          2. INSERT sys.job untuk tracking progress
+          3. Enqueue Asynq task dengan payload_jsonb dari DLQ
+          4. Audit JURNAL.DLQ_REPLAYED (before enqueue, in-tx)
+          5. Worker mengeksekusi: jika sukses → DLQ status = REPLAYED_OK; jika gagal → increment attempt_count + FAILED
+
+        Permission: jurnal.dlq.replay (ROLE-IT-ADMIN, ROLE-AKUN-CTL)
+        Audit event: JURNAL.DLQ_REPLAYED (ditulis SEBELUM enqueue, in-tx)
+        Performance SLA: ≤ 500 ms (hanya sampai enqueue, tidak menunggu worker)
+      tags: [jurnal-dlq]
+      parameters:
+        - $ref: "#/components/parameters/DlqIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 500
+                  description: "Catatan opsional mengapa replay dilakukan"
+      responses:
+        "202":
+          description: "Replay di-enqueue — tracking via jobId"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      dlqId:
+                        type: string
+                        format: uuid
+                      jobId:
+                        type: string
+                      statusUrl:
+                        type: string
+                      streamUrl:
+                        type: string
+                      currentStatus:
+                        type: string
+                        example: "REPLAYING"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          description: DLQ entry tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: JURNAL_DLQ_NOT_FOUND
+                  message: "DLQ entry tidak ditemukan."
+                  details: []
+                  traceId: "01HXY..."
+        "409":
+          description: DLQ sudah pernah berhasil di-replay
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: JURNAL_DLQ_ALREADY_REPLAYED
+                  message: "DLQ entry sudah berhasil di-replay. Jurnal sudah ter-posting."
+                  details: []
+                  traceId: "01HXY..."
+        "422":
+          description: "Periode masih HARD_CLOSED atau max attempts tercapai"
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: JURNAL_DLQ_REPLAY_PERIODE_HARD_CLOSED
+                  message: "Periode target masih HARD_CLOSED. Selesaikan periode reopen terlebih dahulu."
+                  details: []
+                  traceId: "01HXY..."
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/dlq/{id}/discard:
+    post:
+      operationId: discardJurnalDlq
+      summary: Discard DLQ entry — mark ABANDONED tanpa replay (reason wajib ≥ 30 karakter)
+      description: |
+        ROLE-IT-ADMIN menandai DLQ entry sebagai ABANDONED.
+        Entry tidak muncul di default list tapi tetap accessible via filter status=ABANDONED (audit trail).
+        Cannot discard jika status sudah REPLAYED_OK.
+
+        Guards:
+          - status IN (FAILED, REPLAYING)
+          - discard_reason.length ≥ 30
+
+        Permission: jurnal.dlq.abandon (ROLE-IT-ADMIN only)
+        Audit event: JURNAL.DLQ_DISCARDED (in-tx)
+      tags: [jurnal-dlq]
+      parameters:
+        - $ref: "#/components/parameters/DlqIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [discardReason]
+              properties:
+                discardReason:
+                  type: string
+                  minLength: 30
+                  description: "Alasan abandon, minimum 30 karakter"
+      responses:
+        "200":
+          description: "DLQ entry di-ABANDONED"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      status:
+                        type: string
+                        example: "ABANDONED"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          description: "Reason terlalu pendek atau entry sudah REPLAYED_OK"
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: JURNAL_DLQ_DISCARD_REASON_TOO_SHORT
+                  message: "discardReason minimal 30 karakter."
+                  details:
+                    - field: discardReason
+                      rule: minLength
+                      message: "Minimal 30 karakter"
+                  traceId: "01HXY..."
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+# =============================================================================
+# COMPONENTS
+# =============================================================================
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      $ref: "./_common.yaml#/components/securitySchemes/bearerAuth"
+
+  parameters:
+
+    IdempotencyKeyHeader:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: "UUID v4 unik per request. Wajib di semua mutating endpoints (DEC-021)."
+
+    XTraceIdHeader:
+      name: X-Trace-Id
+      in: header
+      required: false
+      schema:
+        type: string
+      description: "Trace ID untuk distributed tracing. Gateway inject otomatis."
+
+    XStepUpTokenHeader:
+      name: X-Step-Up-Token
+      in: header
+      required: false
+      schema:
+        type: string
+      description: |
+        Token dari POST /auth/step-up.
+        WAJIB untuk approve regulated + approve-2 (DEC-027).
+        Token valid ≤ 5 menit sejak issuance.
+
+    MappingHeaderIdPath:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: "UUID mapping jurnal header"
+
+    JurnalHeaderIdPath:
+      name: jurnalHeaderId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: "UUID jrnl.header"
+
+    DlqIdPath:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: "UUID sys.dlq_jurnal_post"
+
+  schemas:
+
+    # -------------------------------------------------------------------------
+    # MAPPING JURNAL HEADER
+    # -------------------------------------------------------------------------
+
+    MappingHeaderCreateRequest:
+      type: object
+      required: [eventCode, namaEvent, kategoriEvent, triggerSource, detailRows]
+      properties:
+        eventCode:
+          type: string
+          maxLength: 40
+          description: "Kode unik event dari DEC-P5-M1-002"
+          example: "PENEMPATAN"
+        namaEvent:
+          type: string
+          maxLength: 120
+          example: "Penempatan Instrumen Keuangan"
+        kategoriEvent:
+          type: string
+          maxLength: 30
+          enum:
+            - PENEMPATAN
+            - AKRUAL
+            - ECL
+            - MUTASI_MTM
+            - STAGE_MIGRATION
+            - CLOSURE
+            - REKLASIFIKASI
+            - FX
+            - KOREKSI
+          example: "PENEMPATAN"
+        triggerSource:
+          type: string
+          enum: [USER_INPUT, SYSTEM_JOB]
+          description: "USER_INPUT = manual form; SYSTEM_JOB = Asynq worker"
+        klasifikasiBerlaku:
+          type: array
+          items:
+            type: string
+            enum: [AC, FVOCI, FVTPL, FVOCI_ELECTION, POCI]
+          nullable: true
+          description: "null = berlaku untuk semua klasifikasi PSAK 71"
+        deskripsi:
+          type: string
+          maxLength: 2000
+        detailRows:
+          type: array
+          minItems: 2
+          description: "Minimal 1 DEBIT + 1 KREDIT"
+          items:
+            $ref: "#/components/schemas/MappingDetailRowInput"
+
+    MappingHeaderEditRequest:
+      type: object
+      description: "Subset field yang bisa di-edit dalam status DRAFT"
+      properties:
+        namaEvent:
+          type: string
+          maxLength: 120
+        klasifikasiBerlaku:
+          type: array
+          items:
+            type: string
+            enum: [AC, FVOCI, FVTPL, FVOCI_ELECTION, POCI]
+          nullable: true
+        deskripsi:
+          type: string
+          maxLength: 2000
+        detailRows:
+          type: array
+          minItems: 2
+          items:
+            $ref: "#/components/schemas/MappingDetailRowInput"
+        rowVersion:
+          type: integer
+          description: "Optimistic lock. Wajib jika ada concurrent edit risk."
+
+    MappingDetailRowInput:
+      type: object
+      required: [urutan, kodeAkunId, dkIndicator, sumberAmount]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: "UUID existing row (untuk update); null untuk baris baru"
+          nullable: true
+        urutan:
+          type: integer
+          minimum: 1
+        kodeAkunId:
+          type: string
+          format: uuid
+          description: "FK ke mst.chart_of_accounts.id — harus aktif"
+        dkIndicator:
+          type: string
+          enum: [DEBIT, KREDIT]
+        sumberAmount:
+          type: string
+          maxLength: 50
+          description: |
+            Field resolver yang di-map:
+            - nominal_idr — nilai pokok transaksi
+            - ecl_amount — ECL movement (delta)
+            - mtm_change — perubahan MTM
+            - accrued_interest — akrual bunga
+            - net_carrying_idr — untuk Stage 3 interest
+          enum:
+            - nominal_idr
+            - ecl_amount
+            - mtm_change
+            - accrued_interest
+            - net_carrying_idr
+            - fx_gain_loss
+            - premium_discount_amortization
+        klasifikasiFilter:
+          type: string
+          enum: [AC, FVOCI, FVTPL, FVOCI_ELECTION, POCI]
+          nullable: true
+          description: "Override klasifikasi spesifik. null = apply to all klasifikasiBerlaku"
+        multiplier:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 1.0000
+          description: "Faktor pengali. Contoh: 0.2000 untuk PPh 20%"
+        catatan:
+          type: string
+          maxLength: 500
+          nullable: true
+
+    MappingHeaderSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        eventCode:
+          type: string
+        eventIdKode:
+          type: string
+          description: "Format EV-{NNN}"
+        namaEvent:
+          type: string
+        kategoriEvent:
+          type: string
+        triggerSource:
+          type: string
+          enum: [USER_INPUT, SYSTEM_JOB]
+        workflowStatus:
+          $ref: "./_common.yaml#/components/schemas/WorkflowState"
+        aktifFlag:
+          type: boolean
+        workflowPath:
+          type: string
+          enum: [FOUR_EYES, SIX_EYES]
+          description: "Ditentukan server berdasarkan event_code vs regulated whitelist"
+        detailCount:
+          type: integer
+        makerId:
+          type: string
+          format: uuid
+          nullable: true
+        reviewerId:
+          type: string
+          format: uuid
+          nullable: true
+        approverId:
+          type: string
+          format: uuid
+          nullable: true
+        approver2Id:
+          type: string
+          format: uuid
+          nullable: true
+          description: "Hanya untuk 6-eyes regulated"
+        createdAt:
+          $ref: "./_common.yaml#/components/schemas/TimestampISO"
+        updatedAt:
+          $ref: "./_common.yaml#/components/schemas/TimestampISO"
+
+    MappingHeaderDetail:
+      allOf:
+        - $ref: "#/components/schemas/MappingHeaderSummary"
+        - type: object
+          properties:
+            klasifikasiBerlaku:
+              type: array
+              items:
+                type: string
+                enum: [AC, FVOCI, FVTPL, FVOCI_ELECTION, POCI]
+              nullable: true
+            deskripsi:
+              type: string
+              nullable: true
+            detailRows:
+              type: array
+              items:
+                $ref: "#/components/schemas/MappingDetailRowResponse"
+            workflow:
+              type: object
+              properties:
+                submitAt:
+                  $ref: "./_common.yaml#/components/schemas/TimestampISO"
+                  nullable: true
+                reviewerSignedAt:
+                  $ref: "./_common.yaml#/components/schemas/TimestampISO"
+                  nullable: true
+                approverSignedAt:
+                  $ref: "./_common.yaml#/components/schemas/TimestampISO"
+                  nullable: true
+                approver2SignedAt:
+                  $ref: "./_common.yaml#/components/schemas/TimestampISO"
+                  nullable: true
+                rejectReason:
+                  type: string
+                  nullable: true
+            rowVersion:
+              type: integer
+
+    MappingDetailRowResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        urutan:
+          type: integer
+        kodeAkunId:
+          type: string
+          format: uuid
+        kodeAkun:
+          type: string
+          description: "Dari mst.chart_of_accounts.kode_akun (JOIN)"
+        namaAkun:
+          type: string
+          description: "Dari mst.chart_of_accounts.nama_akun (JOIN)"
+        dkIndicator:
+          type: string
+          enum: [DEBIT, KREDIT]
+        sumberAmount:
+          type: string
+        klasifikasiFilter:
+          type: string
+          nullable: true
+        multiplier:
+          type: number
+        catatan:
+          type: string
+          nullable: true
+
+    WorkflowTransitionRequest:
+      type: object
+      properties:
+        comment:
+          type: string
+          maxLength: 1000
+
+    WorkflowSigningRequest:
+      type: object
+      required: [comment, signatureMethod]
+      properties:
+        comment:
+          type: string
+          maxLength: 1000
+        signatureMethod:
+          type: string
+          enum: [JWT_STEP_UP, JWT_STANDARD]
+
+    WorkflowTransitionResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            workflowStatus:
+              $ref: "./_common.yaml#/components/schemas/WorkflowState"
+            workflowPath:
+              type: string
+              enum: [FOUR_EYES, SIX_EYES]
+            nextStep:
+              type: string
+              description: "Label step berikutnya untuk UI"
+              nullable: true
+              example: "Menunggu approve ROLE-RISK (6-eyes)"
+            updatedAt:
+              $ref: "./_common.yaml#/components/schemas/TimestampISO"
+        meta:
+          $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+
+    # -------------------------------------------------------------------------
+    # RESOLVER
+    # -------------------------------------------------------------------------
+
+    ResolverRequest:
+      type: object
+      required: [eventCode, klasifikasiPsak71, periodeId, amountIdr, currency, fxRate, sourceEventId, sourceEventType]
+      properties:
+        eventCode:
+          type: string
+          maxLength: 40
+          description: "Dari DEC-P5-M1-002"
+        klasifikasiPsak71:
+          type: string
+          enum: [AC, FVOCI, FVTPL, FVOCI_ELECTION, POCI]
+        instrumenId:
+          type: string
+          format: uuid
+          nullable: true
+          description: "Optional — null untuk PERIODE_ADJUSTMENT global"
+        periodeId:
+          type: string
+          format: uuid
+        amountIdr:
+          type: number
+          format: double
+          description: "Nominal IDR > 0. Untuk FCY: sudah dikonversi (amountFcy × fxRate)"
+          minimum: 0.0001
+        currency:
+          type: string
+          maxLength: 3
+          default: "IDR"
+          description: "Mata uang asal. Resolver output selalu IDR."
+        fxRate:
+          type: number
+          format: double
+          description: "BI JISDOR rate. 1.00000000 untuk IDR."
+          minimum: 0.00000001
+        sourceEventId:
+          type: string
+          format: uuid
+          description: "ID event sumber — digunakan untuk idempotency key di jrnl.header"
+        sourceEventType:
+          type: string
+          maxLength: 50
+          description: "penempatan_deposito, calc_run, mtm_computation, dst"
+        metadataJson:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: "Event-specific metadata: {ecl_stage, eir_persen, mtm_delta, dst}"
+
+    ResolverResponse:
+      type: object
+      properties:
+        lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/JurnalLine"
+        totalDebitIdr:
+          type: number
+          format: double
+        totalKreditIdr:
+          type: number
+          format: double
+        isBalanced:
+          type: boolean
+          description: "true jika totalDebitIdr = totalKreditIdr"
+        headerUsed:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            eventCode:
+              type: string
+            kategoriEvent:
+              type: string
+            workflowStatus:
+              type: string
+
+    JurnalLine:
+      type: object
+      properties:
+        urutan:
+          type: integer
+        posisi:
+          type: string
+          enum: [DEBIT, KREDIT]
+        akunId:
+          type: string
+          format: uuid
+        akunKode:
+          type: string
+        akunNama:
+          type: string
+        amountIdr:
+          type: number
+          format: double
+        narasi:
+          type: string
+        klasifikasiEligible:
+          type: string
+          nullable: true
+
+    # -------------------------------------------------------------------------
+    # JURNAL POSTING (HEADER + DETAIL)
+    # -------------------------------------------------------------------------
+
+    ManualPostRequest:
+      type: object
+      required: [eventCode, periodeId, amountIdr, narasi]
+      properties:
+        eventCode:
+          type: string
+          enum: [PERIODE_ADJUSTMENT, CORRECTION_PERIODE_CLOSED]
+          description: "Manual posting hanya untuk 2 event codes operational ini"
+        periodeId:
+          type: string
+          format: uuid
+          description: "Periode target: harus OPEN atau SOFT_CLOSED"
+        instrumenId:
+          type: string
+          format: uuid
+          nullable: true
+          description: "Optional — null untuk adjustment global"
+        amountIdr:
+          type: number
+          format: double
+          minimum: 0.0001
+        currency:
+          type: string
+          maxLength: 3
+          default: "IDR"
+        fxRate:
+          type: number
+          format: double
+          default: 1.00000000
+        narasi:
+          type: string
+          maxLength: 500
+          description: "Deskripsi tujuan jurnal manual"
+        dokumenDocId:
+          type: string
+          format: uuid
+          nullable: true
+          description: "FK ke doc.upload — wajib saat submit, opsional saat draft"
+        metadataJson:
+          type: object
+          additionalProperties: true
+          nullable: true
+
+    JurnalHeaderSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        noJurnal:
+          type: string
+          description: "Format JRN-{YYYY}-{######}"
+          example: "JRN-2026-000001"
+        tanggalPosting:
+          $ref: "./_common.yaml#/components/schemas/DateOnly"
+        periodeId:
+          type: string
+          format: uuid
+        periodeLabel:
+          type: string
+          description: "Label periode buku (JOIN)"
+          example: "Juni 2026"
+        eventCode:
+          type: string
+        instrumenId:
+          type: string
+          format: uuid
+          nullable: true
+        instrumenNama:
+          type: string
+          nullable: true
+          description: "Dari mst.instrumen (JOIN)"
+        totalDebit:
+          type: number
+          format: double
+        totalKredit:
+          type: number
+          format: double
+        statusInternal:
+          type: string
+          enum: [PENDING_APPROVAL, POSTED, REVERSED]
+        currency:
+          type: string
+        createdAt:
+          $ref: "./_common.yaml#/components/schemas/TimestampISO"
+        createdBy:
+          type: string
+          format: uuid
+
+    JurnalHeaderDetail:
+      allOf:
+        - $ref: "#/components/schemas/JurnalHeaderSummary"
+        - type: object
+          properties:
+            narrative:
+              type: string
+            mappingHeaderId:
+              type: string
+              format: uuid
+            referenceEventType:
+              type: string
+              description: "penempatan_deposito, calc_run, mtm_computation, dst"
+            referenceEventId:
+              type: string
+              format: uuid
+              description: "ID source event — link ke entitas asal"
+            sourceLink:
+              type: string
+              nullable: true
+              description: "Deep link ke source entity, mis. /trx/penempatan/{referenceEventId}"
+            idempotencyKey:
+              type: string
+              description: "SHA256(sourceEventId || '::' || eventCode)"
+            detailRows:
+              type: array
+              items:
+                $ref: "#/components/schemas/JurnalDetailRow"
+            dokumenDocId:
+              type: string
+              format: uuid
+              nullable: true
+              description: "Dokumen pendukung (manual posting)"
+
+    JurnalDetailRow:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        urutan:
+          type: integer
+        kodeAkunId:
+          type: string
+          format: uuid
+        kodeAkun:
+          type: string
+        namaAkun:
+          type: string
+        debitAmount:
+          type: number
+          format: double
+          description: "0 jika row ini KREDIT"
+        kreditAmount:
+          type: number
+          format: double
+          description: "0 jika row ini DEBIT"
+        mataUang:
+          type: string
+        narrativeLine:
+          type: string
+        createdAt:
+          $ref: "./_common.yaml#/components/schemas/TimestampISO"
+
+    JurnalWorkflowTransitionResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            noJurnal:
+              type: string
+              example: "JRN-2026-000042"
+            statusInternal:
+              type: string
+              enum: [PENDING_APPROVAL, POSTED, REVERSED]
+            updatedAt:
+              $ref: "./_common.yaml#/components/schemas/TimestampISO"
+        meta:
+          $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+
+    # -------------------------------------------------------------------------
+    # DLQ
+    # -------------------------------------------------------------------------
+
+    DlqEntrySummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        sourceEventId:
+          type: string
+          format: uuid
+        sourceEventType:
+          type: string
+        eventCode:
+          type: string
+        instrumenId:
+          type: string
+          format: uuid
+          nullable: true
+        errorCode:
+          type: string
+          description: "Stable error code, mis. JURNAL_EVENT_NOT_MAPPED"
+        errorMessage:
+          type: string
+        attemptCount:
+          type: integer
+        lastAttemptAt:
+          $ref: "./_common.yaml#/components/schemas/TimestampISO"
+        status:
+          type: string
+          enum: [FAILED, REPLAYING, REPLAYED_OK, ABANDONED]
+        replayedJurnalId:
+          type: string
+          format: uuid
+          nullable: true
+        createdAt:
+          $ref: "./_common.yaml#/components/schemas/TimestampISO"
+
+    DlqEntryDetail:
+      allOf:
+        - $ref: "#/components/schemas/DlqEntrySummary"
+        - type: object
+          properties:
+            periodeId:
+              type: string
+              format: uuid
+            payloadJsonb:
+              type: object
+              additionalProperties: true
+              description: "Full resolver input snapshot — untuk debugging + replay"
+            replayedBy:
+              type: string
+              format: uuid
+              nullable: true
+            replayedAt:
+              $ref: "./_common.yaml#/components/schemas/TimestampISO"
+              nullable: true
+            abandonedReason:
+              type: string
+              nullable: true
+
+  # -------------------------------------------------------------------------
+  # Reusable responses (subset — main definitions in _common.yaml)
+  # -------------------------------------------------------------------------
+  responses:
+    Unauthorized:
+      $ref: "./_common.yaml#/components/responses/Unauthorized"
+    Forbidden:
+      $ref: "./_common.yaml#/components/responses/Forbidden"
+    NotFound:
+      $ref: "./_common.yaml#/components/responses/NotFound"
+    Conflict:
+      $ref: "./_common.yaml#/components/responses/Conflict"
+    SodViolation:
+      $ref: "./_common.yaml#/components/responses/SodViolation"
+    WorkflowInvalidTransition:
+      $ref: "./_common.yaml#/components/responses/WorkflowInvalidTransition"
+    PeriodeClosed:
+      $ref: "./_common.yaml#/components/responses/PeriodeClosed"
+    RateLimited:
+      $ref: "./_common.yaml#/components/responses/RateLimited"
+    InternalError:
+      $ref: "./_common.yaml#/components/responses/InternalError"
