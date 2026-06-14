@@ -775,8 +775,8 @@ func (s *penempatanTestService) Approve(ctx context.Context, id uuid.UUID, req w
 // Per-penempatan transaction (not one big tx); partial failure allowed.
 // Returns (matured, errors).
 func (s *penempatanTestService) RunMaturityCheck(ctx context.Context, today time.Time) ([]uuid.UUID, []error) {
-	var matured []uuid.UUID
-	var errs []error
+	matured := make([]uuid.UUID, 0)
+	errs := make([]error, 0)
 
 	for _, r := range s.records {
 		if r.WorkflowStatus != statusApprovedActive {

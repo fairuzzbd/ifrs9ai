@@ -171,7 +171,7 @@ func (s *benchPenempatanService) create(
 // listWithFilter simulates GET /trx/penempatan-deposito with status filter + cursor paging.
 // cursor-based: skip first `cursorOffset` records, return up to `limit`.
 func (s *benchPenempatanService) listWithFilter(status string, cursorOffset, limit int) []*benchPenempatanRecord {
-	var out []*benchPenempatanRecord
+	out := make([]*benchPenempatanRecord, 0, n)
 	skipped := 0
 	for _, r := range s.records {
 		if r.WorkflowStatus != status {
