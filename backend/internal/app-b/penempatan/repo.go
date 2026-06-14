@@ -857,6 +857,59 @@ func (r *Repo) BeginTx(ctx context.Context) (*sql.Tx, error) {
 	return r.db.BeginTx(ctx, nil)
 }
 
+// ─── Audit timeline ──────────────────────────────────────────────────────────
+
+// GetAuditTimeline queries aud.audit_log for a penempatan entity.
+// Non-AUDIT roles receive events with before/after redacted (nil).
+func (r *Repo) GetAuditTimeline(ctx context.Context, id uuid.UUID, includePayload bool, tenantID string) ([]AuditTimelineEvent, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, timestamp, actor_user_id, actor_role, action,
+		       before_value, after_value, COALESCE(trace_id, '')
+		FROM aud.audit_log
+		WHERE entity_type = 'trx.penempatan_deposito'
+		  AND entity_id = $1
+		  AND tenant_id = $2
+		ORDER BY timestamp ASC
+		LIMIT 500`,
+		id, tenantID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("penempatan.Repo.GetAuditTimeline: %w", err)
+	}
+	defer rows.Close()
+
+	var events []AuditTimelineEvent
+	for rows.Next() {
+		var evt AuditTimelineEvent
+		var actorID string
+		var before, after []byte
+		var traceID string
+		if err := rows.Scan(
+			&evt.EventID, &evt.EventTime, &actorID, &evt.ActorRole, &evt.Action,
+			&before, &after, &traceID,
+		); err != nil {
+			return nil, fmt.Errorf("penempatan.Repo.GetAuditTimeline scan: %w", err)
+		}
+		parsed, pErr := uuid.Parse(actorID)
+		if pErr == nil {
+			evt.ActorUserID = parsed
+		}
+		evt.TraceID = traceID
+		if includePayload {
+			if before != nil {
+				s := string(before)
+				evt.BeforeJSON = &s
+			}
+			if after != nil {
+				s := string(after)
+				evt.AfterJSON = &s
+			}
+		}
+		events = append(events, evt)
+	}
+	return events, rows.Err()
+}
+
 // ─── helpers on Penempatan (avoid field access ambiguity) ─────────────────────
 
 // TerminateReqReason is a helper to set TerminateRequestReason from a pointer.
