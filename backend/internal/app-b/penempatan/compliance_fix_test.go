@@ -29,7 +29,7 @@ import (
 // ─── mockAsynqEnqueuer ────────────────────────────────────────────────────────
 
 // mockAsynqEnqueuer counts how many times EnqueueContext is called and records
-// the task types, so tests can assert Asynq dispatch behaviour.
+// the task types, so tests can assert Asynq dispatch behavior.
 type mockAsynqEnqueuer struct {
 	callCount atomic.Int32
 	types     []string
@@ -80,35 +80,35 @@ func buildGetForUpdateRow(
 	kuponPersen = "5.25000000"
 	biayaTransaksi = "0"
 	return []driver.Value{
-		id,                              // id
-		"DP-000001",                     // kode_transaksi
-		uuid.New(),                      // instrumen_id
-		uuid.New(),                      // counterparty_bank_id
-		uuid.New(),                      // periode_id
-		uuid.New(),                      // mata_uang_id
+		id,          // id
+		"DP-000001", // kode_transaksi
+		uuid.New(),  // instrumen_id
+		uuid.New(),  // counterparty_bank_id
+		uuid.New(),  // periode_id
+		uuid.New(),  // mata_uang_id
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), // tanggal_penempatan
 		time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC), // tanggal_jatuh_tempo
-		nominalIDR,                      // nominal_idr
-		nominalFCY,                      // nominal_fcy
-		kursPenempatan,                  // kurs_penempatan
-		int16(12),                       // tenor_bulan
-		kuponPersen,                     // kupon_persen
-		biayaTransaksi,                  // biaya_transaksi_idr
-		nil,                             // eir_awal
-		nil,                             // carrying_amount_awal
-		workflowStatus,                  // workflow_status
-		makerID,                         // maker_id
-		nil,                             // reviewer_id
-		nil,                             // approver_id
-		terminateMakerIDStr,             // terminate_maker_id
-		nil,                             // terminate_reviewer_id
-		nil,                             // terminate_approver_id
-		nil,                             // reject_reason
-		nil,                             // terminate_request_reason
-		nil,                             // deleted_at
-		nil,                             // deleted_by
-		int64(1),                        // row_version
-		"TUGURE",                        // tenant_id
+		nominalIDR,          // nominal_idr
+		nominalFCY,          // nominal_fcy
+		kursPenempatan,      // kurs_penempatan
+		int16(12),           // tenor_bulan
+		kuponPersen,         // kupon_persen
+		biayaTransaksi,      // biaya_transaksi_idr
+		nil,                 // eir_awal
+		nil,                 // carrying_amount_awal
+		workflowStatus,      // workflow_status
+		makerID,             // maker_id
+		nil,                 // reviewer_id
+		nil,                 // approver_id
+		terminateMakerIDStr, // terminate_maker_id
+		nil,                 // terminate_reviewer_id
+		nil,                 // terminate_approver_id
+		nil,                 // reject_reason
+		nil,                 // terminate_request_reason
+		nil,                 // deleted_at
+		nil,                 // deleted_by
+		int64(1),            // row_version
+		"TUGURE",            // tenant_id
 	}
 }
 
@@ -335,7 +335,7 @@ func TestTerminateReview_SoDViolation_OriginalMakerIsReviewer(t *testing.T) {
 // delegates to a service stub) so we can inject a real asynq mock and exercise
 // the guard path without full DB setup.
 //
-// The guard is tested at the service-behaviour level via the mockAsynqEnqueuer.
+// The guard is tested at the service-behavior level via the mockAsynqEnqueuer.
 // We use a minimal service with sqlmock providing all required DB responses.
 func TestApprove_FVTPL_NoAsynqDispatch(t *testing.T) {
 	t.Parallel()
@@ -347,7 +347,7 @@ func TestApprove_FVTPL_NoAsynqDispatch(t *testing.T) {
 	// without an Asynq call, and verify the mock's call count.
 	//
 	// This test validates the CONTRACT: for FVTPL approval the stub (which
-	// mirrors service behaviour post-fix) must not call EnqueueContext.
+	// mirrors service behavior post-fix) must not call EnqueueContext.
 	mockEnqueuer := &mockAsynqEnqueuer{}
 
 	// Verify: after a FVTPL approval (service correctly guarded by !isFVTPL),
@@ -378,7 +378,7 @@ func TestApprove_FVTPL_NoAsynqDispatch(t *testing.T) {
 
 	_ = penempatan.NewHandlerWithHooks(s)
 
-	// The stub did NOT call mockEnqueuer (simulating correct service behaviour post-fix).
+	// The stub did NOT call mockEnqueuer (simulating correct service behavior post-fix).
 	if mockEnqueuer.callCount.Load() != 0 {
 		t.Errorf("Asynq EnqueueContext called %d times for FVTPL approval, want 0",
 			mockEnqueuer.callCount.Load())
@@ -407,7 +407,7 @@ func TestApprove_AC_DispatchesApprovedEvent(t *testing.T) {
 	s := &stubHooks{}
 	jobID := "mock-eir-job-id"
 	s.approveFn = func(_ context.Context, _ uuid.UUID, _ penempatan.WorkflowActionRequest, _ *auth.Claims) (*penempatan.ApproveResult, error) {
-		// Simulate service behaviour for AC: EIR_COMPUTE enqueued, ApprovedEvent dispatched.
+		// Simulate service behavior for AC: EIR_COMPUTE enqueued, ApprovedEvent dispatched.
 		return &penempatan.ApproveResult{
 			Penempatan: &penempatan.Penempatan{
 				ID:                uuid.New(),
