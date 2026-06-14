@@ -182,6 +182,23 @@ const (
 	CodeCalcRunForbiddenNotMaker        Code = "CALC_RUN_FORBIDDEN_NOT_MAKER"        // 403 — cancel attempted by non-maker
 	CodeCalcRunSealed                   Code = "CALC_RUN_SEALED"                     // 423 — run is SEALED, immutable
 
+	// P5-M1 Penempatan Deposito codes (APP-B-PEN-001..014).
+	// Domain error codes — stable strings matching OpenAPI PenempatanErrorCode enum.
+	CodePenempatanInstrumenNotFound           Code = "PENEMPATAN_INSTRUMEN_NOT_FOUND"            // 404
+	CodePenempatanInstrumenInvalidKlasifikasi Code = "PENEMPATAN_INSTRUMEN_INVALID_KLASIFIKASI"  // 422
+	CodePenempatanTanggalInvalid              Code = "PENEMPATAN_TANGGAL_PENEMPATAN_INVALID"     // 422
+	CodePenempatanTenorInvalid                Code = "PENEMPATAN_TENOR_INVALID"                  // 422
+	CodePenempatanKuponInvalid                Code = "PENEMPATAN_KUPON_INVALID"                  // 422
+	CodePenempatanInvalidTransition           Code = "PENEMPATAN_INVALID_TRANSITION"             // 422
+	CodePenempatanSoDViolation                Code = "PENEMPATAN_SOD_VIOLATION"                  // 403
+	CodePenempatanStepUpRequired              Code = "PENEMPATAN_STEP_UP_REQUIRED"               // 403
+	CodePenempatanReasonTooShort              Code = "PENEMPATAN_REASON_TOO_SHORT"               // 422
+	CodePenempatanEditLocked                  Code = "PENEMPATAN_EDIT_LOCKED"                    // 422
+	CodePenempatanPeriodeHardClosed           Code = "PENEMPATAN_PERIODE_HARD_CLOSED"            // 423
+	CodePenempatanTerminateForbiddenNotActive Code = "PENEMPATAN_TERMINATE_FORBIDDEN_NOT_ACTIVE" // 422
+	CodePenempatanCalc2010                    Code = "ERR_CALC_2010"                             // 422 — EIR preview error
+	CodePenempatanNotFound                    Code = "PENEMPATAN_NOT_FOUND"                      // 404
+
 	// P4-M11 Roll-Forward CKPN codes (APP-C-M11-001..006).
 	// State machine: docs/state-machines/p4-m11-roll-forward.md §8.
 	CodeRollForwardPriorNotFound           Code = "ROLL_FORWARD_PRIOR_NOT_FOUND"           // 404 — priorCalcRunId not found
@@ -326,6 +343,20 @@ func (c Code) HTTPStatus() int {
 		CodeRollForwardScopeMismatch, CodeRollForwardInvalidCalcRunStatus,
 		CodeRollForwardInvalidPriorPeriod, CodeRollForwardMismatch:
 		return http.StatusUnprocessableEntity
+	// P5-M1 Penempatan Deposito codes.
+	case CodePenempatanInstrumenNotFound, CodePenempatanNotFound:
+		return http.StatusNotFound
+	case CodePenempatanInstrumenInvalidKlasifikasi, CodePenempatanTanggalInvalid,
+		CodePenempatanTenorInvalid, CodePenempatanKuponInvalid,
+		CodePenempatanInvalidTransition, CodePenempatanReasonTooShort,
+		CodePenempatanEditLocked, CodePenempatanTerminateForbiddenNotActive,
+		CodePenempatanCalc2010:
+		return http.StatusUnprocessableEntity
+	case CodePenempatanSoDViolation, CodePenempatanStepUpRequired:
+		return http.StatusForbidden
+	case CodePenempatanPeriodeHardClosed:
+		return 423 // Locked
+
 	case CodePeriodeClosed, CodeECLParamFrozen:
 		return 423 // Locked
 	case CodeRateLimited:

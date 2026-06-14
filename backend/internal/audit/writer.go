@@ -79,6 +79,25 @@ func (w *Writer) WithTx(tx *sql.Tx) *TxWriter {
 	return &TxWriter{tx: tx}
 }
 
+// Write menulis satu audit log event menggunakan koneksi DB terpisah (auto-commit).
+// Gunakan ini HANYA untuk best-effort security events (mis. SoD violation attempts)
+// yang harus bertahan bahkan saat transaksi bisnis di-rollback.
+// Untuk mutasi normal, selalu gunakan WithTx(tx).Write(...).
+func (w *Writer) Write(ctx context.Context, evt Event) error {
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("audit.Writer.Write: begin tx: %w", err)
+	}
+	if err = writeEvent(ctx, tx, evt); err != nil {
+		_ = tx.Rollback() //nolint:errcheck // rollback on error path, original error preferred
+		return fmt.Errorf("audit.Writer.Write: write event: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("audit.Writer.Write: commit: %w", err)
+	}
+	return nil
+}
+
 // Write menulis satu audit log event dalam transaksi.
 // ctx harus berisi JWT claims (dari auth.ContextWithClaims) dan trace ID.
 func (tw *TxWriter) Write(ctx context.Context, evt Event) error {

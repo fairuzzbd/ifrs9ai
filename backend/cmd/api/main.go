@@ -61,6 +61,8 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/ecl/lps"
 	"blips-ifrs9.tugu-re.com/internal/ecl/rollforward"
 	"blips-ifrs9.tugu-re.com/internal/ecl/staging"
+
+	"blips-ifrs9.tugu-re.com/internal/app-b/penempatan"
 )
 
 // version adalah versi service yang dilaporkan probe liveness.
@@ -783,6 +785,38 @@ func main() {
 	rfHandler := rollforward.NewHandler(rfSvc)
 	rollforward.RegisterRoutes(v1, rfHandler, jwtVerifier, db)
 
+	// -----------------------------------------------------------------------
+	// APP-B P5-M1 — Penempatan Deposito (4-eyes workflow, DEC-P5-M1-001..005)
+	// Endpoints (all under /api/v1/trx/penempatan-deposito/):
+	//   POST   /                          — ROLE-MAKER-TR create draft (Story 1)
+	//   GET    /                          — list (cursor, sort, filter) (Story 1)
+	//   GET    /:id                       — detail (Story 1)
+	//   PATCH  /:id                       — update draft (Story 1)
+	//   DELETE /:id                       — withdraw draft (Story 1)
+	//   POST   /:id/submit                — maker submits (Story 2)
+	//   POST   /:id/review               — reviewer signs (Story 2)
+	//   POST   /:id/approve              — approver signs + FVTPL guard + EIR dispatch (Story 2)
+	//   POST   /:id/reject               — reject to draft (Story 2)
+	//   POST   /:id/terminate            — terminate request (Story 3)
+	//   POST   /:id/terminate-review     — terminate reviewer signs (Story 3)
+	//   POST   /:id/terminate-approve    — terminate approver signs (Story 3)
+	//   POST   /:id/terminate-reject     — terminate reject (Story 3)
+	//   GET    /:id/eir-preview          — EIR amortization preview (Story 4)
+	//   GET    /:id/audit-timeline       — audit event timeline (Story 5)
+	//
+	// FVTPL guard (DEC-P5-M1-001): On Approve, if klasifikasi IN ('FVTPL','FVOCI_ELECTION')
+	//   → audit PENEMPATAN.STAGING_SKIPPED_FVTPL only; else INSERT ecl.stage_history +
+	//   audit PENEMPATAN.STAGING_INITIAL + dispatch EIR_COMPUTE task.
+	// Settlement balance hint (DEC-P5-M1-004): informational, never blocks.
+	// Terminate SoD (DEC-P5-M1-005): terminate_maker ≠ terminate_reviewer ≠ terminate_approver.
+	// Maturity cron: daily 02:00 WIB (0 19 * * * UTC) → auto-transition APPROVED_ACTIVE → MATURED.
+	// asynqClient nil → EIR_COMPUTE dispatch skipped gracefully in dev (no Redis).
+	// -----------------------------------------------------------------------
+	penRepo := penempatan.NewRepo(db)
+	penSvc := penempatan.NewService(penRepo, auditWriter, nil /* asynqClient: wired below */, logger)
+	penHandler := penempatan.NewHandler(penSvc)
+	penempatan.RegisterRoutes(v1, penHandler, jwtVerifier, db)
+
 	// B1 fix: Register DriftCronHandler on Asynq mux + scheduler.
 	// Previously the handler was instantiated then discarded (_ = ...), making the
 	// drift cron feature completely dead.  Now we:
@@ -808,6 +842,9 @@ func main() {
 		asynqMux.HandleFunc(rollforward.TaskRollForwardCompute, rfWorker.HandleComputeRollForward)
 		// lpsExpiryWorker will be registered here in Phase 5 worker binary.
 		// asynqMux.HandleFunc(lps.TaskExpiryCheck, lpsExpiryWorker.HandleExpiryCheck)
+		// P5-M1: penempatan deposito maturity check daily cron.
+		penMaturityWorker := penempatan.NewMaturityCheckHandler(penSvc, logger)
+		asynqMux.HandleFunc(penempatan.MaturityCheckTaskType, penMaturityWorker.ProcessTask)
 
 		// Asynq Server — pulls tasks from Redis queue and dispatches to mux.
 		asynqServer := asynq.NewServer(asynqRedisOpt, asynq.Config{
@@ -827,12 +864,18 @@ func main() {
 		if _, err := scheduler.Register("0 19 * * *", asynq.NewTask(eir.TaskDriftCron, nil)); err != nil {
 			log.Fatalf("register drift cron: %v", err)
 		}
+		// P5-M1: maturity check 02:00 WIB = 19:00 UTC previous day → use 19:00 UTC.
+		// Same slot as drift cron to avoid Redis schedule conflicts; asynq serializes by task type.
+		if _, err := scheduler.Register("0 19 * * *", penempatan.NewMaturityCheckTask("TUGURE")); err != nil {
+			log.Fatalf("register penempatan maturity cron: %v", err)
+		}
 		go func() {
 			if err := scheduler.Run(); err != nil {
 				log.Fatalf("asynq scheduler: %v", err)
 			}
 		}()
 		logger.Info("asynq drift cron registered", "schedule", "0 19 * * * UTC", "task", eir.TaskDriftCron)
+		logger.Info("asynq penempatan maturity cron registered", "schedule", "0 19 * * * UTC", "task", penempatan.MaturityCheckTaskType)
 	} else {
 		logger.Warn("REDIS_URL not set — Asynq drift cron NOT registered (dev mode)")
 	}
