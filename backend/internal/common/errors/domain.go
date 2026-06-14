@@ -213,6 +213,25 @@ const (
 	CodeRollForwardInvalidCalcRunStatus    Code = "ROLL_FORWARD_INVALID_CALC_RUN_STATUS"   // 422 — alias CURRENT_INVALID_STATE
 	CodeRollForwardInvalidPriorPeriod      Code = "ROLL_FORWARD_INVALID_PRIOR_PERIOD"      // 422 — alias PERIODE_MISMATCH
 	CodeRollForwardMismatch                Code = "ROLL_FORWARD_MISMATCH"                  // 422 — reconcile delta ≥ IDR 1.0000
+
+	// P5-M2 Jurnal Engine codes (APP-D-JRNL-001..016).
+	// State machine: docs/state-machines/p5-m2-jurnal-engine.md §6.
+	CodeJurnalEventNotMapped             Code = "JURNAL_EVENT_NOT_MAPPED"               // 422 — no APPROVED_ACTIVE mapping for eventCode
+	CodeJurnalKlasifikasiNotEligible     Code = "JURNAL_KLASIFIKASI_NOT_ELIGIBLE"       // 422 — instrument klasifikasi not in mapping.klasifikasi_berlaku
+	CodeJurnalBalanceInvariant           Code = "JURNAL_BALANCE_INVARIANT"              // 422 — Σ DEBIT ≠ Σ KREDIT
+	CodeJurnalPeriodeHardClosed          Code = "JURNAL_PERIODE_HARD_CLOSED"            // 423 — periode is hard-closed
+	CodeJurnalDuplicatePost              Code = "JURNAL_DUPLICATE_POST"                 // 409 — idempotency key already posted
+	CodeJurnalInvalidTransition          Code = "JURNAL_INVALID_TRANSITION"             // 422 — state machine reject
+	CodeJurnalSoDViolation               Code = "JURNAL_SOD_VIOLATION"                  // 403 — maker = approver (4-eyes SoD)
+	CodeJurnalStepUpRequired             Code = "JURNAL_STEP_UP_REQUIRED"               // 403 — step-up MFA missing for regulated approve
+	CodeJurnalAmountInvalid              Code = "JURNAL_AMOUNT_INVALID"                 // 422 — amountIdr ≤ 0 or missing
+	CodeJurnalInstrumenNotFound          Code = "JURNAL_INSTRUMEN_NOT_FOUND"            // 404 — instrumenId not in mst.instrumen
+	CodeJurnalHeaderNotFound             Code = "JURNAL_HEADER_NOT_FOUND"               // 404 — jrnl.header row not found
+	CodeJurnalDlqNotFound                Code = "JURNAL_DLQ_NOT_FOUND"                  // 404 — sys.dlq_jurnal_post row not found
+	CodeJurnalDlqAlreadyReplayed         Code = "JURNAL_DLQ_ALREADY_REPLAYED"           // 409 — DLQ entry already REPLAYED_OK or REPLAYING
+	CodeJurnalDlqDiscardReasonTooShort   Code = "JURNAL_DLQ_DISCARD_REASON_TOO_SHORT"   // 422 — discardReason < 30 chars
+	CodeJurnalDlqReplayPeriodeHardClosed Code = "JURNAL_DLQ_REPLAY_PERIODE_HARD_CLOSED" // 423 — replay target periode is hard-closed
+	CodeJurnalMappingWorkflowGate        Code = "JURNAL_MAPPING_WORKFLOW_GATE"          // 422 — mapping header not in APPROVED_ACTIVE for resolver
 )
 
 // HTTPStatus memetakan Code ke HTTP status code.
@@ -356,6 +375,20 @@ func (c Code) HTTPStatus() int {
 		return http.StatusForbidden
 	case CodePenempatanPeriodeHardClosed:
 		return 423 // Locked
+	// P5-M2 Jurnal Engine codes.
+	case CodeJurnalInstrumenNotFound, CodeJurnalHeaderNotFound, CodeJurnalDlqNotFound:
+		return http.StatusNotFound
+	case CodeJurnalDuplicatePost, CodeJurnalDlqAlreadyReplayed:
+		return http.StatusConflict
+	case CodeJurnalPeriodeHardClosed, CodeJurnalDlqReplayPeriodeHardClosed:
+		return 423 // Locked
+	case CodeJurnalSoDViolation, CodeJurnalStepUpRequired:
+		return http.StatusForbidden
+	case CodeJurnalEventNotMapped, CodeJurnalKlasifikasiNotEligible,
+		CodeJurnalBalanceInvariant, CodeJurnalInvalidTransition,
+		CodeJurnalAmountInvalid, CodeJurnalDlqDiscardReasonTooShort,
+		CodeJurnalMappingWorkflowGate:
+		return http.StatusUnprocessableEntity
 
 	case CodePeriodeClosed, CodeECLParamFrozen:
 		return 423 // Locked
