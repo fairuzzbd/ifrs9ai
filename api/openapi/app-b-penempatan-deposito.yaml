@@ -1,0 +1,2077 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-B Penempatan Deposito
+  version: "1.0.0"
+  description: |
+    Modul APP-B — Transaction Lifecycle: Penempatan Deposito (Phase 5, Module 1).
+    4-eyes workflow (Maker → Reviewer → Approver) + terminate 4-eyes.
+    Post-approve triggers: EIR initial schedule (async Asynq) + ECL Stage 1 (sync, in-tx).
+    FVTPL/FVOCI_ELECTION instruments: skip stage_history + skip EIR, audit STAGING_SKIPPED_FVTPL (DEC-P5-M1-001).
+
+    Performance SLA:
+      - POST create / PATCH edit:    ≤ 200 ms
+      - POST workflow transitions:   ≤ 300 ms
+      - POST approve / terminate-approve: ≤ 300 ms (+ async EIR job dispatch)
+      - GET list:                    ≤ 500 ms
+      - GET detail / audit-timeline: ≤ 300 ms
+
+    Depends on:
+      - Phase 3: mst.instrumen (APPROVED klasifikasi), mst.counterparty, mst.periode_buku, mst.mata_uang, doc.*
+      - Phase 4: ecl.eir_service, ecl.stage_history, ecl.amortisasi_schedule
+      - sys.settlement_account_balance (migration 000028 or 000028a — data-modeler)
+      - /api/v1/jobs/* (sys.job — Phase 2)
+
+    Related:
+      - DEC-P5-M1-001 (FVTPL staging skip)
+      - DEC-P5-M1-004 (settlement balance informational only)
+      - DEC-P5-M1-005 (terminate = 4-eyes)
+      - DEC-013 (EIR Newton-Raphson)
+      - DEC-017 (4-eyes SoD)
+      - DEC-021 (Idempotency-Key)
+      - DEC-022 (cursor pagination)
+
+servers:
+  - url: /api/v1
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: penempatan-deposito
+    description: Transaksi penempatan deposito / obligasi (APP-B lifecycle)
+  - name: penempatan-workflow
+    description: Workflow transitions — submit, review, approve, reject, withdraw
+  - name: penempatan-terminate
+    description: Terminate workflow (4-eyes per DEC-P5-M1-005)
+  - name: penempatan-query
+    description: List, detail, EIR preview, audit timeline
+
+paths:
+
+  # ---------------------------------------------------------------------------
+  # CREATE
+  # ---------------------------------------------------------------------------
+  /trx/penempatan-deposito:
+    post:
+      operationId: createPenempatanDeposito
+      summary: Buat penempatan deposito baru (DRAFT)
+      description: |
+        Maker membuat record penempatan dalam status DRAFT.
+        kode_transaksi digenerate server-side (format PNP-{YYYY}-{#####}).
+        tanggal_jatuh_tempo dihitung otomatis: tanggal_penempatan + tenor_bulan bulan.
+        Jika settlement_account diisi dan ada record di sys.settlement_account_balance,
+        response mengandung settlement_balance_hint (informational, DEC-P5-M1-004 — tidak memblok).
+        FCY: nominal_idr = nominal_fcy × kurs BI JISDOR per tanggal_penempatan.
+        Periode harus OPEN saat create.
+
+        Required permission: transaksi.create
+        Audit event: PENEMPATAN.CREATE (in-tx), PENEMPATAN.DOCUMENT_ATTACHED (per doc terlampir)
+      tags: [penempatan-deposito]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PenempatanCreateRequest"
+            example:
+              instrumenId: "550e8400-e29b-41d4-a716-446655440001"
+              counterpartyBankId: "550e8400-e29b-41d4-a716-446655440002"
+              periodeId: "550e8400-e29b-41d4-a716-446655440003"
+              tanggalPenempatan: "2026-06-14"
+              nominalIdr: 5000000000.0000
+              mataUangId: "550e8400-e29b-41d4-a716-446655440004"
+              tenorBulan: 12
+              kuponPersen: 0.05250000
+              biayaTransaksiIdr: 0.0000
+              nomorReferensiBankIn: "BCA/DEP/2026/001"
+              settlementAccount: "1234567890"
+              catatan: "Penempatan BCA sesuai RKAP 2026"
+              kontrakDocId: "550e8400-e29b-41d4-a716-446655440005"
+      responses:
+        "201":
+          description: Penempatan berhasil dibuat dalam status DRAFT
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/PenempatanDeposito"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  id: "660e8400-e29b-41d4-a716-446655441001"
+                  kodeTransaksi: "PNP-2026-00001"
+                  workflowStatus: "DRAFT"
+                  tanggalPenempatan: "2026-06-14"
+                  tanggalJatuhTempo: "2027-06-14"
+                  nominalIdr: 5000000000.0000
+                  kuponPersen: 0.05250000
+                  tenorBulan: 12
+                  eirAwal: null
+                  settlementBalanceHint:
+                    lastKnownIdr: 3000000000.0000
+                    asOfDate: "2026-06-13"
+                    isStale: false
+                    isSufficient: null
+                  makerId: "usr-001"
+                  createdAt: "2026-06-14T09:00:00+07:00"
+                  rowVersion: 1
+                meta:
+                  traceId: "01HXY001"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: |
+            Business rule validation gagal. Kemungkinan kode:
+            - PENEMPATAN_INSTRUMEN_NOT_FOUND — instrumen tidak ada atau deleted
+            - PENEMPATAN_INSTRUMEN_INVALID_KLASIFIKASI — klasifikasi instrumen belum APPROVED di mst.instrumen
+            - PENEMPATAN_TANGGAL_PENEMPATAN_INVALID — tanggal_penempatan > today
+            - PENEMPATAN_TENOR_INVALID — tenor_bulan ≤ 0
+            - PENEMPATAN_KUPON_INVALID — kupon_persen < 0
+            - PENEMPATAN_PERIODE_HARD_CLOSED — periode status bukan OPEN
+            - IDEMPOTENCY_MISMATCH — same key, payload berbeda
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "423":
+          description: Periode buku bukan OPEN (SOFT_CLOSED atau HARD_CLOSED)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: "PERIODE_CLOSED"
+                  message: "Periode buku Juni-2026 sudah di-close. Penempatan tidak dapat dibuat."
+                  details: []
+                  traceId: "01HXY002"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    # -------------------------------------------------------------------------
+    # LIST
+    # -------------------------------------------------------------------------
+    get:
+      operationId: listPenempatanDeposito
+      summary: List penempatan deposito (DataTable dengan sort + filter + paging + export)
+      description: |
+        Semua role dengan transaksi.read dapat akses. ROLE-MAKER-TR hanya melihat
+        milik unit kerjanya sendiri (server-enforced). ROLE-AUDIT dapat include_deleted=true.
+
+        Sort whitelist: kode_transaksi, tanggal_penempatan, nominal_idr, workflow_status,
+          kupon_persen, tanggal_jatuh_tempo, created_at (max 3 kolom).
+        Filter kolom: workflow_status (multi), counterparty_bank_id, tipe_instrumen (multi),
+          klasifikasi_psak71 (multi), tanggal_penempatan (between), periode_id, nominal_idr (gte/lte).
+
+        Export async jika row_count > 10.000 → return 202 + jobId (UX rule §3).
+        Export inline jika ≤ 10.000 row.
+
+        Audit event: PENEMPATAN.EXPORT (setiap export, termasuk filter aktif + row_count).
+
+        Required permission: transaksi.read
+      tags: [penempatan-query]
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Sort"
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/IncludeDeleted"
+        - name: "filter[workflow_status]"
+          in: query
+          required: false
+          schema:
+            type: string
+          description: >
+            Comma-separated enum values.
+            DRAFT | PENDING_REVIEW | PENDING_APPROVAL | APPROVED_ACTIVE |
+            TERMINATION_PENDING_REVIEW | TERMINATION_PENDING_APPROVAL |
+            TERMINATED | MATURED | CANCELLED
+          example: "PENDING_REVIEW,PENDING_APPROVAL"
+        - name: "filter[counterparty_bank_id]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Filter berdasarkan UUID counterparty bank
+        - name: "filter[tipe_instrumen]"
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Comma-separated: DEPOSITO,OBLIGASI,SAHAM,REKSADANA"
+          example: "DEPOSITO"
+        - name: "filter[klasifikasi_psak71]"
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Comma-separated: AC,FVOCI,FVTPL,FVOCI_ELECTION,POCI"
+          example: "AC,FVOCI"
+        - name: "filter[tanggal_penempatan]"
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Range format: between:2026-01-01,2026-06-30"
+          example: "between:2026-01-01,2026-06-30"
+        - name: "filter[periode_id]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Filter berdasarkan UUID periode buku
+        - name: "filter[nominal_idr]"
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Format: gte:1000000000 atau lte:50000000000"
+          example: "gte:1000000000"
+        - name: export
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [csv, xlsx]
+          description: "Jika diisi, response = file stream (inline ≤10k) atau 202+jobId (>10k)"
+      responses:
+        "200":
+          description: List penempatan deposito
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PenempatanDepositorListItem"
+                  pagination:
+                    $ref: "#/components/schemas/PaginationResponse"
+                  appliedSort:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        col:
+                          type: string
+                        dir:
+                          type: string
+                          enum: [asc, desc]
+                  appliedFilter:
+                    type: object
+                    additionalProperties: true
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "202":
+          description: Export async di-queue (dataset > 10k rows). Gunakan jobId untuk polling.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      jobId:
+                        type: string
+                      statusUrl:
+                        type: string
+                      streamUrl:
+                        type: string
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "400":
+          description: Query param tidak valid (misal kolom sort tidak di whitelist)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: "INVALID_SORT_COL"
+                  message: "Kolom 'maker_password_hash' tidak diizinkan untuk sort."
+                  details: []
+                  traceId: "01HXY003"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # DETAIL & PATCH
+  # ---------------------------------------------------------------------------
+  /trx/penempatan-deposito/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: UUID penempatan deposito (dari trx.penempatan_deposito.id)
+
+    get:
+      operationId: getPenempatanDeposito
+      summary: Detail penempatan deposito
+      description: |
+        Mengembalikan detail lengkap penempatan termasuk info workflow, dokumen terlampir,
+        dan summary EIR jika sudah dicompute. Semua role dengan transaksi.read bisa akses.
+        ROLE-AUDIT dapat lihat soft-deleted (dengan query param include_deleted=true).
+
+        Required permission: transaksi.read
+      tags: [penempatan-query]
+      responses:
+        "200":
+          description: Detail penempatan
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/PenempatanDeposito"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    patch:
+      operationId: updatePenempatanDeposito
+      summary: Edit penempatan DRAFT (maker owner only)
+      description: |
+        Hanya boleh jika workflow_status = DRAFT DAN current_user = maker_id.
+        row_version wajib dikirim untuk optimistic locking — jika mismatch → 409 CONFLICT.
+        Partial update: hanya field yang dikirim yang diupdate.
+        tanggal_jatuh_tempo dihitung ulang jika tanggal_penempatan atau tenor_bulan berubah.
+        EIR preview tidak otomatis recompute — user trigger manual via /eir-preview.
+
+        Required permission: transaksi.update
+        Audit event: PENEMPATAN.UPDATE (in-tx, dengan before_jsonb + after_jsonb)
+      tags: [penempatan-deposito]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PenempatanUpdateRequest"
+            example:
+              rowVersion: 1
+              nominalIdr: 6000000000.0000
+              kuponPersen: 0.05500000
+      responses:
+        "200":
+          description: Penempatan berhasil diupdate
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/PenempatanDeposito"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            FORBIDDEN — kemungkinan:
+            - Bukan maker_id pemilik penempatan
+            - Permission transaksi.update tidak ada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "409":
+          description: Optimistic lock conflict (row_version mismatch)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: "CONFLICT"
+                  message: "Data sudah diubah oleh user lain. Muat ulang halaman dan coba lagi."
+                  details: []
+                  traceId: "01HXY004"
+        "422":
+          description: |
+            Edit tidak diizinkan:
+            - PENEMPATAN_EDIT_LOCKED — workflow_status bukan DRAFT
+            - PENEMPATAN_TANGGAL_PENEMPATAN_INVALID — tanggal_penempatan > today
+            - PENEMPATAN_TENOR_INVALID — tenor_bulan ≤ 0
+            - PENEMPATAN_KUPON_INVALID — kupon_persen < 0
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: withdrawPenempatanDeposito
+      summary: Withdraw / batalkan penempatan DRAFT (maker only, soft-delete)
+      description: |
+        Hanya boleh jika workflow_status = DRAFT DAN current_user = maker_id.
+        Soft-delete: set deleted_at, deleted_by, workflow_status = CANCELLED.
+        TIDAK dapat di-resubmit setelah withdraw. Record tidak muncul di list default.
+        Confirmation dialog wajib di UI sebelum request ini dikirim.
+
+        Required permission: transaksi.delete
+        Audit event: PENEMPATAN.WITHDRAW (in-tx)
+      tags: [penempatan-workflow]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      responses:
+        "200":
+          description: Penempatan berhasil dibatalkan (CANCELLED)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      kodeTransaksi:
+                        type: string
+                      workflowStatus:
+                        type: string
+                        enum: [CANCELLED]
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: Tidak bisa withdraw — status bukan DRAFT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: "WORKFLOW_INVALID_TRANSITION"
+                  message: "Penempatan tidak bisa dibatalkan dari status PENDING_REVIEW. Minta reviewer reject terlebih dahulu."
+                  details: []
+                  traceId: "01HXY005"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # WORKFLOW — SUBMIT
+  # ---------------------------------------------------------------------------
+  /trx/penempatan-deposito/{id}/submit:
+    post:
+      operationId: submitPenempatanDeposito
+      summary: Submit penempatan ke review (DRAFT → PENDING_REVIEW)
+      description: |
+        Hanya maker_id pemilik yang boleh submit. Minimal 1 dokumen kontrak harus terlampir.
+        Periode masih OPEN saat submit.
+
+        Required permission: transaksi.submit
+        SoD: tidak berlaku di step ini (maker submit milik sendiri).
+        Audit event: PENEMPATAN.SUBMIT (in-tx)
+        Notifikasi ke ROLE-APPR-TR: "Penempatan {kode} menunggu review Anda" (in-app badge).
+      tags: [penempatan-workflow]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowActionRequest"
+            example:
+              comment: "Penempatan deposito BCA sesuai limit portofolio RKAP 2026"
+              signatureMethod: "JWT_STANDARD"
+      responses:
+        "200":
+          $ref: "#/components/responses/WorkflowTransitionSuccess"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: |
+            Gagal submit:
+            - WORKFLOW_INVALID_TRANSITION — status bukan DRAFT
+            - PENEMPATAN_PERIODE_HARD_CLOSED — periode sudah closed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # WORKFLOW — REVIEW
+  # ---------------------------------------------------------------------------
+  /trx/penempatan-deposito/{id}/review:
+    post:
+      operationId: reviewPenempatanDeposito
+      summary: Review penempatan (PENDING_REVIEW → PENDING_APPROVAL)
+      description: |
+        Reviewer (ROLE-APPR-TR) sign-off. SoD: current_user ≠ maker_id.
+        Menyimpan reviewer_id, reviewer_signed_at, reviewer_signature_hash.
+        signature_hash = SHA-256(reviewer_id || "REVIEW" || penempatan_id || signed_at || comment)
+
+        Required permission: transaksi.review
+        SoD enforced server-side: reviewer ≠ maker (DEC-017)
+        Audit event: PENEMPATAN.REVIEW (in-tx)
+        Notifikasi ke ROLE-APPR-TR senior (Treasury Manager): "Penempatan {kode} menunggu persetujuan Anda".
+      tags: [penempatan-workflow]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowActionRequest"
+            example:
+              comment: "Dokumen lengkap, nominal dan tenor sesuai limit portofolio"
+              signatureMethod: "JWT_STANDARD"
+      responses:
+        "200":
+          $ref: "#/components/responses/WorkflowTransitionSuccess"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            FORBIDDEN — kemungkinan:
+            - SOD_VIOLATION: reviewer = maker
+            - FORBIDDEN: tidak punya transaksi.review
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: "SOD_VIOLATION"
+                  message: "Anda tidak bisa menjadi reviewer untuk penempatan yang Anda buat sendiri (DEC-017)."
+                  details: []
+                  traceId: "01HXY006"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: WORKFLOW_INVALID_TRANSITION — status bukan PENDING_REVIEW
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # WORKFLOW — APPROVE
+  # ---------------------------------------------------------------------------
+  /trx/penempatan-deposito/{id}/approve:
+    post:
+      operationId: approvePenempatanDeposito
+      summary: Approve penempatan (PENDING_APPROVAL → APPROVED_ACTIVE)
+      description: |
+        Approver (ROLE-APPR-TR, Treasury Manager) final approval.
+        Step-up MFA wajib: X-Step-Up-Token harus valid (TTL ≤ 5 menit, DEC-027).
+        SoD: current_user ≠ maker_id AND current_user ≠ reviewer_id (DEC-017).
+        Periode harus masih OPEN saat approve (re-check).
+
+        Side-effects on approve (in-tx + async):
+          1. UPDATE workflow_status = APPROVED_ACTIVE, approver_id, approver_signed_at, approver_signature_hash
+          2. IF klasifikasi IN ('AC', 'FVOCI', 'POCI'):
+             - INSERT ecl.stage_history (Stage 1, trigger=INITIAL_PLACEMENT) [in-tx]
+             - audit PENEMPATAN.STAGING_INITIAL [in-tx]
+             - Enqueue Asynq EIR_COMPUTE job [async]
+          3. IF klasifikasi IN ('FVTPL', 'FVOCI_ELECTION'):
+             - Skip ecl.stage_history (DEC-P5-M1-001)
+             - audit PENEMPATAN.STAGING_SKIPPED_FVTPL [in-tx]
+             - Skip EIR compute
+          4. Emit PenempatanApprovedEvent (in-process, consumed by P5-M2 jurnal engine)
+          5. audit PENEMPATAN.APPROVE [in-tx]
+
+        Required permission: transaksi.approve
+        Required header: X-Step-Up-Token (MFA step-up per DEC-027)
+        Audit events: PENEMPATAN.APPROVE, PENEMPATAN.STAGING_INITIAL or PENEMPATAN.STAGING_SKIPPED_FVTPL
+      tags: [penempatan-workflow]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XStepUpTokenHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowActionRequest"
+            example:
+              comment: "Disetujui sesuai RKAP 2026 dan limit investasi portofolio"
+              signatureMethod: "JWT_STEP_UP"
+      responses:
+        "200":
+          description: Penempatan disetujui. EIR compute di-queue (async).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    allOf:
+                      - $ref: "#/components/schemas/PenempatanDeposito"
+                      - type: object
+                        properties:
+                          eirComputeJobId:
+                            type: string
+                            nullable: true
+                            description: "Job ID untuk EIR compute (null jika FVTPL/FVOCI_ELECTION — tidak dicompute)"
+                          stagingAction:
+                            type: string
+                            enum: [STAGE_1_ASSIGNED, SKIPPED_FVTPL]
+                            description: "Hasil staging decision (DEC-P5-M1-001)"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            FORBIDDEN — kemungkinan:
+            - SOD_VIOLATION: approver = maker atau approver = reviewer
+            - PENEMPATAN_STEP_UP_REQUIRED: X-Step-Up-Token missing atau expired (> 5 menit)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: "PENEMPATAN_STEP_UP_REQUIRED"
+                  message: "Persetujuan penempatan memerlukan MFA step-up. Silakan lakukan verifikasi MFA terlebih dahulu."
+                  details: []
+                  traceId: "01HXY007"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: |
+            Gagal approve:
+            - WORKFLOW_INVALID_TRANSITION — status bukan PENDING_APPROVAL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "423":
+          description: Periode buku sudah closed saat approve
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: "PERIODE_CLOSED"
+                  message: "Periode buku sudah di-close. Penempatan tidak dapat di-approve. Hubungi Finance Controller untuk re-open jika diperlukan."
+                  details: []
+                  traceId: "01HXY008"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # WORKFLOW — REJECT
+  # ---------------------------------------------------------------------------
+  /trx/penempatan-deposito/{id}/reject:
+    post:
+      operationId: rejectPenempatanDeposito
+      summary: Reject penempatan (PENDING_REVIEW atau PENDING_APPROVAL → DRAFT)
+      description: |
+        Reviewer atau Approver menolak. Status kembali ke DRAFT agar Maker bisa edit + resubmit.
+        reviewer_id di-reset (NULL) saat reject dari PENDING_APPROVAL agar cycle baru dimulai bersih.
+        reject_reason wajib ≥ 30 karakter.
+
+        Required permission: transaksi.reject (reviewer atau approver)
+        SoD: tidak berlaku di reject (hanya apply di approve)
+        Audit event: PENEMPATAN.REJECT (in-tx, dengan reject_reason)
+        Notifikasi ke maker: "Penempatan {kode} ditolak: {reason substring}"
+      tags: [penempatan-workflow]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RejectActionRequest"
+            example:
+              comment: "Nomor referensi bank tidak sesuai konfirmasi tertulis. Mohon perbaiki sesuai surat konfirmasi BCA tertanggal 2026-06-13."
+              signatureMethod: "JWT_STANDARD"
+      responses:
+        "200":
+          $ref: "#/components/responses/WorkflowTransitionSuccess"
+        "400":
+          description: reject_reason / comment terlalu pendek (< 30 chars)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: "VALIDATION_FAILED"
+                  message: "Alasan penolakan terlalu singkat."
+                  details:
+                    - field: "body.comment"
+                      rule: "minLength:30"
+                      message: "Alasan penolakan minimal 30 karakter"
+                  traceId: "01HXY009"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: WORKFLOW_INVALID_TRANSITION — status bukan PENDING_REVIEW atau PENDING_APPROVAL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # TERMINATE — REQUEST (APPROVED_ACTIVE → TERMINATION_PENDING_REVIEW)
+  # ---------------------------------------------------------------------------
+  /trx/penempatan-deposito/{id}/terminate:
+    post:
+      operationId: terminatePenempatanDeposito
+      summary: Propose terminasi dini (APPROVED_ACTIVE → TERMINATION_PENDING_REVIEW)
+      description: |
+        Maker (ROLE-MAKER-TR) mengajukan terminasi lebih awal (sebelum tanggal_jatuh_tempo).
+        terminate_reason wajib ≥ 30 karakter. Dokumen terminasi (dokumen_terminasi_id) disarankan.
+        Status berubah ke TERMINATION_PENDING_REVIEW.
+        4-eyes terminate per DEC-P5-M1-005.
+
+        Required permission: transaksi.terminate (atau transaksi.submit untuk terminate context)
+        Required state: APPROVED_ACTIVE
+        Audit event: PENEMPATAN.TERMINATE_PROPOSED (in-tx)
+        Notifikasi ke ROLE-APPR-TR: "Proposal terminasi {kode} menunggu review."
+      tags: [penempatan-terminate]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TerminateRequestBody"
+            example:
+              terminateReason: "Bank counterparty meminta pengembalian dana lebih awal karena restrukturisasi internal. Surat tertanggal 2026-11-30 terlampir."
+              dokumenTerminasiId: "doc-term-001"
+              signatureMethod: "JWT_STANDARD"
+      responses:
+        "200":
+          $ref: "#/components/responses/WorkflowTransitionSuccess"
+        "400":
+          description: terminate_reason < 30 karakter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: "VALIDATION_FAILED"
+                  message: "Alasan terminasi terlalu singkat."
+                  details:
+                    - field: "body.terminateReason"
+                      rule: "minLength:30"
+                      message: "Alasan terminasi minimal 30 karakter"
+                  traceId: "01HXY010"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: |
+            Gagal propose terminate:
+            - PENEMPATAN_TERMINATE_FORBIDDEN_NOT_ACTIVE — status bukan APPROVED_ACTIVE
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: "PENEMPATAN_TERMINATE_FORBIDDEN_NOT_ACTIVE"
+                  message: "Terminasi hanya bisa diajukan dari status APPROVED_ACTIVE. Status saat ini: MATURED."
+                  details: []
+                  traceId: "01HXY011"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # TERMINATE — REVIEW (TERMINATION_PENDING_REVIEW → TERMINATION_PENDING_APPROVAL)
+  # ---------------------------------------------------------------------------
+  /trx/penempatan-deposito/{id}/terminate-review:
+    post:
+      operationId: terminateReviewPenempatanDeposito
+      summary: Review proposal terminasi (TERMINATION_PENDING_REVIEW → TERMINATION_PENDING_APPROVAL)
+      description: |
+        Reviewer (ROLE-APPR-TR ≠ maker) sign-off terminasi.
+        SoD: current_user ≠ maker_id (terminate reviewer ≠ maker).
+        Menyimpan terminate_reviewer_id, terminate_reviewer_signed_at, terminate_reviewer_signature_hash.
+        signature_hash = SHA-256(reviewer_id || "TERMINATE_REVIEW" || penempatan_id || signed_at || comment)
+
+        Required permission: transaksi.review
+        SoD enforced server-side: terminate_reviewer ≠ maker (DEC-017)
+        Audit event: PENEMPATAN.TERMINATE_REVIEWED (in-tx)
+        Notifikasi ke ROLE-APPR-TR (Treasury Manager): "Proposal terminasi {kode} menunggu persetujuan akhir."
+      tags: [penempatan-terminate]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowActionRequest"
+            example:
+              comment: "Dokumen surat dari bank terlampir dan valid. Alasan termination sesuai prosedur internal."
+              signatureMethod: "JWT_STANDARD"
+      responses:
+        "200":
+          $ref: "#/components/responses/WorkflowTransitionSuccess"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: SOD_VIOLATION atau permission tidak ada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: "SOD_VIOLATION"
+                  message: "Maker tidak bisa menjadi reviewer untuk proposal terminasi yang diajukan sendiri."
+                  details: []
+                  traceId: "01HXY012"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: WORKFLOW_INVALID_TRANSITION — status bukan TERMINATION_PENDING_REVIEW
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # TERMINATE — APPROVE (TERMINATION_PENDING_APPROVAL → TERMINATED)
+  # ---------------------------------------------------------------------------
+  /trx/penempatan-deposito/{id}/terminate-approve:
+    post:
+      operationId: terminateApprovePenempatanDeposito
+      summary: Final approve terminasi (TERMINATION_PENDING_APPROVAL → TERMINATED)
+      description: |
+        Treasury Manager (ROLE-APPR-TR senior) final approval terminasi.
+        Step-up MFA wajib per DEC-027 (financial impact setara dengan approve origination).
+        SoD: current_user ≠ maker_id AND current_user ≠ terminate_reviewer_id.
+
+        Side-effects on terminate-approve (in-tx + async):
+          1. UPDATE workflow_status = TERMINATED, terminated_at = today, terminate_approver_id, ..._signed_at, ..._signature_hash
+          2. Emit PenempatanTerminatedEvent (in-process, consumed by P5-M9 derecognition)
+          3. audit PENEMPATAN.TERMINATE_APPROVED + PENEMPATAN.DERECOGNITION_QUEUED [in-tx]
+          4. Downstream event codes (event per DEC-P5-M1-002): EIR_CATCH_UP_ADJUSTMENT (code 4), ECL_REVERSAL (code 13 jika Stage 2/3), PENJUALAN_PENCAIRAN (code 16) — dikonsumsi P5-M2/M9
+
+        Required permission: transaksi.approve
+        Required header: X-Step-Up-Token (MFA step-up per DEC-027)
+        Audit events: PENEMPATAN.TERMINATE_APPROVED, PENEMPATAN.DERECOGNITION_QUEUED
+      tags: [penempatan-terminate]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XStepUpTokenHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowActionRequest"
+            example:
+              comment: "Disetujui sesuai memo Direktur Keuangan No. 123/2026"
+              signatureMethod: "JWT_STEP_UP"
+      responses:
+        "200":
+          description: Terminasi disetujui. Derecognition di-queue ke P5-M9.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/PenempatanDeposito"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: SOD_VIOLATION atau PENEMPATAN_STEP_UP_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: WORKFLOW_INVALID_TRANSITION — status bukan TERMINATION_PENDING_APPROVAL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # TERMINATE — REJECT (any terminate step → APPROVED_ACTIVE)
+  # ---------------------------------------------------------------------------
+  /trx/penempatan-deposito/{id}/terminate-reject:
+    post:
+      operationId: terminateRejectPenempatanDeposito
+      summary: Reject proposal terminasi (kembali ke APPROVED_ACTIVE)
+      description: |
+        Reviewer atau Approver menolak proposal terminasi. Instrumen kembali ke APPROVED_ACTIVE.
+        terminate_reviewer_id di-reset (NULL) untuk memungkinkan proposal terminate baru.
+        terminate_reason tetap tersimpan (audit trail only).
+        comment wajib ≥ 30 karakter.
+
+        Valid from states: TERMINATION_PENDING_REVIEW, TERMINATION_PENDING_APPROVAL
+        Required permission: transaksi.reject
+        Audit event: PENEMPATAN.TERMINATE_REJECTED (in-tx, dengan reject comment)
+        Notifikasi ke maker: "Proposal terminasi {kode} ditolak: {reason substring}"
+      tags: [penempatan-terminate]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RejectActionRequest"
+            example:
+              comment: "Dokumen surat dari bank tidak lengkap — cap resmi tidak ada. Mohon lengkapi dokumen pendukung sesuai prosedur."
+              signatureMethod: "JWT_STANDARD"
+      responses:
+        "200":
+          $ref: "#/components/responses/WorkflowTransitionSuccess"
+        "400":
+          description: comment < 30 karakter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: WORKFLOW_INVALID_TRANSITION — status bukan TERMINATION_PENDING_REVIEW atau TERMINATION_PENDING_APPROVAL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # EIR PREVIEW (GET, computed on-the-fly, tidak persist)
+  # ---------------------------------------------------------------------------
+  /trx/penempatan-deposito/{id}/eir-preview:
+    get:
+      operationId: eirPreviewPenempatanDeposito
+      summary: Preview kalkulasi EIR sebelum submit (Newton-Raphson, tidak persist)
+      description: |
+        Menghitung estimasi EIR dan preview 10 periode amortization schedule berdasarkan
+        data draft yang sudah tersimpan. Tidak menyimpan hasil ke DB.
+        Hanya owner draft (maker_id) yang bisa akses record sendiri.
+        Instrumen FVTPL/FVOCI_ELECTION: return info bahwa EIR tidak relevan (null eirAwal).
+
+        Required permission: transaksi.read (+ harus maker_id jika DRAFT)
+        Audit event: PENEMPATAN.EIR_PREVIEW (fire-and-forget, non-blocking)
+        Error: ERR_CALC_2010 jika field wajib belum terisi.
+      tags: [penempatan-query]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Hasil preview EIR
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/EirPreviewResult"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  eirAwal: 0.05250000
+                  carryingAmountAwal: 5000000000.0000
+                  periodePreview: 10
+                  info: null
+                  amortizationSchedule:
+                    - periode: 1
+                      tanggalAngsuran: "2026-07-14"
+                      angsuranBunga: 21875000.0000
+                      angsuranPokok: 0.0000
+                      carryingAmount: 5000000000.0000
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: |
+            Tidak bisa hitung EIR:
+            - ERR_CALC_2010 — field wajib (nominal_idr, kupon_persen, tenor_bulan) belum terisi
+            - EIR_NON_CONVERGENT — Newton-Raphson tidak konvergen (max 100 iter)
+            - EIR_INSTRUMEN_FVTPL_NO_EIR — informational (HTTP 200, bukan 422)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: "ERR_CALC_2010"
+                  message: "EIR tidak dapat dihitung: nominal_idr wajib diisi terlebih dahulu."
+                  details:
+                    - field: "nominalIdr"
+                      rule: "required"
+                  traceId: "01HXY013"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # AUDIT TIMELINE
+  # ---------------------------------------------------------------------------
+  /trx/penempatan-deposito/{id}/audit-timeline:
+    get:
+      operationId: auditTimelinePenempatanDeposito
+      summary: Audit event timeline per penempatan (immutable, hash-chain verified)
+      description: |
+        Read-only. Mengembalikan semua aud.audit_log row dengan entity_type = 'trx.penempatan_deposito'
+        dan entity_id = {id}, diurutkan event_time ASC.
+        ROLE-AUDIT: dapat semuanya termasuk before_jsonb, after_jsonb, ip.
+        ROLE-RISK, ROLE-AKUN-CTL: dapat events tanpa before_jsonb / after_jsonb / ip (privacy).
+        ROLE-MAKER-TR, ROLE-APPR-TR: FORBIDDEN (403) — audit trail bukan read untuk role operasional.
+        Response mengandung hash_chain_valid (dari DB verification job hasil terakhir).
+
+        Required permission: audit_log.read
+        No audit event untuk read-only action ini.
+      tags: [penempatan-query]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Audit timeline events
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AuditTimelineEvent"
+                  pagination:
+                    $ref: "#/components/schemas/PaginationResponse"
+                  hashChainValid:
+                    type: boolean
+                    nullable: true
+                    description: Hasil verifikasi hash chain (dari job harian). null jika belum pernah diverifikasi.
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+# =============================================================================
+# COMPONENTS
+# =============================================================================
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT RSA-2048 signed oleh Keycloak. Access token TTL 15 menit (DEC-025).
+        Claims: sub, roles[], permissions[], tenant_id, mfa_verified, exp.
+
+  # ---------------------------------------------------------------------------
+  # Parameters
+  # ---------------------------------------------------------------------------
+  parameters:
+    IdempotencyKeyHeader:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: UUID v4 unik per request mutating. TTL replay 24 jam (DEC-021).
+
+    XStepUpTokenHeader:
+      name: X-Step-Up-Token
+      in: header
+      required: true
+      schema:
+        type: string
+      description: Step-up MFA token dari POST /auth/step-up. TTL 5 menit (DEC-027).
+
+    XTraceIdHeader:
+      name: X-Trace-Id
+      in: header
+      required: false
+      schema:
+        type: string
+      description: Trace ID propagation. Gateway inject otomatis jika tidak ada.
+
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+      description: Opaque base64 cursor dari pagination.nextCursor (DEC-022).
+
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+      description: Jumlah item per halaman. Default 50, max 200.
+
+    Sort:
+      name: sort
+      in: query
+      required: false
+      schema:
+        type: string
+        pattern: "^[a-z_]+(:(asc|desc))?(,[a-z_]+(:(asc|desc))?)*$"
+      description: |
+        Multi-column sort. Format: col1:asc,col2:desc. Max 3 kolom.
+        Allowed: kode_transaksi, tanggal_penempatan, nominal_idr, workflow_status,
+          kupon_persen, tanggal_jatuh_tempo, created_at
+      example: "created_at:desc,nominal_idr:desc"
+
+    Search:
+      name: q
+      in: query
+      required: false
+      schema:
+        type: string
+        maxLength: 200
+      description: Text search global (kode_transaksi, nomor_referensi_bank).
+
+    IncludeDeleted:
+      name: include_deleted
+      in: query
+      required: false
+      schema:
+        type: boolean
+        default: false
+      description: Tampilkan soft-deleted records. Hanya ROLE-AUDIT yang diizinkan.
+
+  # ---------------------------------------------------------------------------
+  # Schemas
+  # ---------------------------------------------------------------------------
+  schemas:
+
+    ResponseMeta:
+      type: object
+      properties:
+        traceId:
+          type: string
+          example: "01HXY001"
+
+    PaginationResponse:
+      type: object
+      required: [nextCursor, hasMore]
+      properties:
+        nextCursor:
+          type: string
+          nullable: true
+          example: "eyJpZCI6IjAxSFhZLi4uIn0="
+        hasMore:
+          type: boolean
+        totalEstimate:
+          type: integer
+          nullable: true
+          description: Estimasi total (dari EXPLAIN, bukan COUNT pasti)
+        limit:
+          type: integer
+
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details, traceId]
+          properties:
+            code:
+              $ref: "#/components/schemas/PenempatanErrorCode"
+            message:
+              type: string
+              description: Human-readable, Bahasa Indonesia. Tidak expose stack trace.
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  rule:
+                    type: string
+                  message:
+                    type: string
+            traceId:
+              type: string
+
+    PenempatanErrorCode:
+      type: string
+      description: |
+        Stable error codes untuk APP-B P5-M1.
+        Kode global dari _common.yaml juga berlaku (VALIDATION_FAILED, UNAUTHORIZED, dll).
+      enum:
+        # Global (dari _common.yaml)
+        - VALIDATION_FAILED
+        - UNAUTHORIZED
+        - FORBIDDEN
+        - SOD_VIOLATION
+        - NOT_FOUND
+        - CONFLICT
+        - IDEMPOTENCY_REPLAY
+        - IDEMPOTENCY_MISMATCH
+        - WORKFLOW_INVALID_TRANSITION
+        - PERIODE_CLOSED
+        - RATE_LIMITED
+        - INTERNAL
+        - INVALID_SORT_COL
+        # APP-B P5-M1 domain-specific
+        - PENEMPATAN_INSTRUMEN_NOT_FOUND           # 404 — instrumen_id tidak ada atau soft-deleted
+        - PENEMPATAN_INSTRUMEN_INVALID_KLASIFIKASI # 422 — klasifikasi instrumen belum APPROVED
+        - PENEMPATAN_TANGGAL_PENEMPATAN_INVALID    # 422 — tanggal_penempatan > today
+        - PENEMPATAN_TENOR_INVALID                 # 422 — tenor_bulan ≤ 0
+        - PENEMPATAN_KUPON_INVALID                 # 422 — kupon_persen < 0
+        - PENEMPATAN_INVALID_TRANSITION            # 422 — alias WORKFLOW_INVALID_TRANSITION (domain-specific message)
+        - PENEMPATAN_SOD_VIOLATION                 # 403 — alias SOD_VIOLATION (domain context)
+        - PENEMPATAN_STEP_UP_REQUIRED              # 403 — X-Step-Up-Token missing atau expired (> 5 min)
+        - PENEMPATAN_REASON_TOO_SHORT              # 422 — reject/terminate reason < 30 chars
+        - PENEMPATAN_EDIT_LOCKED                   # 423 — workflow_status bukan DRAFT, tidak bisa edit
+        - PENEMPATAN_PERIODE_HARD_CLOSED           # 423 — periode bukan OPEN saat create/approve
+        - PENEMPATAN_TERMINATE_FORBIDDEN_NOT_ACTIVE # 422 — status bukan APPROVED_ACTIVE saat propose terminate
+        # EIR Preview
+        - ERR_CALC_2010                            # 422 — field wajib EIR belum terisi (preview only)
+
+    PenempatanWorkflowStatus:
+      type: string
+      description: |
+        Status lifecycle penempatan deposito.
+        Normal path: DRAFT → PENDING_REVIEW → PENDING_APPROVAL → APPROVED_ACTIVE → MATURED
+        Terminate path: APPROVED_ACTIVE → TERMINATION_PENDING_REVIEW → TERMINATION_PENDING_APPROVAL → TERMINATED
+        Error/cancel path: any → DRAFT (reject), DRAFT → CANCELLED (withdraw)
+      enum:
+        - DRAFT
+        - PENDING_REVIEW
+        - PENDING_APPROVAL
+        - APPROVED_ACTIVE
+        - TERMINATION_PENDING_REVIEW
+        - TERMINATION_PENDING_APPROVAL
+        - TERMINATED
+        - MATURED
+        - CANCELLED
+
+    KlasifikasiPSAK71:
+      type: string
+      enum: [AC, FVOCI, FVTPL, FVOCI_ELECTION, POCI]
+      description: |
+        Klasifikasi PSAK 71 instrumen. Harus sudah APPROVED di mst.instrumen.
+        FVTPL + FVOCI_ELECTION: skip ECL staging + skip EIR (DEC-P5-M1-001).
+        POCI: credit-adjusted EIR (CA-EIR solver Phase 4.5).
+
+    SettlementBalanceHint:
+      type: object
+      nullable: true
+      description: |
+        Informational hint dari sys.settlement_account_balance (DEC-P5-M1-004).
+        NULL jika tidak ada record untuk settlement_account yang diinput.
+        is_sufficient selalu NULL — tidak ada blocking check (Phase 5 informational only).
+      properties:
+        lastKnownIdr:
+          type: number
+          format: double
+          description: "Saldo terakhir yang diketahui (NUMERIC(20,4)), IDR"
+          example: 3000000000.0000
+        asOfDate:
+          type: string
+          format: date
+          description: Tanggal saldo tersebut tercatat
+          example: "2026-06-13"
+        isStale:
+          type: boolean
+          description: "true jika updated_at sys.settlement_account_balance > 24 jam dari sekarang"
+          example: false
+        isSufficient:
+          type: boolean
+          nullable: true
+          description: "Selalu NULL di Phase 5. Reserved untuk Phase 6 real-time GL check."
+          example: null
+
+    PenempatanCreateRequest:
+      type: object
+      required:
+        - instrumenId
+        - counterpartyBankId
+        - periodeId
+        - tanggalPenempatan
+        - mataUangId
+        - tenorBulan
+        - kuponPersen
+        - biayaTransaksiIdr
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+          description: FK mst.instrumen.id (harus APPROVED klasifikasi)
+        counterpartyBankId:
+          type: string
+          format: uuid
+          description: FK mst.counterparty.id (tipe bank, status AKTIF)
+        periodeId:
+          type: string
+          format: uuid
+          description: FK mst.periode_buku.id (harus OPEN saat create)
+        tanggalPenempatan:
+          type: string
+          format: date
+          description: "Tanggal penempatan. Harus ≤ today. ISO 8601 date-only."
+          example: "2026-06-14"
+        nominalIdr:
+          type: number
+          format: double
+          description: "Nominal IDR. NUMERIC(20,4). Jika FCY, dikosongkan — dihitung dari nominalFcy × kurs."
+          nullable: true
+          example: 5000000000.0000
+        nominalFcy:
+          type: number
+          format: double
+          description: "Nominal foreign currency. NUMERIC(20,4). Null jika IDR."
+          nullable: true
+          example: null
+        mataUangId:
+          type: string
+          format: uuid
+          description: FK mst.mata_uang.id
+        tenorBulan:
+          type: integer
+          minimum: 1
+          description: "Tenor dalam bulan. Harus > 0. tanggal_jatuh_tempo = tanggal_penempatan + tenor_bulan months."
+          example: 12
+        kuponPersen:
+          type: number
+          format: double
+          minimum: 0
+          description: "Kupon rate. NUMERIC(10,8). Harus ≥ 0."
+          example: 0.05250000
+        biayaTransaksiIdr:
+          type: number
+          format: double
+          minimum: 0
+          description: "Biaya transaksi IDR untuk EIR calc. NUMERIC(20,4). Default 0."
+          example: 0.0000
+        nomorReferensiBankIn:
+          type: string
+          maxLength: 100
+          nullable: true
+          description: Nomor referensi/konfirmasi dari bank counterparty
+          example: "BCA/DEP/2026/001"
+        settlementAccount:
+          type: string
+          maxLength: 50
+          nullable: true
+          description: "Nomor rekening settlement Tugure. Optional. Jika diisi, response mengandung settlement_balance_hint."
+          example: "1234567890"
+        catatan:
+          type: string
+          maxLength: 2000
+          nullable: true
+          description: Catatan bebas maker
+        kontrakDocId:
+          type: string
+          format: uuid
+          nullable: true
+          description: "doc.document.id — kontrak deposito. Dapat dilampirkan saat create atau sebelum submit."
+
+    PenempatanUpdateRequest:
+      type: object
+      required:
+        - rowVersion
+      description: |
+        Partial update. Hanya field yang dikirim yang diupdate.
+        rowVersion wajib untuk optimistic lock.
+        Hanya boleh jika workflow_status = DRAFT DAN current_user = maker_id.
+      properties:
+        rowVersion:
+          type: integer
+          description: Optimistic lock. Harus cocok dengan current row_version di DB.
+        tanggalPenempatan:
+          type: string
+          format: date
+          nullable: true
+        nominalIdr:
+          type: number
+          format: double
+          nullable: true
+        nominalFcy:
+          type: number
+          format: double
+          nullable: true
+        tenorBulan:
+          type: integer
+          minimum: 1
+          nullable: true
+        kuponPersen:
+          type: number
+          format: double
+          minimum: 0
+          nullable: true
+        biayaTransaksiIdr:
+          type: number
+          format: double
+          minimum: 0
+          nullable: true
+        nomorReferensiBankIn:
+          type: string
+          maxLength: 100
+          nullable: true
+        settlementAccount:
+          type: string
+          maxLength: 50
+          nullable: true
+        catatan:
+          type: string
+          maxLength: 2000
+          nullable: true
+        kontrakDocId:
+          type: string
+          format: uuid
+          nullable: true
+
+    WorkflowActionRequest:
+      type: object
+      required: [comment, signatureMethod]
+      properties:
+        comment:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: Komentar actor. Wajib ada. Untuk reject/terminate-reject minimum 30 chars.
+        signatureMethod:
+          type: string
+          enum: [JWT_STANDARD, JWT_STEP_UP]
+          description: "JWT_STEP_UP wajib untuk approve dan terminate-approve (DEC-027)."
+
+    RejectActionRequest:
+      type: object
+      required: [comment, signatureMethod]
+      properties:
+        comment:
+          type: string
+          minLength: 30
+          maxLength: 1000
+          description: "Alasan penolakan. Wajib ≥ 30 karakter (PENEMPATAN_REASON_TOO_SHORT jika kurang)."
+        signatureMethod:
+          type: string
+          enum: [JWT_STANDARD, JWT_STEP_UP]
+
+    TerminateRequestBody:
+      type: object
+      required: [terminateReason, signatureMethod]
+      properties:
+        terminateReason:
+          type: string
+          minLength: 30
+          maxLength: 2000
+          description: "Alasan terminasi dini. Wajib ≥ 30 karakter."
+        dokumenTerminasiId:
+          type: string
+          format: uuid
+          nullable: true
+          description: doc.document.id dokumen pendukung terminasi
+        signatureMethod:
+          type: string
+          enum: [JWT_STANDARD, JWT_STEP_UP]
+
+    PenempatanDeposito:
+      type: object
+      description: Full detail penempatan deposito
+      properties:
+        id:
+          type: string
+          format: uuid
+        kodeTransaksi:
+          type: string
+          description: "Auto-generated. Format: PNP-{YYYY}-{#####}"
+          example: "PNP-2026-00001"
+        instrumenId:
+          type: string
+          format: uuid
+        instrumenNama:
+          type: string
+          description: JOIN dari mst.instrumen.nama
+        klasifikasiPsak71:
+          $ref: "#/components/schemas/KlasifikasiPSAK71"
+        tipeInstrumen:
+          type: string
+          description: "Dari mst.instrumen.tipe_instrumen (DEPOSITO, OBLIGASI, dll)"
+        counterpartyBankId:
+          type: string
+          format: uuid
+        counterpartyBankNama:
+          type: string
+          description: JOIN dari mst.counterparty.nama
+        periodeId:
+          type: string
+          format: uuid
+        tanggalPenempatan:
+          type: string
+          format: date
+        tanggalJatuhTempo:
+          type: string
+          format: date
+          description: "Auto-computed: tanggal_penempatan + tenor_bulan months"
+        nominalIdr:
+          type: number
+          format: double
+          description: "IDR amount. NUMERIC(20,4)."
+        nominalFcy:
+          type: number
+          format: double
+          nullable: true
+        mataUangId:
+          type: string
+          format: uuid
+        kursPenempatan:
+          type: number
+          format: double
+          nullable: true
+          description: "BI JISDOR rate per tanggal_penempatan. NUMERIC(20,8). Null jika IDR."
+        tenorBulan:
+          type: integer
+        kuponPersen:
+          type: number
+          format: double
+          description: "NUMERIC(10,8)"
+        biayaTransaksiIdr:
+          type: number
+          format: double
+          description: "NUMERIC(20,4)"
+        eirAwal:
+          type: number
+          format: double
+          nullable: true
+          description: "EIR computed post-approve oleh Asynq EIR_COMPUTE job. NUMERIC(10,8). Null jika belum dihitung atau FVTPL/FVOCI_ELECTION."
+        carryingAmountAwal:
+          type: number
+          format: double
+          nullable: true
+          description: "= nominalIdr (sebelum amortisasi). NUMERIC(20,4). Di-set post EIR compute."
+        nomorReferensiBankIn:
+          type: string
+          nullable: true
+        settlementAccount:
+          type: string
+          nullable: true
+        settlementBalanceHint:
+          $ref: "#/components/schemas/SettlementBalanceHint"
+        workflowStatus:
+          $ref: "#/components/schemas/PenempatanWorkflowStatus"
+        makerId:
+          type: string
+          format: uuid
+        makerNama:
+          type: string
+          nullable: true
+        reviewerId:
+          type: string
+          format: uuid
+          nullable: true
+        reviewerNama:
+          type: string
+          nullable: true
+        approverId:
+          type: string
+          format: uuid
+          nullable: true
+        approverNama:
+          type: string
+          nullable: true
+        rejectReason:
+          type: string
+          nullable: true
+        reviewerSignedAt:
+          type: string
+          format: date-time
+          nullable: true
+        approverSignedAt:
+          type: string
+          format: date-time
+          nullable: true
+        reviewerSignatureHash:
+          type: string
+          nullable: true
+          description: SHA-256 hash penandatanganan reviewer
+        approverSignatureHash:
+          type: string
+          nullable: true
+          description: SHA-256 hash penandatanganan approver
+        terminateReason:
+          type: string
+          nullable: true
+        terminatedAt:
+          type: string
+          format: date
+          nullable: true
+        terminateReviewerId:
+          type: string
+          format: uuid
+          nullable: true
+        terminateApproverId:
+          type: string
+          format: uuid
+          nullable: true
+        terminateReviewerSignedAt:
+          type: string
+          format: date-time
+          nullable: true
+        terminateApproverSignedAt:
+          type: string
+          format: date-time
+          nullable: true
+        terminateReviewerSignatureHash:
+          type: string
+          nullable: true
+        terminateApproverSignatureHash:
+          type: string
+          nullable: true
+        matureAt:
+          type: string
+          format: date
+          nullable: true
+          description: Di-set oleh Asynq maturity-checker job
+        catatan:
+          type: string
+          nullable: true
+        kontrakDocId:
+          type: string
+          format: uuid
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        createdBy:
+          type: string
+          format: uuid
+        updatedAt:
+          type: string
+          format: date-time
+        updatedBy:
+          type: string
+          format: uuid
+        deletedAt:
+          type: string
+          format: date-time
+          nullable: true
+        rowVersion:
+          type: integer
+
+    PenempatanDepositorListItem:
+      type: object
+      description: Ringkasan item untuk list/DataTable view
+      properties:
+        id:
+          type: string
+          format: uuid
+        kodeTransaksi:
+          type: string
+        instrumenNama:
+          type: string
+        tipeInstrumen:
+          type: string
+        klasifikasiPsak71:
+          $ref: "#/components/schemas/KlasifikasiPSAK71"
+        counterpartyBankNama:
+          type: string
+        tanggalPenempatan:
+          type: string
+          format: date
+        tanggalJatuhTempo:
+          type: string
+          format: date
+        nominalIdr:
+          type: number
+          format: double
+        kuponPersen:
+          type: number
+          format: double
+        workflowStatus:
+          $ref: "#/components/schemas/PenempatanWorkflowStatus"
+        makerNama:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        deletedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    EirPreviewResult:
+      type: object
+      description: |
+        Hasil preview EIR (tidak dipersist). Newton-Raphson per DEC-013.
+        Jika instrumen FVTPL/FVOCI_ELECTION: eirAwal = null, info diisi, amortizationSchedule = [].
+      properties:
+        eirAwal:
+          type: number
+          format: double
+          nullable: true
+          description: "EIR result. NUMERIC(10,8). Null jika FVTPL/FVOCI_ELECTION."
+        carryingAmountAwal:
+          type: number
+          format: double
+          nullable: true
+          description: "Carrying amount awal. NUMERIC(20,4)."
+        periodePreview:
+          type: integer
+          default: 10
+          description: Jumlah periode yang ditampilkan (default 10)
+        info:
+          type: string
+          nullable: true
+          description: Pesan informatif (misal untuk FVTPL). Null jika normal.
+        amortizationSchedule:
+          type: array
+          items:
+            type: object
+            properties:
+              periode:
+                type: integer
+              tanggalAngsuran:
+                type: string
+                format: date
+              angsuranBunga:
+                type: number
+                format: double
+              angsuranPokok:
+                type: number
+                format: double
+              carryingAmount:
+                type: number
+                format: double
+
+    AuditTimelineEvent:
+      type: object
+      description: |
+        Satu event dari aud.audit_log.
+        before_jsonb + after_jsonb + ip: hanya tersedia untuk ROLE-AUDIT.
+        ROLE-RISK + ROLE-AKUN-CTL: event_time, action, actor_name, actor_role saja.
+      properties:
+        eventId:
+          type: string
+          format: uuid
+        eventTime:
+          type: string
+          format: date-time
+        action:
+          type: string
+          description: |
+            Event codes yang mungkin:
+            PENEMPATAN.CREATED, PENEMPATAN.DOCUMENT_ATTACHED, PENEMPATAN.UPDATED,
+            PENEMPATAN.SUBMITTED, PENEMPATAN.REVIEWED, PENEMPATAN.APPROVED,
+            PENEMPATAN.REJECTED, PENEMPATAN.WITHDRAWN,
+            PENEMPATAN.STAGING_INITIAL, PENEMPATAN.STAGING_SKIPPED_FVTPL,
+            PENEMPATAN.EIR_COMPUTED, PENEMPATAN.EIR_PREVIEW,
+            PENEMPATAN.MATURED, PENEMPATAN.DERECOGNITION_QUEUED,
+            PENEMPATAN.TERMINATE_PROPOSED, PENEMPATAN.TERMINATE_REVIEWED,
+            PENEMPATAN.TERMINATE_APPROVED, PENEMPATAN.TERMINATE_REJECTED,
+            PENEMPATAN.EXPORT
+          example: "PENEMPATAN.APPROVE"
+        actorUserId:
+          type: string
+          format: uuid
+        actorNama:
+          type: string
+          description: JOIN dari sec.user.nama (display name)
+        actorRole:
+          type: string
+          example: "ROLE-APPR-TR"
+        beforeJsonb:
+          type: object
+          nullable: true
+          description: State sebelum mutasi. Null untuk CREATE. Hanya ROLE-AUDIT.
+        afterJsonb:
+          type: object
+          nullable: true
+          description: State sesudah mutasi. Null untuk DELETE. Hanya ROLE-AUDIT.
+        ip:
+          type: string
+          nullable: true
+          description: IP address actor. Hanya ROLE-AUDIT.
+        traceId:
+          type: string
+          nullable: true
+        currentHash:
+          type: string
+          nullable: true
+          description: SHA-256 hash chain value dari audit_log row
+
+  # ---------------------------------------------------------------------------
+  # Responses (reusable)
+  # ---------------------------------------------------------------------------
+  responses:
+    ValidationFailed:
+      description: Validasi field atau cross-field gagal
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: "VALIDATION_FAILED"
+              message: "3 field tidak valid"
+              details:
+                - field: "body.tenorBulan"
+                  rule: "min:1"
+                  message: "Tenor harus > 0 bulan"
+              traceId: "01HXY001"
+
+    Unauthorized:
+      description: JWT tidak valid, missing, atau expired
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: "UNAUTHORIZED"
+              message: "Token JWT tidak valid atau sudah expired."
+              details: []
+              traceId: "01HXY001"
+
+    Forbidden:
+      description: Permission tidak terpenuhi atau akses ditolak
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: "FORBIDDEN"
+              message: "Anda tidak memiliki permission transaksi.create"
+              details: []
+              traceId: "01HXY001"
+
+    NotFound:
+      description: Entity tidak ditemukan
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: "NOT_FOUND"
+              message: "Penempatan tidak ditemukan"
+              details: []
+              traceId: "01HXY001"
+
+    RateLimited:
+      description: Too many requests
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: "RATE_LIMITED"
+              message: "Terlalu banyak request. Coba lagi dalam 60 detik."
+              details: []
+              traceId: "01HXY001"
+
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: "INTERNAL"
+              message: "Terjadi kesalahan internal. Hubungi admin dengan traceId."
+              details: []
+              traceId: "01HXY001"
+
+    WorkflowTransitionSuccess:
+      description: Workflow transition berhasil
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data, meta]
+            properties:
+              data:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  kodeTransaksi:
+                    type: string
+                  workflowStatus:
+                    $ref: "#/components/schemas/PenempatanWorkflowStatus"
+                  updatedAt:
+                    type: string
+                    format: date-time
+                  rowVersion:
+                    type: integer
+              meta:
+                $ref: "#/components/schemas/ResponseMeta"

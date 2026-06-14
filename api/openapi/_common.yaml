@@ -353,6 +353,20 @@ components:
         - ROLL_FORWARD_SCOPE_MISMATCH           # 422 — scope run partial vs all-active tidak kompatibel untuk roll-forward
         - ROLL_FORWARD_INVALID_CALC_RUN_STATUS  # 422 — currentCalcRunId berstatus DRAFT (alias untuk current_invalid_state, UI-facing)
         - ROLL_FORWARD_INVALID_PRIOR_PERIOD     # 422 — priorCalcRunId dari periode yang sama atau lebih baru (alias periode_mismatch, UI-facing)
+        # APP-B P5-M1 — Penempatan Deposito
+        - PENEMPATAN_INSTRUMEN_NOT_FOUND           # 404 — instrumen_id tidak ada atau soft-deleted
+        - PENEMPATAN_INSTRUMEN_INVALID_KLASIFIKASI # 422 — klasifikasi instrumen belum APPROVED di mst.instrumen
+        - PENEMPATAN_TANGGAL_PENEMPATAN_INVALID    # 422 — tanggal_penempatan > today
+        - PENEMPATAN_TENOR_INVALID                 # 422 — tenor_bulan <= 0
+        - PENEMPATAN_KUPON_INVALID                 # 422 — kupon_persen < 0
+        - PENEMPATAN_INVALID_TRANSITION            # 422 — alias WORKFLOW_INVALID_TRANSITION (penempatan domain)
+        - PENEMPATAN_SOD_VIOLATION                 # 403 — SoD violation pada create atau terminate workflow
+        - PENEMPATAN_STEP_UP_REQUIRED              # 403 — X-Step-Up-Token missing atau expired pada /approve atau /terminate-approve
+        - PENEMPATAN_REASON_TOO_SHORT              # 422 — reject atau terminate reason < 30 chars
+        - PENEMPATAN_EDIT_LOCKED                   # 423 — PATCH pada workflow_status bukan DRAFT
+        - PENEMPATAN_PERIODE_HARD_CLOSED           # 423 — periode bukan OPEN saat create atau approve
+        - PENEMPATAN_TERMINATE_FORBIDDEN_NOT_ACTIVE # 422 — /terminate pada status bukan APPROVED_ACTIVE
+        - ERR_CALC_2010                            # 422 — field wajib EIR belum terisi (preview only)
 
     # ---- Timestamps -------------------------------------------------------
     TimestampISO:
