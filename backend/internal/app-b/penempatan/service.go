@@ -212,7 +212,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, claims *auth.Cl
 		hint, hintErr := s.repo.GetSettlementBalanceHint(ctx, *p.SettlementAccount, claims.TenantID)
 		if hintErr != nil {
 			s.logger.WarnContext(ctx, "settlement balance hint lookup failed (non-blocking)",
-				"error", hintErr, "settlement_account", *p.SettlementAccount)
+				"error", hintErr, "settlement_account_hash", sha256hex(*p.SettlementAccount))
 		} else {
 			p.SettlementBalanceHint = hint
 		}
