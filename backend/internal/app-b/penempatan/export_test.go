@@ -36,11 +36,6 @@ func RegisterRoutesForTest(rg *gin.RouterGroup, h *Handler) {
 	}
 }
 
-// stubServiceImpl wraps the stubService from the test file (passed as ServiceIface).
-type stubServiceImpl struct {
-	impl ServiceIface
-}
-
 // StubService adapter that satisfies ServiceIface and delegates to the test stub.
 // stubHolder is defined in handler_test.go within the test package.
 // We need a bridge since the test file is in package penempatan_test but ServiceIface

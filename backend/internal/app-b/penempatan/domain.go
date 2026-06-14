@@ -24,6 +24,7 @@ import (
 // Mirrors the DB enum trx.penempatan_workflow_status (migration 000033).
 type Status string
 
+// Workflow status constants mirroring trx.penempatan_workflow_status DB enum.
 const (
 	StatusDraft                       Status = "DRAFT"
 	StatusPendingReview               Status = "PENDING_REVIEW"
@@ -79,6 +80,7 @@ func (s Status) CanTerminateReject() bool {
 
 // ─── Permission constants ──────────────────────────────────────────────────────
 
+// Permission strings used in JWT claims and server-side authorization checks.
 const (
 	PermTransaksiCreate    = "transaksi.create"
 	PermTransaksiRead      = "transaksi.read"
@@ -96,6 +98,7 @@ const (
 // ─── Error code constants ──────────────────────────────────────────────────────
 // Stable error codes (OpenAPI PenempatanErrorCode enum, app-b-penempatan-deposito.yaml).
 
+// Domain-level error codes returned in API error envelopes.
 const (
 	ErrCodeInstrumenNotFound             = "PENEMPATAN_INSTRUMEN_NOT_FOUND"
 	ErrCodeInstrumenInvalidKlasifikasi   = "PENEMPATAN_INSTRUMEN_INVALID_KLASIFIKASI"
@@ -315,8 +318,8 @@ const EIRComputeTaskType = "eir:compute_initial"
 // MaturityCheckTaskType is the Asynq cron task type for daily maturity scan.
 const MaturityCheckTaskType = "penempatan:maturity_check"
 
-// PenempatanApprovedEvent is the downstream event emitted on approve (consumed by P5-M2).
-type PenempatanApprovedEvent struct {
+// ApprovedEvent is the downstream event emitted on approve (consumed by P5-M2).
+type ApprovedEvent struct {
 	InstrumenID        uuid.UUID        `json:"instrumenId"`
 	PenempatanID       uuid.UUID        `json:"penempatanId"`
 	KodeTransaksi      string           `json:"kodeTransaksi"`
@@ -351,8 +354,8 @@ type EIRComputePayload struct {
 	TenantID          string         `json:"tenantId"`
 }
 
-// PenempatanMaturedEvent is emitted by the Asynq maturity-checker cron (consumed by P5-M9).
-type PenempatanMaturedEvent struct {
+// MaturedEvent is emitted by the Asynq maturity-checker cron (consumed by P5-M9).
+type MaturedEvent struct {
 	InstrumenID       uuid.UUID        `json:"instrumenId"`
 	PenempatanID      uuid.UUID        `json:"penempatanId"`
 	KodeTransaksi     string           `json:"kodeTransaksi"`
@@ -366,8 +369,8 @@ type PenempatanMaturedEvent struct {
 	TenantID          string           `json:"tenantId"`
 }
 
-// PenempatanTerminatedEvent is emitted on terminate-approve (consumed by P5-M9).
-type PenempatanTerminatedEvent struct {
+// TerminatedEvent is emitted on terminate-approve (consumed by P5-M9).
+type TerminatedEvent struct {
 	InstrumenID            uuid.UUID        `json:"instrumenId"`
 	PenempatanID           uuid.UUID        `json:"penempatanId"`
 	KodeTransaksi          string           `json:"kodeTransaksi"`

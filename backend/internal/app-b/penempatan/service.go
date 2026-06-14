@@ -115,12 +115,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, claims *auth.Cl
 	if err != nil {
 		return nil, fmt.Errorf("penempatan.Service.Create: begin tx: %w", err)
 	}
-	var txCommitted bool
-	defer func() {
-		if !txCommitted {
-			_ = tx.Rollback()
-		}
-	}()
+	defer rollbackTx(ctx, tx, s.logger)
 
 	open, err := s.repo.IsPeriodeOpen(ctx, tx, req.PeriodeID)
 	if err != nil {
@@ -199,7 +194,6 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, claims *auth.Cl
 	if err = tx.Commit(); err != nil {
 		return nil, fmt.Errorf("penempatan.Service.Create: commit: %w", err)
 	}
-	txCommitted = true
 
 	// Settlement balance hint — informational, non-blocking (DEC-P5-M1-004).
 	if p.SettlementAccount != nil && *p.SettlementAccount != "" {
@@ -221,6 +215,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, claims *auth.Cl
 
 // ─── Update (DRAFT) ──────────────────────────────────────────────────────────
 
+// Update applies PATCH fields to a DRAFT penempatan (optimistic lock via row_version).
 func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest, claims *auth.Claims) (*Penempatan, error) {
 	actorID, err := uuid.Parse(claims.Sub)
 	if err != nil {
@@ -231,12 +226,7 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest, c
 	if err != nil {
 		return nil, fmt.Errorf("penempatan.Service.Update: begin tx: %w", err)
 	}
-	var txCommitted bool
-	defer func() {
-		if !txCommitted {
-			_ = tx.Rollback()
-		}
-	}()
+	defer rollbackTx(ctx, tx, s.logger)
 
 	p, err := s.repo.GetForUpdate(ctx, tx, id, claims.TenantID)
 	if err != nil {
@@ -303,13 +293,13 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest, c
 	if err = tx.Commit(); err != nil {
 		return nil, fmt.Errorf("penempatan.Service.Update: commit: %w", err)
 	}
-	txCommitted = true
 
 	return s.repo.Get(ctx, id, claims.TenantID)
 }
 
 // ─── Withdraw ────────────────────────────────────────────────────────────────
 
+// Withdraw soft-deletes a DRAFT penempatan (sets workflow_status = CANCELLED).
 func (s *Service) Withdraw(ctx context.Context, id uuid.UUID, claims *auth.Claims) error {
 	actorID, err := uuid.Parse(claims.Sub)
 	if err != nil {
@@ -320,12 +310,7 @@ func (s *Service) Withdraw(ctx context.Context, id uuid.UUID, claims *auth.Claim
 	if err != nil {
 		return fmt.Errorf("penempatan.Service.Withdraw: begin tx: %w", err)
 	}
-	var txCommitted bool
-	defer func() {
-		if !txCommitted {
-			_ = tx.Rollback()
-		}
-	}()
+	defer rollbackTx(ctx, tx, s.logger)
 
 	p, err := s.repo.GetForUpdate(ctx, tx, id, claims.TenantID)
 	if err != nil {
@@ -365,12 +350,12 @@ func (s *Service) Withdraw(ctx context.Context, id uuid.UUID, claims *auth.Claim
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("penempatan.Service.Withdraw: commit: %w", err)
 	}
-	txCommitted = true
 	return nil
 }
 
 // ─── Submit ──────────────────────────────────────────────────────────────────
 
+// Submit transitions a DRAFT penempatan to PENDING_REVIEW (maker action).
 func (s *Service) Submit(ctx context.Context, id uuid.UUID, req WorkflowActionRequest, claims *auth.Claims) (*Penempatan, error) {
 	actorID, err := uuid.Parse(claims.Sub)
 	if err != nil {
@@ -381,12 +366,7 @@ func (s *Service) Submit(ctx context.Context, id uuid.UUID, req WorkflowActionRe
 	if err != nil {
 		return nil, fmt.Errorf("penempatan.Service.Submit: begin tx: %w", err)
 	}
-	var txCommitted bool
-	defer func() {
-		if !txCommitted {
-			_ = tx.Rollback()
-		}
-	}()
+	defer rollbackTx(ctx, tx, s.logger)
 
 	p, err := s.repo.GetForUpdate(ctx, tx, id, claims.TenantID)
 	if err != nil {
@@ -432,13 +412,13 @@ func (s *Service) Submit(ctx context.Context, id uuid.UUID, req WorkflowActionRe
 	if err = tx.Commit(); err != nil {
 		return nil, fmt.Errorf("penempatan.Service.Submit: commit: %w", err)
 	}
-	txCommitted = true
 
 	return s.repo.Get(ctx, id, claims.TenantID)
 }
 
 // ─── Review ──────────────────────────────────────────────────────────────────
 
+// Review transitions PENDING_REVIEW → PENDING_APPROVAL and stores reviewer signature.
 func (s *Service) Review(ctx context.Context, id uuid.UUID, req WorkflowActionRequest, claims *auth.Claims) (*Penempatan, error) {
 	actorID, err := uuid.Parse(claims.Sub)
 	if err != nil {
@@ -449,12 +429,7 @@ func (s *Service) Review(ctx context.Context, id uuid.UUID, req WorkflowActionRe
 	if err != nil {
 		return nil, fmt.Errorf("penempatan.Service.Review: begin tx: %w", err)
 	}
-	var txCommitted bool
-	defer func() {
-		if !txCommitted {
-			_ = tx.Rollback()
-		}
-	}()
+	defer rollbackTx(ctx, tx, s.logger)
 
 	p, err := s.repo.GetForUpdate(ctx, tx, id, claims.TenantID)
 	if err != nil {
@@ -499,7 +474,6 @@ func (s *Service) Review(ctx context.Context, id uuid.UUID, req WorkflowActionRe
 	if err = tx.Commit(); err != nil {
 		return nil, fmt.Errorf("penempatan.Service.Review: commit: %w", err)
 	}
-	txCommitted = true
 
 	return s.repo.Get(ctx, id, claims.TenantID)
 }
@@ -513,6 +487,7 @@ type ApproveResult struct {
 	EIRComputeJobID *string // nil for FVTPL/FVOCI_ELECTION
 }
 
+// Approve transitions a penempatan from PENDING_APPROVAL to APPROVED_ACTIVE (approver signs off).
 func (s *Service) Approve(ctx context.Context, id uuid.UUID, req WorkflowActionRequest, claims *auth.Claims) (*ApproveResult, error) {
 	if claims.NeedsStepUp() {
 		return nil, domainerrors.New(domainerrors.Code(ErrCodeStepUpRequired),
@@ -528,12 +503,7 @@ func (s *Service) Approve(ctx context.Context, id uuid.UUID, req WorkflowActionR
 	if err != nil {
 		return nil, fmt.Errorf("penempatan.Service.Approve: begin tx: %w", err)
 	}
-	var txCommitted bool
-	defer func() {
-		if !txCommitted {
-			_ = tx.Rollback()
-		}
-	}()
+	defer rollbackTx(ctx, tx, s.logger)
 
 	p, err := s.repo.GetForUpdate(ctx, tx, id, claims.TenantID)
 	if err != nil {
@@ -627,7 +597,6 @@ func (s *Service) Approve(ctx context.Context, id uuid.UUID, req WorkflowActionR
 	if err = tx.Commit(); err != nil {
 		return nil, fmt.Errorf("penempatan.Service.Approve: commit: %w", err)
 	}
-	txCommitted = true
 
 	var eirJobID *string
 	if s.asynqClient != nil {
@@ -645,16 +614,20 @@ func (s *Service) Approve(ctx context.Context, id uuid.UUID, req WorkflowActionR
 				PeriodeID:         p.PeriodeID,
 				TenantID:          claims.TenantID,
 			}
-			payloadBytes, _ := json.Marshal(payload)
-			info, enqErr := s.asynqClient.EnqueueContext(ctx, asynq.NewTask(EIRComputeTaskType, payloadBytes))
-			if enqErr != nil {
-				s.logger.WarnContext(ctx, "EIR_COMPUTE enqueue failed (non-blocking)", "error", enqErr, "penempatan_id", id)
-			} else if info != nil {
-				eirJobID = &info.ID
+			payloadBytes, marshalErr := json.Marshal(payload)
+			if marshalErr != nil {
+				s.logger.WarnContext(ctx, "EIR_COMPUTE payload marshal failed (non-blocking)", "error", marshalErr, "penempatan_id", id)
+			} else {
+				info, enqErr := s.asynqClient.EnqueueContext(ctx, asynq.NewTask(EIRComputeTaskType, payloadBytes))
+				if enqErr != nil {
+					s.logger.WarnContext(ctx, "EIR_COMPUTE enqueue failed (non-blocking)", "error", enqErr, "penempatan_id", id)
+				} else if info != nil {
+					eirJobID = &info.ID
+				}
 			}
 		}
 
-		approvedEvt := PenempatanApprovedEvent{
+		approvedEvt := ApprovedEvent{
 			InstrumenID:       p.InstrumenID,
 			PenempatanID:      id,
 			KodeTransaksi:     p.KodeTransaksi,
@@ -672,9 +645,11 @@ func (s *Service) Approve(ctx context.Context, id uuid.UUID, req WorkflowActionR
 			EventTime:         now,
 			TenantID:          claims.TenantID,
 		}
-		approvedBytes, _ := json.Marshal(approvedEvt)
-		if _, enqErr2 := s.asynqClient.EnqueueContext(ctx, asynq.NewTask(PenempatanApprovedTaskType, approvedBytes)); enqErr2 != nil {
-			s.logger.WarnContext(ctx, "PenempatanApprovedEvent enqueue failed (non-blocking)", "error", enqErr2)
+		approvedBytes, marshalErr2 := json.Marshal(approvedEvt)
+		if marshalErr2 != nil {
+			s.logger.WarnContext(ctx, "ApprovedEvent marshal failed (non-blocking)", "error", marshalErr2)
+		} else if _, enqErr2 := s.asynqClient.EnqueueContext(ctx, asynq.NewTask(PenempatanApprovedTaskType, approvedBytes)); enqErr2 != nil {
+			s.logger.WarnContext(ctx, "ApprovedEvent enqueue failed (non-blocking)", "error", enqErr2)
 		}
 	}
 
@@ -694,6 +669,7 @@ func (s *Service) Approve(ctx context.Context, id uuid.UUID, req WorkflowActionR
 
 // ─── Reject ──────────────────────────────────────────────────────────────────
 
+// Reject resets a PENDING_REVIEW or PENDING_APPROVAL penempatan back to DRAFT.
 func (s *Service) Reject(ctx context.Context, id uuid.UUID, req RejectActionRequest, claims *auth.Claims) (*Penempatan, error) {
 	actorID, err := uuid.Parse(claims.Sub)
 	if err != nil {
@@ -704,12 +680,7 @@ func (s *Service) Reject(ctx context.Context, id uuid.UUID, req RejectActionRequ
 	if err != nil {
 		return nil, fmt.Errorf("penempatan.Service.Reject: begin tx: %w", err)
 	}
-	var txCommitted bool
-	defer func() {
-		if !txCommitted {
-			_ = tx.Rollback()
-		}
-	}()
+	defer rollbackTx(ctx, tx, s.logger)
 
 	p, err := s.repo.GetForUpdate(ctx, tx, id, claims.TenantID)
 	if err != nil {
@@ -748,13 +719,13 @@ func (s *Service) Reject(ctx context.Context, id uuid.UUID, req RejectActionRequ
 	if err = tx.Commit(); err != nil {
 		return nil, fmt.Errorf("penempatan.Service.Reject: commit: %w", err)
 	}
-	txCommitted = true
 
 	return s.repo.Get(ctx, id, claims.TenantID)
 }
 
 // ─── TerminateRequest ────────────────────────────────────────────────────────
 
+// TerminateRequest proposes early termination of an APPROVED_ACTIVE penempatan (4-eyes).
 func (s *Service) TerminateRequest(ctx context.Context, id uuid.UUID, req TerminateRequestBody, claims *auth.Claims) (*Penempatan, error) {
 	actorID, err := uuid.Parse(claims.Sub)
 	if err != nil {
@@ -765,12 +736,7 @@ func (s *Service) TerminateRequest(ctx context.Context, id uuid.UUID, req Termin
 	if err != nil {
 		return nil, fmt.Errorf("penempatan.Service.TerminateRequest: begin tx: %w", err)
 	}
-	var txCommitted bool
-	defer func() {
-		if !txCommitted {
-			_ = tx.Rollback()
-		}
-	}()
+	defer rollbackTx(ctx, tx, s.logger)
 
 	p, err := s.repo.GetForUpdate(ctx, tx, id, claims.TenantID)
 	if err != nil {
@@ -806,13 +772,13 @@ func (s *Service) TerminateRequest(ctx context.Context, id uuid.UUID, req Termin
 	if err = tx.Commit(); err != nil {
 		return nil, fmt.Errorf("penempatan.Service.TerminateRequest: commit: %w", err)
 	}
-	txCommitted = true
 
 	return s.repo.Get(ctx, id, claims.TenantID)
 }
 
 // ─── TerminateReview ─────────────────────────────────────────────────────────
 
+// TerminateReview signs the termination proposal (reviewer step, SoD enforced).
 func (s *Service) TerminateReview(ctx context.Context, id uuid.UUID, req WorkflowActionRequest, claims *auth.Claims) (*Penempatan, error) {
 	actorID, err := uuid.Parse(claims.Sub)
 	if err != nil {
@@ -823,12 +789,7 @@ func (s *Service) TerminateReview(ctx context.Context, id uuid.UUID, req Workflo
 	if err != nil {
 		return nil, fmt.Errorf("penempatan.Service.TerminateReview: begin tx: %w", err)
 	}
-	var txCommitted bool
-	defer func() {
-		if !txCommitted {
-			_ = tx.Rollback()
-		}
-	}()
+	defer rollbackTx(ctx, tx, s.logger)
 
 	p, err := s.repo.GetForUpdate(ctx, tx, id, claims.TenantID)
 	if err != nil {
@@ -873,13 +834,13 @@ func (s *Service) TerminateReview(ctx context.Context, id uuid.UUID, req Workflo
 	if err = tx.Commit(); err != nil {
 		return nil, fmt.Errorf("penempatan.Service.TerminateReview: commit: %w", err)
 	}
-	txCommitted = true
 
 	return s.repo.Get(ctx, id, claims.TenantID)
 }
 
 // ─── TerminateApprove ────────────────────────────────────────────────────────
 
+// TerminateApprove finalizes early termination and emits TerminatedEvent (MFA step-up required).
 func (s *Service) TerminateApprove(ctx context.Context, id uuid.UUID, req WorkflowActionRequest, claims *auth.Claims) (*Penempatan, error) {
 	if claims.NeedsStepUp() {
 		return nil, domainerrors.New(domainerrors.Code(ErrCodeStepUpRequired), "Persetujuan terminasi memerlukan MFA step-up.")
@@ -894,12 +855,7 @@ func (s *Service) TerminateApprove(ctx context.Context, id uuid.UUID, req Workfl
 	if err != nil {
 		return nil, fmt.Errorf("penempatan.Service.TerminateApprove: begin tx: %w", err)
 	}
-	var txCommitted bool
-	defer func() {
-		if !txCommitted {
-			_ = tx.Rollback()
-		}
-	}()
+	defer rollbackTx(ctx, tx, s.logger)
 
 	p, err := s.repo.GetForUpdate(ctx, tx, id, claims.TenantID)
 	if err != nil {
@@ -956,10 +912,9 @@ func (s *Service) TerminateApprove(ctx context.Context, id uuid.UUID, req Workfl
 	if err = tx.Commit(); err != nil {
 		return nil, fmt.Errorf("penempatan.Service.TerminateApprove: commit: %w", err)
 	}
-	txCommitted = true
 
 	if s.asynqClient != nil {
-		terminatedEvt := PenempatanTerminatedEvent{
+		terminatedEvt := TerminatedEvent{
 			InstrumenID:   p.InstrumenID,
 			PenempatanID:  id,
 			KodeTransaksi: p.KodeTransaksi,
@@ -973,13 +928,17 @@ func (s *Service) TerminateApprove(ctx context.Context, id uuid.UUID, req Workfl
 		if p.TerminateRequestReason != nil {
 			terminatedEvt.TerminateReason = *p.TerminateRequestReason
 		}
-		instr, _ := s.repo.GetInstrumenInfo(ctx, p.InstrumenID)
-		if instr != nil {
+		instr, instrErr := s.repo.GetInstrumenInfo(ctx, p.InstrumenID)
+		if instrErr != nil {
+			s.logger.WarnContext(ctx, "TerminateApprove: get instrumen info failed (non-blocking)", "error", instrErr, "instrumen_id", p.InstrumenID)
+		} else if instr != nil {
 			terminatedEvt.KlasifikasiPSAK71 = instr.KlasifikasiPSAK71
 		}
-		evtBytes, _ := json.Marshal(terminatedEvt)
-		if _, enqErr := s.asynqClient.EnqueueContext(ctx, asynq.NewTask(PenempatanTerminatedTaskType, evtBytes)); enqErr != nil {
-			s.logger.WarnContext(ctx, "PenempatanTerminatedEvent enqueue failed (non-blocking)", "error", enqErr)
+		evtBytes, marshalErr := json.Marshal(terminatedEvt)
+		if marshalErr != nil {
+			s.logger.WarnContext(ctx, "TerminatedEvent marshal failed (non-blocking)", "error", marshalErr)
+		} else if _, enqErr := s.asynqClient.EnqueueContext(ctx, asynq.NewTask(PenempatanTerminatedTaskType, evtBytes)); enqErr != nil {
+			s.logger.WarnContext(ctx, "TerminatedEvent enqueue failed (non-blocking)", "error", enqErr)
 		}
 	}
 
@@ -988,6 +947,7 @@ func (s *Service) TerminateApprove(ctx context.Context, id uuid.UUID, req Workfl
 
 // ─── TerminateReject ──────────────────────────────────────────────────────────
 
+// TerminateReject cancels the termination proposal, returning the penempatan to APPROVED_ACTIVE.
 func (s *Service) TerminateReject(ctx context.Context, id uuid.UUID, req RejectActionRequest, claims *auth.Claims) (*Penempatan, error) {
 	actorID, err := uuid.Parse(claims.Sub)
 	if err != nil {
@@ -998,12 +958,7 @@ func (s *Service) TerminateReject(ctx context.Context, id uuid.UUID, req RejectA
 	if err != nil {
 		return nil, fmt.Errorf("penempatan.Service.TerminateReject: begin tx: %w", err)
 	}
-	var txCommitted bool
-	defer func() {
-		if !txCommitted {
-			_ = tx.Rollback()
-		}
-	}()
+	defer rollbackTx(ctx, tx, s.logger)
 
 	p, err := s.repo.GetForUpdate(ctx, tx, id, claims.TenantID)
 	if err != nil {
@@ -1041,13 +996,13 @@ func (s *Service) TerminateReject(ctx context.Context, id uuid.UUID, req RejectA
 	if err = tx.Commit(); err != nil {
 		return nil, fmt.Errorf("penempatan.Service.TerminateReject: commit: %w", err)
 	}
-	txCommitted = true
 
 	return s.repo.Get(ctx, id, claims.TenantID)
 }
 
 // ─── GetByID ──────────────────────────────────────────────────────────────────
 
+// GetByID loads a single penempatan by ID, populating the settlement balance hint.
 func (s *Service) GetByID(ctx context.Context, id uuid.UUID, claims *auth.Claims) (*Penempatan, error) {
 	p, err := s.repo.Get(ctx, id, claims.TenantID)
 	if err != nil {
@@ -1069,12 +1024,14 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID, claims *auth.Claims
 
 // ─── List ─────────────────────────────────────────────────────────────────────
 
+// List returns a cursor-paginated, filterable list of penempatan for the DataTable.
 func (s *Service) List(ctx context.Context, q listquery.Query, includeDeleted bool, claims *auth.Claims) (ListResult, error) {
 	return s.repo.List(ctx, q, includeDeleted, claims.TenantID)
 }
 
 // ─── EIRPreview ───────────────────────────────────────────────────────────────
 
+// EIRPreview returns a simplified EIR amortization preview (full solver delegated to P4-M5).
 func (s *Service) EIRPreview(ctx context.Context, id uuid.UUID, claims *auth.Claims) (*EIRPreviewResult, error) {
 	p, err := s.repo.Get(ctx, id, claims.TenantID)
 	if err != nil {
@@ -1144,6 +1101,7 @@ func (s *Service) EIRPreview(ctx context.Context, id uuid.UUID, claims *auth.Cla
 
 // ─── AuditTimeline ────────────────────────────────────────────────────────────
 
+// AuditTimeline returns the audit trail for a penempatan (before/after redacted for non-AUDIT roles).
 func (s *Service) AuditTimeline(ctx context.Context, id uuid.UUID, claims *auth.Claims) ([]AuditTimelineEvent, error) {
 	p, err := s.repo.Get(ctx, id, claims.TenantID)
 	if err != nil {
@@ -1158,6 +1116,7 @@ func (s *Service) AuditTimeline(ctx context.Context, id uuid.UUID, claims *auth.
 
 // ─── ProcessMaturity ─────────────────────────────────────────────────────────
 
+// ProcessMaturity transitions APPROVED_ACTIVE instruments with jatuh_tempo ≤ asOfDate to MATURED.
 func (s *Service) ProcessMaturity(ctx context.Context, asOfDate time.Time, tenantID string) (int, error) {
 	systemActorID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 
@@ -1167,8 +1126,9 @@ func (s *Service) ProcessMaturity(ctx context.Context, asOfDate time.Time, tenan
 	}
 
 	maturedCount := 0
-	for _, p := range maturing {
-		if mErr := s.processOneMature(ctx, p, systemActorID, tenantID); mErr != nil {
+	for i := range maturing {
+		p := &maturing[i]
+		if mErr := s.processOneMature(ctx, *p, systemActorID, tenantID); mErr != nil {
 			s.logger.ErrorContext(ctx, "maturity processing failed", "penempatan_id", p.ID, "error", mErr)
 			continue
 		}
@@ -1178,25 +1138,19 @@ func (s *Service) ProcessMaturity(ctx context.Context, asOfDate time.Time, tenan
 	return maturedCount, nil
 }
 
-func (s *Service) processOneMature(ctx context.Context, p Penempatan, systemActorID uuid.UUID, tenantID string) (retErr error) {
+func (s *Service) processOneMature(ctx context.Context, p Penempatan, systemActorID uuid.UUID, tenantID string) error {
 	tx, err := s.repo.BeginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("processOneMature begin tx: %w", err)
 	}
-	var txCommitted bool
-	defer func() {
-		if !txCommitted {
-			_ = tx.Rollback()
-		}
-	}()
+	defer rollbackTx(ctx, tx, s.logger)
 
 	current, err := s.repo.GetForUpdate(ctx, tx, p.ID, tenantID)
 	if err != nil {
 		return fmt.Errorf("processOneMature re-check: %w", err)
 	}
 	if current == nil || current.WorkflowStatus != StatusApprovedActive {
-		_ = tx.Rollback()
-		txCommitted = true
+		// Nothing to do; defer rollbackTx will clean up the idle tx.
 		return nil
 	}
 
@@ -1235,10 +1189,9 @@ func (s *Service) processOneMature(ctx context.Context, p Penempatan, systemActo
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("processOneMature commit: %w", err)
 	}
-	txCommitted = true
 
 	if s.asynqClient != nil {
-		maturedEvt := PenempatanMaturedEvent{
+		maturedEvt := MaturedEvent{
 			InstrumenID:       p.InstrumenID,
 			PenempatanID:      p.ID,
 			KodeTransaksi:     p.KodeTransaksi,
@@ -1251,9 +1204,11 @@ func (s *Service) processOneMature(ctx context.Context, p Penempatan, systemActo
 			EventTime:         now,
 			TenantID:          tenantID,
 		}
-		evtBytes, _ := json.Marshal(maturedEvt)
-		if _, enqErr := s.asynqClient.EnqueueContext(ctx, asynq.NewTask(PenempatanMaturedTaskType, evtBytes)); enqErr != nil {
-			s.logger.WarnContext(ctx, "PenempatanMaturedEvent enqueue failed", "error", enqErr, "id", p.ID)
+		evtBytes, marshalErr := json.Marshal(maturedEvt)
+		if marshalErr != nil {
+			s.logger.WarnContext(ctx, "MaturedEvent marshal failed (non-blocking)", "error", marshalErr, "id", p.ID)
+		} else if _, enqErr := s.asynqClient.EnqueueContext(ctx, asynq.NewTask(PenempatanMaturedTaskType, evtBytes)); enqErr != nil {
+			s.logger.WarnContext(ctx, "MaturedEvent enqueue failed", "error", enqErr, "id", p.ID)
 		}
 	}
 
@@ -1272,5 +1227,13 @@ func computeSignatureHash(userID uuid.UUID, step string, entityID uuid.UUID, sig
 	return h.Sum(nil)
 }
 
-// keep database/sql used for *sql.Tx parameters in repo calls
-var _ = sql.ErrNoRows
+// rollbackTx rolls back a transaction, logging any error at WARN level.
+// Mirrors the pattern in internal/ecl/calcrun/service.go.
+func rollbackTx(ctx context.Context, tx *sql.Tx, logger *slog.Logger) {
+	if err := tx.Rollback(); err != nil && err != sql.ErrTxDone {
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.WarnContext(ctx, "penempatan: tx rollback error", "error", err)
+	}
+}

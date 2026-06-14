@@ -94,6 +94,10 @@ func NewMaturityCheckTask(tenantID string) *asynq.Task {
 		TenantID: tenantID,
 		// AsOfDate empty = today UTC
 	}
-	b, _ := json.Marshal(payload)
+	b, err := json.Marshal(payload)
+	if err != nil {
+		// MaturityCheckPayload has no unexportable fields; marshal failure is a programming error.
+		panic(fmt.Sprintf("penempatan.NewMaturityCheckTask: json.Marshal: %v", err))
+	}
 	return asynq.NewTask(MaturityCheckTaskType, b)
 }

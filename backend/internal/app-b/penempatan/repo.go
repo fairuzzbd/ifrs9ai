@@ -208,7 +208,7 @@ func (r *Repo) Get(ctx context.Context, id uuid.UUID, tenantID string) (*Penempa
 	}
 
 	// Re-scan numeric fields with proper types.
-	_ = r.db.QueryRowContext(ctx, `
+	if scanErr := r.db.QueryRowContext(ctx, `
 		SELECT
 			p.nominal_idr, p.nominal_fcy, p.kurs_penempatan,
 			p.kupon_persen, p.biaya_transaksi_idr,
@@ -219,11 +219,15 @@ func (r *Repo) Get(ctx context.Context, id uuid.UUID, tenantID string) (*Penempa
 		&p.KuponPersen, &p.BiayaTransaksiIDR,
 		&p.EIRAwal, &p.CarryingAmountAwal, &p.RealizedGainLossIDR,
 		(*string)(nil),
-	)
+	); scanErr != nil && scanErr != sql.ErrNoRows {
+		return nil, fmt.Errorf("penempatan.Repo.Get: rescan numeric: %w", scanErr)
+	}
 
 	// Re-read status properly.
 	var statusStr string
-	_ = r.db.QueryRowContext(ctx, `SELECT workflow_status::text FROM trx.penempatan_deposito WHERE id=$1`, id).Scan(&statusStr)
+	if scanErr := r.db.QueryRowContext(ctx, `SELECT workflow_status::text FROM trx.penempatan_deposito WHERE id=$1`, id).Scan(&statusStr); scanErr != nil && scanErr != sql.ErrNoRows {
+		return nil, fmt.Errorf("penempatan.Repo.Get: rescan status: %w", scanErr)
+	}
 	p.WorkflowStatus = Status(statusStr)
 
 	parseOptUUID := func(s *string) *uuid.UUID {
@@ -389,7 +393,10 @@ func (r *Repo) UpdateDraft(ctx context.Context, tx *sql.Tx, id uuid.UUID, req Up
 	argIdx := 3
 
 	if req.TanggalPenempatan != nil {
-		t, _ := time.Parse("2006-01-02", *req.TanggalPenempatan)
+		t, parseErr := time.Parse("2006-01-02", *req.TanggalPenempatan)
+		if parseErr != nil {
+			return 0, fmt.Errorf("penempatan.Repo.UpdateDraft: parse tanggal_penempatan: %w", parseErr)
+		}
 		setClauses = append(setClauses, fmt.Sprintf("tanggal_penempatan = $%d", argIdx))
 		args = append(args, t)
 		argIdx++
@@ -446,7 +453,7 @@ func (r *Repo) UpdateDraft(ctx context.Context, tx *sql.Tx, id uuid.UUID, req Up
 	idxVer := argIdx + 1
 	idxTen := argIdx + 2
 
-	query := fmt.Sprintf(
+	query := fmt.Sprintf( //nolint:gosec // set-clause cols come from hardcoded setClauses slice (validated allowlist), not user input
 		`UPDATE trx.penempatan_deposito SET %s WHERE id = $%d AND row_version = $%d AND tenant_id = $%d AND workflow_status = 'DRAFT'::trx.penempatan_workflow_status`,
 		strings.Join(setClauses, ", "), idxID, idxVer, idxTen,
 	)
@@ -455,7 +462,10 @@ func (r *Repo) UpdateDraft(ctx context.Context, tx *sql.Tx, id uuid.UUID, req Up
 	if err != nil {
 		return 0, fmt.Errorf("penempatan.Repo.UpdateDraft: %w", err)
 	}
-	rows, _ := result.RowsAffected()
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("penempatan.Repo.UpdateDraft: rows affected: %w", err)
+	}
 	return rows, nil
 }
 
@@ -606,8 +616,8 @@ func (r *Repo) List(ctx context.Context, q listquery.Query, includeDeleted bool,
 	limit := 50
 	// Note: cursor-based pagination — simplified implementation without offset
 	// Full implementation would decode cursor to get last_id + last_value for keyset pagination.
-	query := fmt.Sprintf(`
-		SELECT
+	query := fmt.Sprintf( //nolint:gosec // whereClause built from validated allowlist cols; orderBy from same whitelist; limit is int literal
+		`SELECT
 			p.id, p.kode_transaksi, p.workflow_status::text,
 			p.nominal_idr, p.tanggal_penempatan, p.tanggal_jatuh_tempo,
 			p.kupon_persen, p.tenor_bulan,
@@ -626,7 +636,7 @@ func (r *Repo) List(ctx context.Context, q listquery.Query, includeDeleted bool,
 	if err != nil {
 		return ListResult{}, fmt.Errorf("penempatan.Repo.List: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // rows.Close error is non-actionable on read queries
 
 	var items []ListItem
 	for rows.Next() {
@@ -659,17 +669,23 @@ func (r *Repo) List(ctx context.Context, q listquery.Query, includeDeleted bool,
 	var nextCursor *string
 	if hasMore && len(items) > 0 {
 		last := items[len(items)-1]
-		cursorData, _ := json.Marshal(map[string]any{
+		cursorData, cursorErr := json.Marshal(map[string]any{
 			"id":         last.ID.String(),
 			"created_at": last.CreatedAt.Unix(),
 		})
+		if cursorErr != nil {
+			return ListResult{}, fmt.Errorf("penempatan.Repo.List: cursor marshal: %w", cursorErr)
+		}
 		encoded := base64.StdEncoding.EncodeToString(cursorData)
 		nextCursor = &encoded
 	}
 
 	// Estimate total via fast count (without full scan for large tables)
 	var totalEst int64
-	_ = r.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM trx.penempatan_deposito p %s`, whereClause), args...).Scan(&totalEst)
+	// Best-effort count estimate; ignore error (non-critical, returns 0 on failure).
+	if countErr := r.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM trx.penempatan_deposito p %s`, whereClause), args...).Scan(&totalEst); countErr != nil { //nolint:gosec // whereClause from validated allowlist
+		totalEst = 0
+	}
 
 	return ListResult{
 		Items:      items,
@@ -701,7 +717,7 @@ func (r *Repo) GetMaturingInstruments(ctx context.Context, asOfDate time.Time, t
 	if err != nil {
 		return nil, fmt.Errorf("penempatan.Repo.GetMaturingInstruments: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // rows.Close error is non-actionable on read queries
 
 	var result []Penempatan
 	for rows.Next() {
@@ -876,7 +892,7 @@ func (r *Repo) GetAuditTimeline(ctx context.Context, id uuid.UUID, includePayloa
 	if err != nil {
 		return nil, fmt.Errorf("penempatan.Repo.GetAuditTimeline: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // rows.Close error is non-actionable on read queries
 
 	var events []AuditTimelineEvent
 	for rows.Next() {

@@ -52,6 +52,7 @@ func toSortApplied(sorts []map[string]string) []response.SortApplied {
 
 // ─── Create ──────────────────────────────────────────────────────────────────
 
+// CreatePenempatan handles POST /trx/penempatan-deposito.
 func (h *Handler) CreatePenempatan(c *gin.Context) {
 	claims := claimsFromCtx(c)
 	if claims == nil {
@@ -79,6 +80,7 @@ func (h *Handler) CreatePenempatan(c *gin.Context) {
 
 // ─── List ─────────────────────────────────────────────────────────────────────
 
+// ListPenempatan handles GET /trx/penempatan-deposito (DataTable: sort+filter+cursor).
 func (h *Handler) ListPenempatan(c *gin.Context) {
 	claims := claimsFromCtx(c)
 	if claims == nil {
@@ -104,7 +106,7 @@ func (h *Handler) ListPenempatan(c *gin.Context) {
 		return
 	}
 
-	var totalEst int64 = result.TotalEst
+	totalEst := result.TotalEst
 	pagination := &response.PaginationMeta{
 		NextCursor:    result.NextCursor,
 		HasMore:       result.HasMore,
@@ -116,6 +118,7 @@ func (h *Handler) ListPenempatan(c *gin.Context) {
 
 // ─── GetByID ──────────────────────────────────────────────────────────────────
 
+// GetPenempatan handles GET /trx/penempatan-deposito/:id.
 func (h *Handler) GetPenempatan(c *gin.Context) {
 	claims := claimsFromCtx(c)
 	if claims == nil {
@@ -143,6 +146,7 @@ func (h *Handler) GetPenempatan(c *gin.Context) {
 
 // ─── Update ───────────────────────────────────────────────────────────────────
 
+// UpdatePenempatan handles PATCH /trx/penempatan-deposito/:id (DRAFT only).
 func (h *Handler) UpdatePenempatan(c *gin.Context) {
 	claims := claimsFromCtx(c)
 	if claims == nil {
@@ -176,6 +180,7 @@ func (h *Handler) UpdatePenempatan(c *gin.Context) {
 
 // ─── Withdraw ────────────────────────────────────────────────────────────────
 
+// WithdrawPenempatan handles DELETE /trx/penempatan-deposito/:id (soft-delete DRAFT).
 func (h *Handler) WithdrawPenempatan(c *gin.Context) {
 	claims := claimsFromCtx(c)
 	if claims == nil {
@@ -202,6 +207,7 @@ func (h *Handler) WithdrawPenempatan(c *gin.Context) {
 
 // ─── Submit ──────────────────────────────────────────────────────────────────
 
+// SubmitPenempatan handles POST /trx/penempatan-deposito/:id/submit.
 func (h *Handler) SubmitPenempatan(c *gin.Context) {
 	claims := claimsFromCtx(c)
 	if claims == nil {
@@ -235,6 +241,7 @@ func (h *Handler) SubmitPenempatan(c *gin.Context) {
 
 // ─── Review ──────────────────────────────────────────────────────────────────
 
+// ReviewPenempatan handles POST /trx/penempatan-deposito/:id/review.
 func (h *Handler) ReviewPenempatan(c *gin.Context) {
 	claims := claimsFromCtx(c)
 	if claims == nil {
@@ -268,6 +275,7 @@ func (h *Handler) ReviewPenempatan(c *gin.Context) {
 
 // ─── Approve ──────────────────────────────────────────────────────────────────
 
+// ApprovePenempatan handles POST /trx/penempatan-deposito/:id/approve (requires MFA step-up).
 func (h *Handler) ApprovePenempatan(c *gin.Context) {
 	claims := claimsFromCtx(c)
 	if claims == nil {
@@ -305,6 +313,7 @@ func (h *Handler) ApprovePenempatan(c *gin.Context) {
 
 // ─── Reject ──────────────────────────────────────────────────────────────────
 
+// RejectPenempatan handles POST /trx/penempatan-deposito/:id/reject.
 func (h *Handler) RejectPenempatan(c *gin.Context) {
 	claims := claimsFromCtx(c)
 	if claims == nil {
@@ -338,6 +347,7 @@ func (h *Handler) RejectPenempatan(c *gin.Context) {
 
 // ─── TerminateRequest ────────────────────────────────────────────────────────
 
+// TerminatePenempatan handles POST /trx/penempatan-deposito/:id/terminate.
 func (h *Handler) TerminatePenempatan(c *gin.Context) {
 	claims := claimsFromCtx(c)
 	if claims == nil {
@@ -371,6 +381,7 @@ func (h *Handler) TerminatePenempatan(c *gin.Context) {
 
 // ─── TerminateReview ─────────────────────────────────────────────────────────
 
+// TerminateReviewPenempatan handles POST /trx/penempatan-deposito/:id/terminate-review.
 func (h *Handler) TerminateReviewPenempatan(c *gin.Context) {
 	claims := claimsFromCtx(c)
 	if claims == nil {
@@ -404,6 +415,7 @@ func (h *Handler) TerminateReviewPenempatan(c *gin.Context) {
 
 // ─── TerminateApprove ────────────────────────────────────────────────────────
 
+// TerminateApprovePenempatan handles POST /trx/penempatan-deposito/:id/terminate-approve (requires MFA step-up).
 func (h *Handler) TerminateApprovePenempatan(c *gin.Context) {
 	claims := claimsFromCtx(c)
 	if claims == nil {
@@ -437,6 +449,7 @@ func (h *Handler) TerminateApprovePenempatan(c *gin.Context) {
 
 // ─── TerminateReject ──────────────────────────────────────────────────────────
 
+// TerminateRejectPenempatan handles POST /trx/penempatan-deposito/:id/terminate-reject.
 func (h *Handler) TerminateRejectPenempatan(c *gin.Context) {
 	claims := claimsFromCtx(c)
 	if claims == nil {
@@ -470,6 +483,7 @@ func (h *Handler) TerminateRejectPenempatan(c *gin.Context) {
 
 // ─── EIRPreview ───────────────────────────────────────────────────────────────
 
+// GetEIRPreview handles GET /trx/penempatan-deposito/:id/eir-preview.
 func (h *Handler) GetEIRPreview(c *gin.Context) {
 	claims := claimsFromCtx(c)
 	if claims == nil {
@@ -497,6 +511,7 @@ func (h *Handler) GetEIRPreview(c *gin.Context) {
 
 // ─── AuditTimeline ────────────────────────────────────────────────────────────
 
+// GetAuditTimeline handles GET /trx/penempatan-deposito/:id/audit-timeline.
 func (h *Handler) GetAuditTimeline(c *gin.Context) {
 	claims := claimsFromCtx(c)
 	if claims == nil {
