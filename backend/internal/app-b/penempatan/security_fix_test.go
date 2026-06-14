@@ -87,14 +87,14 @@ func buildSecGetForUpdateRow(
 		uuid.New(),  // mata_uang_id
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), // tanggal_penempatan
 		time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC), // tanggal_jatuh_tempo
-		"1000000000", // nominal_idr
-		nil,          // nominal_fcy
-		nil,          // kurs_penempatan
-		int16(12),    // tenor_bulan
-		"5.25000000", // kupon_persen
-		"0",          // biaya_transaksi_idr
-		nil,          // eir_awal
-		nil,          // carrying_amount_awal
+		"1000000000",           // nominal_idr
+		nil,                    // nominal_fcy
+		nil,                    // kurs_penempatan
+		int16(12),              // tenor_bulan
+		"5.25000000",           // kupon_persen
+		"0",                    // biaya_transaksi_idr
+		nil,                    // eir_awal
+		nil,                    // carrying_amount_awal
 		workflowStatus,         // workflow_status
 		makerID,                // maker_id
 		reviewerIDStr,          // reviewer_id

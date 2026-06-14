@@ -89,7 +89,7 @@ func (w *Writer) Write(ctx context.Context, evt Event) error {
 		return fmt.Errorf("audit.Writer.Write: begin tx: %w", err)
 	}
 	if err = writeEvent(ctx, tx, evt); err != nil {
-		_ = tx.Rollback()
+		_ = tx.Rollback() //nolint:errcheck // rollback on error path, original error preferred
 		return fmt.Errorf("audit.Writer.Write: write event: %w", err)
 	}
 	if err = tx.Commit(); err != nil {
