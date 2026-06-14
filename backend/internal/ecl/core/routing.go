@@ -19,7 +19,7 @@ package core
 //     Warnings: POCI_CA_EIR_COMPUTED, POCI_ECL_REPRESENTS_INITIAL_BASELINE_NOT_DELTA.
 //   - POCI_DEFERRED: no CA-EIR schedule yet — no ecl.calc_result_line row written, warning emitted.
 //     Phase 5 will transition these to POCI_COMPUTED once CA-EIR is computed.
-//   HasCAEIRSchedule is populated by InstrumenReaderIface.GetByID via HasPOCISchedule repo call.
+//     HasCAEIRSchedule is populated by InstrumenReaderIface.GetByID via HasPOCISchedule repo call.
 //
 // Reference: FSD-APP-C §3, state-machine doc §1, OQ-M7-4 (FL multiplier source).
 func DetermineRouting(inst *InstrumenSnapshot) RoutingPath {
