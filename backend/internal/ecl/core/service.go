@@ -172,10 +172,14 @@ func (o *ECLOrchestrator) ComputeSingle(ctx context.Context, req ComputeRequest)
 	routing := DetermineRouting(inst)
 
 	// 3. Handle skipped paths immediately (no staging/PD lookup needed).
+	// F2 fix: RoutingPOCIComputed (CA-EIR present) routes to handlePOCI just like
+	// RoutingPOCIDeferred did previously. handlePOCI now uses AllowPOCI=true when calling
+	// M2 PD helpers so the POCI deferral guard is bypassed. RoutingPOCIDeferred (no CA-EIR)
+	// also routes to handlePOCI which will return a deferred-warning result with no row written.
 	switch routing {
 	case RoutingSkipFVTPL:
 		return o.handleSkipFVTPL(ctx, req, inst)
-	case RoutingPOCIDeferred:
+	case RoutingPOCIComputed, RoutingPOCIDeferred:
 		return o.handlePOCI(ctx, req, inst)
 	case RoutingLookthrough:
 		return o.handleLookthrough(ctx, req, inst)
@@ -263,15 +267,51 @@ func (o *ECLOrchestrator) handleSkipFVTPL(ctx context.Context, req ComputeReques
 //   - ECL is computed via STANDARD formula (EAD × PD × LGD × FL × bobot).
 //   - Result represents the INITIAL BASELINE lifetime ECL, not the delta-since-origination.
 //   - Delta computation and jurnal P&L direct booking are deferred to Phase 5.
-//   - RoutingPath = POCI_COMPUTED (replaces POCI_DEFERRED from prior stub).
+//   - RoutingPath = POCI_COMPUTED when CA-EIR present (HasCAEIRSchedule=true).
+//   - RoutingPath = POCI_DEFERRED when no CA-EIR yet (HasCAEIRSchedule=false) — no row written.
+//
+// F1 fix (DEC-POCI-001): passes AllowPOCI=true to M2 GetPD so the POCI deferral guard
+//
+//	in pd_service.go is bypassed and the normal PD curve lookup proceeds.
+//
+// F3 fix (PSAK 71 §5.5.13, DEC-POCI-004): POCI instruments must never use 12-month PD
+//
+//	(Stage 1). If resolveStage returns Stage 1, it is forced to Stage 2 (Lifetime PD).
+//	Warning WarnPOCIStageForcedToLifetime is appended to result.Warnings.
 //
 // DEC-POCI-002: Phase 5 will add delta + jurnal integration.
 // DEC-POCI-003: CA-EIR uses NR with PD-adjusted CF at origination only.
 func (o *ECLOrchestrator) handlePOCI(ctx context.Context, req ComputeRequest, inst *InstrumenSnapshot) (*ComputeResult, error) {
+	// When CA-EIR schedule is absent, return a deferred result — no computation, no row.
+	// This preserves the Phase 5 slot (DEC-POCI-001) and emits a warning so the caller
+	// knows the instrument was identified but not yet computed.
+	if !inst.HasCAEIRSchedule {
+		return &ComputeResult{
+			InstrumenID:    req.InstrumenID,
+			CalcRunID:      req.CalcRunID,
+			EvaluationDate: req.EvaluationDate,
+			PeriodeID:      req.PeriodeID,
+			RoutingPath:    RoutingPOCIDeferred,
+			FlagPOCI:       true,
+			// ECLWeightedIDR = nil (not 0 — different semantics per domain.go comment).
+			Warnings: []string{WarnPOCIRequiresFullCAEIR},
+		}, nil
+	}
+
 	// Resolve stage via standard path.
 	stage, err := o.resolveStage(ctx, req.InstrumenID)
 	if err != nil {
 		return nil, err
+	}
+
+	// F3 fix (PSAK 71 §5.5.13, DEC-POCI-004): POCI instruments must use Lifetime PD
+	// (Stage 2 or Stage 3). Stage 1 (12-month PD) is prohibited.
+	// If the staging service returns Stage 1 for a POCI instrument, force to Stage 2.
+	// Stage 2 and Stage 3 transitions follow normal SICR/cure rules (DEC-POCI-004).
+	var pociWarnings []string
+	if stage == Stage1 {
+		stage = Stage2
+		pociWarnings = append(pociWarnings, WarnPOCIStageForcedToLifetime)
 	}
 
 	bobot, err := o.bobotRepo.GetActiveBobot(ctx, req.PeriodeID)
@@ -288,18 +328,22 @@ func (o *ECLOrchestrator) handlePOCI(ctx context.Context, req ComputeRequest, in
 	// routingOverride = RoutingPOCIComputed ensures both in-memory result and
 	// persisted DB row carry POCI_COMPUTED instead of POCI_DEFERRED.
 	// DEC-POCI-001: Phase 4.5 baseline ECL persistence.
+	//
+	// F1 fix: pass AllowPOCI=true to M2 GetPD so the POCI deferral guard is bypassed.
+	// Without this flag GetPD returns CodePOCIDeferredToM7 and handlePOCI never reaches
+	// the formula step. DEC-POCI-001.
 	periodeID := req.PeriodeID
 	m2Stage := stageToM2(stage)
 
-	_, pdGoodDetail, err := o.helpers.PD.GetPD(ctx, req.InstrumenID, m2Stage, helpers.ScenarioGood, periodeID, req.EvaluationDate)
+	_, pdGoodDetail, err := o.helpers.PD.GetPD(ctx, req.InstrumenID, m2Stage, helpers.ScenarioGood, periodeID, req.EvaluationDate, true /* AllowPOCI */)
 	if err != nil {
 		return nil, fmt.Errorf("core.handlePOCI PD-GOOD: %w", err)
 	}
-	_, pdNormalDetail, err := o.helpers.PD.GetPD(ctx, req.InstrumenID, m2Stage, helpers.ScenarioNormal, periodeID, req.EvaluationDate)
+	_, pdNormalDetail, err := o.helpers.PD.GetPD(ctx, req.InstrumenID, m2Stage, helpers.ScenarioNormal, periodeID, req.EvaluationDate, true /* AllowPOCI */)
 	if err != nil {
 		return nil, fmt.Errorf("core.handlePOCI PD-NORMAL: %w", err)
 	}
-	_, pdBadDetail, err := o.helpers.PD.GetPD(ctx, req.InstrumenID, m2Stage, helpers.ScenarioBad, periodeID, req.EvaluationDate)
+	_, pdBadDetail, err := o.helpers.PD.GetPD(ctx, req.InstrumenID, m2Stage, helpers.ScenarioBad, periodeID, req.EvaluationDate, true /* AllowPOCI */)
 	if err != nil {
 		return nil, fmt.Errorf("core.handlePOCI PD-BAD: %w", err)
 	}
@@ -327,7 +371,9 @@ func (o *ECLOrchestrator) handlePOCI(ctx context.Context, req ComputeRequest, in
 	// Append POCI warnings:
 	//   1. WarnPOCIRequiresFullCAEIR — jurnal P&L booking not yet wired (Phase 5).
 	//   2. WarnPOCIECLRepresentsInitialBaseline — Phase 4.5 baseline limitation.
+	//   3. WarnPOCIStageForcedToLifetime — only when Stage 1 was forced to Stage 2 (F3 fix).
 	result.Warnings = append(result.Warnings, WarnPOCIRequiresFullCAEIR, WarnPOCIECLRepresentsInitialBaseline)
+	result.Warnings = append(result.Warnings, pociWarnings...)
 
 	return result, nil
 }

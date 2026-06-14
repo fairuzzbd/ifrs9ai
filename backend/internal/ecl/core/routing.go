@@ -5,13 +5,21 @@ package core
 //
 // Decision order (evaluated top-to-bottom — first match wins):
 //  1. FVTPL or FVOCI_ELECTION → SKIP_FVTPL
-//  2. flag_poci = true        → POCI_DEFERRED
+//  2. flag_poci = true AND HasCAEIRSchedule = true  → POCI_COMPUTED  (Phase 4.5, DEC-POCI-001)
+//  2. flag_poci = true AND HasCAEIRSchedule = false → POCI_DEFERRED  (no CA-EIR yet)
 //  3. tipe_instrumen = REKSADANA → LOOKTHROUGH
 //  4. tipe_instrumen IN (CASH, DEPOSITO) → LPS
 //  5. default → STANDARD
 //
 // Note: POCI check is performed BEFORE tipe_instrumen routing because a DEPOSITO
-// that is also POCI must still be deferred, not routed through LPS.
+// that is also POCI must still be deferred/computed, not routed through LPS.
+//
+// POCI routing (F2 fix, DEC-POCI-001):
+//   - POCI_COMPUTED: CA-EIR schedule present — standard ECL formula applied, row written.
+//     Warnings: POCI_CA_EIR_COMPUTED, POCI_ECL_REPRESENTS_INITIAL_BASELINE_NOT_DELTA.
+//   - POCI_DEFERRED: no CA-EIR schedule yet — no ecl.calc_result_line row written, warning emitted.
+//     Phase 5 will transition these to POCI_COMPUTED once CA-EIR is computed.
+//   HasCAEIRSchedule is populated by InstrumenReaderIface.GetByID via HasPOCISchedule repo call.
 //
 // Reference: FSD-APP-C §3, state-machine doc §1, OQ-M7-4 (FL multiplier source).
 func DetermineRouting(inst *InstrumenSnapshot) RoutingPath {
@@ -22,11 +30,17 @@ func DetermineRouting(inst *InstrumenSnapshot) RoutingPath {
 		return RoutingSkipFVTPL
 	}
 
-	// Step 2: POCI instruments → defer to Phase 5.
-	// Per IFRS 9 §5.4.1(c): credit-adjusted EIR required, not yet implemented.
-	// This check must come BEFORE tipe_instrumen so a POCI DEPOSITO is deferred,
-	// not routed to LPS (which would produce a misleading ECL = 0 for covered portion).
+	// Step 2: POCI instruments — route based on CA-EIR schedule availability.
+	// This check must come BEFORE tipe_instrumen so a POCI DEPOSITO is not routed
+	// to LPS (which would produce a misleading ECL = 0 for covered portion).
+	//
+	// F2 fix (DEC-POCI-001): when CA-EIR schedule exists (HasCAEIRSchedule=true),
+	// return POCI_COMPUTED → ECL is computed via STANDARD formula in handlePOCI.
+	// When CA-EIR not yet available, return POCI_DEFERRED → no row written, warning emitted.
 	if inst.FlagPOCI {
+		if inst.HasCAEIRSchedule {
+			return RoutingPOCIComputed
+		}
 		return RoutingPOCIDeferred
 	}
 

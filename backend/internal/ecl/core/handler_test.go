@@ -137,6 +137,7 @@ func TestHandler_ComputeSingle_POCI_200_NullECL(t *testing.T) {
 				KlasifikasiPsak71: "AC",
 				TipeInstrumen:     "OBLIGASI",
 				FlagPOCI:          true,
+				HasCAEIRSchedule:  true, // CA-EIR present → POCI_COMPUTED routing (F2 fix)
 			},
 		},
 	}

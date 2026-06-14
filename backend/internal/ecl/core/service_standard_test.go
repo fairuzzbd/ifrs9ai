@@ -176,7 +176,7 @@ type mockPDServiceStage struct {
 	stage  helpers.EclStage
 }
 
-func (m *mockPDServiceStage) GetPD(_ context.Context, _ uuid.UUID, _ helpers.EclStage, _ helpers.EclScenario, _ string, _ time.Time) (decimal.Decimal, helpers.PDDetail, error) {
+func (m *mockPDServiceStage) GetPD(_ context.Context, _ uuid.UUID, _ helpers.EclStage, _ helpers.EclScenario, _ string, _ time.Time, _ ...bool) (decimal.Decimal, helpers.PDDetail, error) {
 	// ImpactPDMultiplier defaults to 1.0 so combined FL = 1.0 × flMult = flMult.
 	// F1 fix: combined FL = ImpactPDMultiplier × ImpactMevPDMultiplier.
 	return m.pdBase.Mul(m.flMult), helpers.PDDetail{
@@ -625,6 +625,7 @@ func TestECLCompute_POCI_ComputesViaStandardWithBaseline(t *testing.T) {
 				KlasifikasiPsak71: "AC",
 				TipeInstrumen:     "OBLIGASI",
 				FlagPOCI:          true,
+				HasCAEIRSchedule:  true, // CA-EIR present → POCI_COMPUTED routing (F2 fix)
 				TenantID:          "TUGURE",
 			},
 		},

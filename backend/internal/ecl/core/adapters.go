@@ -39,6 +39,9 @@ func NewDBInstrumenReader(db *sql.DB) *DBInstrumenReader {
 
 // GetByID reads a minimal InstrumenSnapshot by primary key.
 // Returns CodeECLInstrumenNotFound if not found.
+// F2 fix: for POCI instruments, also calls HasPOCISchedule to populate HasCAEIRSchedule.
+// This lets DetermineRouting distinguish POCI_COMPUTED vs POCI_DEFERRED without needing
+// context/db inside the pure routing function. DEC-POCI-001.
 func (r *DBInstrumenReader) GetByID(ctx context.Context, id uuid.UUID) (*InstrumenSnapshot, error) {
 	q := `
 SELECT id, klasifikasi_psak71, tipe_instrumen, status, workflow_status,
@@ -71,7 +74,40 @@ WHERE id = $1 AND deleted_at IS NULL`
 	snap.CounterpartyID = counterpartyID
 	snap.NasabahID = nasabahID
 	snap.PortofolioID = portofolioID
+
+	// F2 fix: populate HasCAEIRSchedule for POCI routing decision (DEC-POCI-001).
+	// Only called for POCI instruments to avoid extra query overhead for non-POCI instruments.
+	if snap.FlagPOCI {
+		hasSchedule, err := r.HasPOCISchedule(ctx, id)
+		if err != nil {
+			// Non-fatal: default to POCI_DEFERRED on lookup error (safe conservative path).
+			hasSchedule = false
+		}
+		snap.HasCAEIRSchedule = hasSchedule
+	}
 	return &snap, nil
+}
+
+// HasPOCISchedule returns true if a credit-adjusted EIR schedule exists for the instrument.
+// Queries ecl.amortisasi_schedule for a row with flag_poci=true and deleted_at IS NULL.
+// F2 fix: used by GetByID to populate InstrumenSnapshot.HasCAEIRSchedule for routing.
+// DEC-POCI-001: Phase 4.5 — POCI_COMPUTED when CA-EIR present, POCI_DEFERRED otherwise.
+func (r *DBInstrumenReader) HasPOCISchedule(ctx context.Context, instrumenID uuid.UUID) (bool, error) {
+	q := `
+SELECT EXISTS(
+    SELECT 1
+    FROM ecl.amortisasi_schedule
+    WHERE instrumen_id = $1
+      AND flag_poci = true
+      AND deleted_at IS NULL
+    LIMIT 1
+)`
+	var exists bool
+	err := r.db.QueryRowContext(ctx, q, instrumenID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("core.HasPOCISchedule: %w", err)
+	}
+	return exists, nil
 }
 
 // ListActiveByScope returns active (APPROVED, AKTIF, not deleted) instruments

@@ -207,6 +207,7 @@ func TestComputeSingle_POCI_PersistTrue_AuditTx(t *testing.T) {
 				KlasifikasiPsak71: "AC",
 				TipeInstrumen:     "OBLIGASI",
 				FlagPOCI:          true,
+				HasCAEIRSchedule:  true, // CA-EIR present → POCI_COMPUTED routing (F2 fix)
 			},
 		},
 	}
