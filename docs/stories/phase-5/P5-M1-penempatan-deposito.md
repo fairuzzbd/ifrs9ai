@@ -3,6 +3,7 @@
 **Story Set ID**: P5-M1
 **Modul**: APP-B — Transaction Lifecycle (Phase 5, Sprint 1)
 **Status**: DRAFT — menunggu review `ifrs9-compliance-reviewer` (BLOCKING gate) + `security-engineer` (BLOCKING gate)
+**Business OQs**: OQ-M1-1a RESOLVED (DEC-P5-M1-004, stakeholder sign-off PENDING) · OQ-M1-5a RESOLVED (DEC-P5-M1-005, stakeholder sign-off PENDING) — lihat `docs/decisions/P5-M1-business-decisions.md`
 **Author**: business-analyst
 **Tanggal**: 2026-06-14
 **Linked FSD**: FSD-APP-B-TransactionLifecycle-v1.1.docx §1 (Modul Penempatan)
@@ -88,10 +89,19 @@ DRAFT
   │                         approve by approver ───────┼──► APPROVED_ACTIVE
   │                                                    │        │
   │                         reject at any step ────────►        │ Asynq maturity job
-  │                                ▼                            ▼
-  └─ withdraw by maker ──► CANCELLED              MATURED (auto)
-                                                       │
-                                       manual terminate├──► TERMINATED (4-eyes)
+  │                                ▼                            ├──────────────────► MATURED (auto)
+  └─ withdraw by maker ──► CANCELLED                            │
+                                                                │ manual terminate (4-eyes)
+                                                                │  DEC-P5-M1-005
+                                                                ▼
+                                                   TERMINATION_PENDING_REVIEW
+                                                                │
+                                                  reviewer sign-off ─────────► TERMINATION_PENDING_APPROVAL
+                                                                                        │
+                                                              approver (TM) approve ────┼──► TERMINATED
+                                                                                        │
+                                                              reject at any step ────────►  APPROVED_ACTIVE
+                                                                                              (proposal dropped)
 ```
 
 Transition valid:
@@ -216,16 +226,34 @@ Feature: Create penempatan deposito oleh Treasury Maker
       | error.message | "Instrumen INST-NEW-001 belum memiliki klasifikasi PSAK 71 yang di-approve. Selesaikan proses klasifikasi terlebih dahulu." |
     And tidak ada record `trx.penempatan_deposito` yang dibuat
 
-  # ─── ERROR CASE: Saldo rekening tidak mencukupi (ERR-VAL-2002) ───────────
+  # ─── INFORMATIONAL: Settlement balance hint (DEC-P5-M1-004) ─────────────
+  # NOTE: ERR-VAL-2002 (hard block) adalah Phase 6 deferred (post P5-M14 GL Host live).
+  # Phase 5: balance ditampilkan sebagai informational hint saja — tidak memblok create.
 
-  Scenario: Create gagal karena nominal melebihi saldo rekening settlement
-    Given saldo rekening settlement "1234567890" = IDR 3.000.000.000
-    And Maker memasukkan nominal_idr = 5000000000.0000
-    When Maker mengirim request create penempatan
-    Then sistem mengembalikan HTTP 422:
-      | error.code    | ERR-VAL-2002                                               |
-      | error.message | "Nominal penempatan (IDR 5.000.000.000) melebihi saldo rekening settlement (IDR 3.000.000.000)." |
-    And tidak ada record yang dibuat
+  Scenario: Create menampilkan informational balance hint jika saldo tersedia di sys.settlement_account_balance
+    Given sys.settlement_account_balance untuk settlement_account "1234567890":
+      | last_known_balance_idr | 3000000000.0000 |
+      | as_of_date             | 2026-06-13      |
+    And Maker memasukkan nominal_idr = 5000000000.0000 (melebihi saldo yang diketahui)
+    When Maker mengirim POST /api/v1/transaksi/penempatan
+    Then sistem mengembalikan HTTP 201 Created (penempatan berhasil dibuat, tidak diblok)
+    And response body mengandung field:
+      | settlement_balance_hint.last_known_idr | 3000000000.0000 |
+      | settlement_balance_hint.as_of_date     | 2026-06-13      |
+      | settlement_balance_hint.is_sufficient  | null            |
+    And UI menampilkan warning informatif (amber, non-blocking):
+      "Perhatian: Nominal (IDR 5.000.000.000) melebihi saldo terakhir yang diketahui (IDR 3.000.000.000 per 2026-06-13). Pastikan saldo tersedia sebelum submit."
+    And record trx.penempatan_deposito ter-insert dengan workflow_status = DRAFT
+    And audit log: PENEMPATAN.CREATE (tidak ada catatan ERR-VAL-2002)
+
+  Scenario: Create tanpa saldo tersedia di sys.settlement_account_balance — hint tidak muncul
+    Given sys.settlement_account_balance tidak memiliki record untuk settlement_account "9999999999"
+    When Maker mengirim POST /api/v1/transaksi/penempatan dengan settlement_account = "9999999999"
+    Then sistem mengembalikan HTTP 201 Created
+    And response body mengandung:
+      | settlement_balance_hint | null (absent) |
+    And UI menampilkan label: "Saldo tidak tersedia — pastikan saldo mencukupi sebelum submit"
+    And tidak ada block atau warning merah — hanya info abu-abu
 
   # ─── ERROR CASE: Periode buku bukan OPEN ─────────────────────────────────
 
@@ -257,11 +285,11 @@ Feature: Create penempatan deposito oleh Treasury Maker
 ```
 
 ### Open Questions — Story 1
-| ID | Pertanyaan | Asumsi Default |
-|---|---|---|
-| OQ-M1-1a | Apakah saldo rekening settlement di-validasi real-time atau hanya informational warning? Tugure mungkin tidak expose saldo rekening ke BLIPS. | Default: **informational warning** saja jika saldo tidak diketahui (skip ERR-VAL-2002). Konfirmasi ke Kepala Treasury. |
-| OQ-M1-1b | `kode_transaksi` format — apakah `PNP-{YYYY}-{#####}` sudah sesuai FSD-APP-B §1.3, atau ada format berbeda untuk deposito vs obligasi? | Asumsi format generik `PNP`. Flag ke system-analyst untuk konfirmasi. |
-| OQ-M1-1c | Apakah FCY deposit wajib ada kurs dari `mst.kurs`, atau Maker boleh input kurs manual (override)? | Wajib dari `mst.kurs` (BI JISDOR, DEC per FX — dikonfirmasi P5-M5). Kurs manual hanya jika tanggal tidak memiliki JISDOR (weekend/holiday) dan FinCon approve. |
+| ID | Pertanyaan | Status | Resolusi |
+|---|---|---|---|
+| OQ-M1-1a | Apakah saldo rekening settlement di-validasi real-time atau hanya informational warning? | **RESOLVED** — ref DEC-P5-M1-004 | **Option B Informational only** (Phase 5). ERR-VAL-2002 hard block deferred ke Phase 6 setelah P5-M14 GL Host live. Balance hint ditampilkan dari `sys.settlement_account_balance`, non-blocking. Stakeholder formal sign-off: PENDING (lihat `docs/decisions/P5-M1-business-decisions.md`). |
+| OQ-M1-1b | `kode_transaksi` format — apakah `PNP-{YYYY}-{#####}` sudah sesuai FSD-APP-B §1.3, atau ada format berbeda untuk deposito vs obligasi? | OPEN | Asumsi format generik `PNP`. Flag ke system-analyst untuk konfirmasi. |
+| OQ-M1-1c | Apakah FCY deposit wajib ada kurs dari `mst.kurs`, atau Maker boleh input kurs manual (override)? | OPEN | Wajib dari `mst.kurs` (BI JISDOR, DEC per FX — dikonfirmasi P5-M5). Kurs manual hanya jika tanggal tidak memiliki JISDOR (weekend/holiday) dan FinCon approve. |
 
 ---
 
@@ -742,13 +770,19 @@ Feature: Detail view dan edit penempatan deposito
 
 ## Story P5-M1-S5 — Mature (Auto) / Terminate (Manual)
 
-**Actor**: Asynq daily job (auto-mature) ATAU ROLE-MAKER-TR + ROLE-APPR-TR (manual terminate, 4-eyes)
+**Actor**: Asynq daily job (auto-mature) ATAU ROLE-MAKER-TR + ROLE-APPR-TR (manual terminate, **4-eyes penuh — DEC-P5-M1-005**)
 **Trigger**: Tanggal hari ini = `tanggal_jatuh_tempo` (auto-mature via Asynq cron job 09:00 WIB) ATAU Maker mengajukan terminasi lebih awal dengan alasan
-**Goal**: Penempatan yang sudah jatuh tempo otomatis di-close ke status `MATURED`; terminasi manual membutuhkan 4-eyes approval dan alasan jelas; kedua path memancarkan event untuk derecognition di P5-M9
+**Goal**: Penempatan yang sudah jatuh tempo otomatis di-close ke status `MATURED`; terminasi manual membutuhkan **4-eyes workflow** (Maker → Reviewer → Approver, konsisten dengan create) dan alasan jelas; kedua path memancarkan event untuk derecognition di P5-M9
+
+> **DEC-P5-M1-005 (PROPOSED, pending sign-off)**: Terminate workflow = 4-eyes (Option B). Rationale: termination triggers EIR catch-up + ECL derecognition + realized G/L — material financial impact identical in risk tier to origination. 2-eyes (Option A) rejected untuk alasan asimetri kontrol. 6-eyes (Option C) rejected sebagai disproportionate untuk individual transaction. Lihat `docs/decisions/P5-M1-business-decisions.md`.
 
 ### Pre-conditions
 - **Auto-mature**: `workflow_status = 'APPROVED_ACTIVE'` DAN `tanggal_jatuh_tempo ≤ today`
-- **Manual terminate**: `workflow_status = 'APPROVED_ACTIVE'`, actor adalah ROLE-MAKER-TR (propose) → ROLE-APPR-TR (approve), `terminate_reason ≥ 30 chars`
+- **Manual terminate (4-eyes per DEC-P5-M1-005)**:
+  - Propose: `workflow_status = 'APPROVED_ACTIVE'`, actor = ROLE-MAKER-TR, `terminate_reason ≥ 30 chars`, dokumen terminasi terlampir
+  - Review: `workflow_status = 'TERMINATION_PENDING_REVIEW'`, actor = ROLE-APPR-TR ≠ maker
+  - Approve: `workflow_status = 'TERMINATION_PENDING_APPROVAL'`, actor = ROLE-APPR-TR (Treasury Manager) ≠ maker AND ≠ terminate_reviewer
+  - Reject: dapat dilakukan oleh reviewer atau approver pada step masing-masing; status kembali ke `APPROVED_ACTIVE`
 
 ### Data References
 | Tabel | Akses | Catatan |
@@ -762,15 +796,18 @@ Feature: Detail view dan edit penempatan deposito
 |---|---|---|---|
 | Auto-mature (Asynq) | system (no human role) | Asynq worker service account | — |
 | Propose terminate | `transaksi.terminate` | ROLE-MAKER-TR | Tidak |
-| Approve terminate | `transaksi.approve` (terminate context) | ROLE-APPR-TR (≠ maker) | Tidak wajib |
+| Review terminate | `transaksi.review` (terminate context) | ROLE-APPR-TR (≠ maker) | Tidak wajib |
+| Approve terminate | `transaksi.approve` (terminate context) | ROLE-APPR-TR, Treasury Manager (≠ maker AND ≠ terminate_reviewer) | Wajib jika Treasury Manager (DEC-026) |
+| Reject terminate | `transaksi.reject` (terminate context) | ROLE-APPR-TR pada step masing-masing | Tidak wajib |
 
 ### Audit Events
 | Action | Trigger |
 |---|---|
 | `PENEMPATAN.MATURED` | Auto-mature job sukses |
 | `PENEMPATAN.TERMINATE_PROPOSED` | Maker propose terminasi |
-| `PENEMPATAN.TERMINATE_APPROVED` | APPR-TR approve terminasi |
-| `PENEMPATAN.TERMINATE_REJECTED` | APPR-TR tolak terminasi |
+| `PENEMPATAN.TERMINATE_REVIEWED` | Reviewer sign-off terminasi (NEW — DEC-P5-M1-005) |
+| `PENEMPATAN.TERMINATE_APPROVED` | Approver final approve terminasi |
+| `PENEMPATAN.TERMINATE_REJECTED` | Reviewer atau approver tolak terminasi |
 | `PENEMPATAN.DERECOGNITION_QUEUED` | Event ke P5-M9 untuk derecognition |
 
 ### Acceptance Criteria
@@ -799,25 +836,60 @@ Feature: Mature otomatis dan terminasi manual penempatan deposito
     And sys.job.status = COMPLETED untuk job maturity-checker
     And instrumen INST-DEP-001 workflow_status tidak berubah (instrumen masih aktif, derecognition di P5-M9)
 
-  # ─── HAPPY PATH 2: Manual terminate dengan 4-eyes ───────────────────────
+  # ─── HAPPY PATH 2: Manual terminate dengan 4-eyes penuh (DEC-P5-M1-005) ──
+  # NOTE: Terminate adalah 4-eyes (Maker → Reviewer → Approver), konsisten dengan create.
+  # 2-eyes (Option A) ditolak karena termination = material financial impact (EIR + ECL + G/L).
 
-  Scenario: Maker mengajukan terminasi lebih awal, APPR-TR menyetujui
+  Scenario: Maker mengajukan terminasi lebih awal — 4-eyes lengkap berhasil
     Given hari ini = 2026-12-01 (sebelum tanggal_jatuh_tempo)
+    And terminate reviewer: USR-002 (ROLE-APPR-TR, ≠ USR-001)
+    And terminate approver: USR-003 (ROLE-APPR-TR, Treasury Manager, ≠ USR-001 AND ≠ USR-002)
+
     When ROLE-MAKER-TR USR-001 mengirim POST /api/v1/transaksi/penempatan/PNP-2026-00001/terminate-request
       With body:
-        | terminate_reason | "Bank counterparty meminta pengembalian dana lebih awal karena restrukturisasi internal. Surat tertanggal 2026-11-30 terlampir." |
+        | terminate_reason     | "Bank counterparty meminta pengembalian dana lebih awal karena restrukturisasi internal. Surat tertanggal 2026-11-30 terlampir." |
         | dokumen_terminasi_id | DOC-TERM-001 |
-    Then workflow_status berubah ke TERMINATION_PENDING_APPROVAL
+      With Idempotency-Key: IK-TERM-REQ-001
+    Then workflow_status berubah ke TERMINATION_PENDING_REVIEW
     And audit log: PENEMPATAN.TERMINATE_PROPOSED, actor = USR-001
-    And notifikasi ke ROLE-APPR-TR: "Proposal terminasi PNP-2026-00001 menunggu persetujuan."
+    And notifikasi ke ROLE-APPR-TR: "Proposal terminasi PNP-2026-00001 menunggu review."
 
-    When ROLE-APPR-TR USR-002 (≠ USR-001) mengirim POST /api/v1/transaksi/penempatan/PNP-2026-00001/terminate-approve
+    When ROLE-APPR-TR USR-002 mengirim POST /api/v1/transaksi/penempatan/PNP-2026-00001/terminate-review
+      With body: { "comment": "Dokumen surat dari bank terlampir dan valid. Alasan termination sesuai prosedur.", "signature_method": "JWT_STEP_UP" }
+      With Idempotency-Key: IK-TERM-REV-001
+    Then workflow_status berubah ke TERMINATION_PENDING_APPROVAL
+    And terminate_reviewer_id = USR-002
+    And terminate_reviewer_signed_at terisi timestamp sekarang
+    And terminate_reviewer_signature_hash terisi SHA-256 dari payload review
+    And audit log: PENEMPATAN.TERMINATE_REVIEWED, actor = USR-002
+    And notifikasi ke ROLE-APPR-TR (Treasury Manager): "Proposal terminasi PNP-2026-00001 menunggu persetujuan akhir."
+
+    When ROLE-APPR-TR USR-003 (Treasury Manager) mengirim POST /api/v1/transaksi/penempatan/PNP-2026-00001/terminate-approve
       With body: { "comment": "Disetujui sesuai memo Direktur Keuangan No. 123/2026", "signature_method": "JWT_STEP_UP" }
+      With Idempotency-Key: IK-TERM-APPR-001
     Then workflow_status berubah ke TERMINATED
-    And terminated_at = today
-    And approver SoD diverifikasi: USR-002 ≠ USR-001
-    And menerbitkan event PenempatanTerminatedEvent (untuk derecognition P5-M9)
+    And terminated_at = 2026-12-01
+    And terminate_approver_id = USR-003
+    And terminate_approver_signed_at terisi timestamp sekarang
+    And terminate_approver_signature_hash terisi SHA-256 dari payload approve
+    And SoD diverifikasi server-side: USR-003 ≠ USR-001 (maker) AND USR-003 ≠ USR-002 (reviewer)
+    And menerbitkan event PenempatanTerminatedEvent (consumed by P5-M9 untuk derecognition)
     And audit log: PENEMPATAN.TERMINATE_APPROVED, PENEMPATAN.DERECOGNITION_QUEUED
+    And toast ke USR-003: "Terminasi PNP-2026-00001 disetujui. Proses derecognition di-queue (P5-M9). EIR catch-up adjustment akan dihitung otomatis."
+
+  # ─── HAPPY PATH 3: Terminate rejected oleh reviewer — kembali ke APPROVED_ACTIVE ──
+
+  Scenario: Reviewer menolak proposal terminasi — instrumen tetap APPROVED_ACTIVE
+    Given PNP-2026-00001 dalam TERMINATION_PENDING_REVIEW
+    When USR-002 mengirim POST /api/v1/transaksi/penempatan/PNP-2026-00001/terminate-reject
+      With body: { "comment": "Dokumen surat dari bank tidak lengkap — cap resmi tidak ada. Mohon lengkapi dokumen pendukung.", "signature_method": "JWT_STEP_UP" }
+      With Idempotency-Key: IK-TERM-REJ-001
+    Then workflow_status kembali ke APPROVED_ACTIVE
+    And terminate_reviewer_id = NULL (di-reset)
+    And terminate_reason tetap tersimpan (audit only)
+    And audit log: PENEMPATAN.TERMINATE_REJECTED, actor = USR-002, reject_reason tersimpan
+    And notifikasi ke USR-001: "Proposal terminasi PNP-2026-00001 ditolak oleh reviewer: Dokumen surat dari bank tidak lengkap..."
+    And instrumen dapat di-propose terminate ulang oleh Maker dengan dokumen diperbaiki
 
   # ─── ERROR CASE: Terminate reason terlalu singkat ────────────────────────
 
@@ -852,11 +924,11 @@ Feature: Mature otomatis dan terminasi manual penempatan deposito
 ```
 
 ### Open Questions — Story 5
-| ID | Pertanyaan | Asumsi Default |
-|---|---|---|
-| OQ-M1-5a | Apakah terminasi manual memerlukan 4-eyes penuh (Maker → Reviewer → Approver) atau cukup 2-eyes (Maker → Approver saja)? | Default: **2-eyes untuk terminate** (Maker propose → APPR-TR approve), tidak perlu reviewer terpisah. Ini berbeda dari penempatan baru (3-step). Konfirmasi ke business stakeholder. |
-| OQ-M1-5b | Apakah penempatan yang MATURED bisa di-reopen oleh admin jika ada sengketa settlement? | Tidak di-scope P5-M1. Jika diperlukan, butuh RFC dan `REOPEN` workflow. |
-| OQ-M1-5c | Maturity job pukul 09:00 WIB — bagaimana jika hari itu adalah hari libur nasional? | Job tetap jalan (Asynq tidak tahu libur). Penempatan jatuh tempo pada tanggal kalender tersebut di-close. Tanggal settlement urusan treasury operasional (di luar BLIPS scope). |
+| ID | Pertanyaan | Status | Resolusi |
+|---|---|---|---|
+| OQ-M1-5a | Apakah terminasi manual memerlukan 4-eyes penuh (Maker → Reviewer → Approver) atau cukup 2-eyes (Maker → Approver saja)? | **RESOLVED** — ref DEC-P5-M1-005 | **Option B 4-eyes penuh**, konsisten dengan create workflow. Termination memiliki material financial impact (EIR catch-up + ECL derecognition + realized G/L). 2-eyes (Option A) ditolak karena asimetri kontrol. 6-eyes (Option C) ditolak sebagai disproportionate untuk individual transaction. State machine diupdate: tambah state `TERMINATION_PENDING_REVIEW` dan endpoint `terminate-review`. Stakeholder formal sign-off: PENDING (lihat `docs/decisions/P5-M1-business-decisions.md`). |
+| OQ-M1-5b | Apakah penempatan yang MATURED bisa di-reopen oleh admin jika ada sengketa settlement? | OPEN | Tidak di-scope P5-M1. Jika diperlukan, butuh RFC dan `REOPEN` workflow. |
+| OQ-M1-5c | Maturity job pukul 09:00 WIB — bagaimana jika hari itu adalah hari libur nasional? | OPEN | Job tetap jalan (Asynq tidak tahu libur). Penempatan jatuh tempo pada tanggal kalender tersebut di-close. Tanggal settlement urusan treasury operasional (di luar BLIPS scope). |
 
 ---
 
@@ -1004,9 +1076,9 @@ Setelah story set ini di-sign-off:
 - [ ] `uiux-designer` → Screen `/trx/penempatan/new` (form), `/trx/penempatan` (DataTable), `/trx/penempatan/{id}` (detail + audit trail) — paralel dengan backend
 - [ ] `backend-engineer-go` → HTTP handlers + Gin routing + Asynq maturity cron worker + middleware
 - [ ] `ecl-eir-engineer` → EIR compute trigger post-approve (async Asynq job, Newton-Raphson via existing Phase 4 service), POCI CA-EIR path
-- [ ] Konfirmasi OQ-M1-1a (saldo rekening validation) ke Kepala Treasury sebelum backend mulai ERR-VAL-2002
+- [x] OQ-M1-1a RESOLVED — DEC-P5-M1-004 (Option B Informational). ERR-VAL-2002 deferred ke Phase 6. Stakeholder sign-off PENDING (Kepala Treasury, Treasury Manager) — lihat `docs/decisions/P5-M1-business-decisions.md`
 - [ ] Konfirmasi OQ-M1-2d (FVTPL ECL staging) ke `ifrs9-compliance-reviewer` sebelum staging post-approve implementasi
-- [ ] Konfirmasi OQ-M1-5a (terminate 2-eyes vs 4-eyes) ke business stakeholder
+- [x] OQ-M1-5a RESOLVED — DEC-P5-M1-005 (Option B 4-eyes). State machine diupdate. Stakeholder sign-off PENDING (Kepala Treasury, ROLE-RISK, ROLE-AKUN-CTL) — lihat `docs/decisions/P5-M1-business-decisions.md`
 
 ---
 
