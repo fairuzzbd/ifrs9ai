@@ -9,9 +9,24 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"blips-ifrs9.tugu-re.com/internal/audit"
 	"blips-ifrs9.tugu-re.com/internal/auth"
 	"blips-ifrs9.tugu-re.com/internal/common/listquery"
 )
+
+// DirectAuditWriter is the exported alias for the directAuditWriter interface,
+// used by tests to inject a mock SoD audit writer.
+type DirectAuditWriter = directAuditWriter
+
+// WithSoDWriter replaces the SoD violation audit writer with a test double.
+// Only for use in tests — allows asserting that SoD violations are audited.
+func (s *Service) WithSoDWriter(w DirectAuditWriter) *Service {
+	s.sodWriter = w
+	return s
+}
+
+// AuditEventFromContext re-exports audit.EventFromContext for test packages.
+var AuditEventFromContext = audit.EventFromContext
 
 // RegisterRoutesForTest registers routes without auth / idempotency middleware
 // (those are tested separately; here we want to test handler logic only).

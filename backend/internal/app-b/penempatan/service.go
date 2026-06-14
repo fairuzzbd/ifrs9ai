@@ -36,12 +36,23 @@ type AsynqEnqueuer interface {
 	EnqueueContext(ctx context.Context, task *asynq.Task, opts ...asynq.Option) (*asynq.TaskInfo, error)
 }
 
+// ─── directAuditWriter ───────────────────────────────────────────────────────
+
+// directAuditWriter is implemented by *audit.Writer (Write method added in security
+// fix PR #105). It exists as an interface so tests can inject a mock to verify
+// that SoD violation audit rows are written without needing a real DB (best-effort
+// path — security baseline §threat-model #5).
+type directAuditWriter interface {
+	Write(ctx context.Context, evt audit.Event) error
+}
+
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 // Service owns all business logic for the penempatan deposito lifecycle.
 type Service struct {
 	repo        *Repo
 	auditWriter *audit.Writer
+	sodWriter   directAuditWriter // best-effort non-tx writer for SoD violation events
 	asynqClient AsynqEnqueuer
 	logger      *slog.Logger
 }
@@ -65,6 +76,7 @@ func NewService(
 	return &Service{
 		repo:        repo,
 		auditWriter: auditWriter,
+		sodWriter:   auditWriter, // *audit.Writer satisfies directAuditWriter
 		asynqClient: asynqClient,
 		logger:      logger,
 	}
@@ -443,6 +455,7 @@ func (s *Service) Review(ctx context.Context, id uuid.UUID, req WorkflowActionRe
 			fmt.Sprintf("Tidak bisa review dari status %s.", p.WorkflowStatus))
 	}
 	if p.MakerID == actorID {
+		s.writeSoDViolationAudit(ctx, id, "REVIEW", actorID.String(), "MAKER_AS_REVIEWER")
 		return nil, domainerrors.New(domainerrors.Code(ErrCodeSoDViolation),
 			"Anda tidak bisa menjadi reviewer untuk penempatan yang Anda buat sendiri (DEC-017).")
 	}
@@ -517,9 +530,11 @@ func (s *Service) Approve(ctx context.Context, id uuid.UUID, req WorkflowActionR
 			fmt.Sprintf("Tidak bisa approve dari status %s.", p.WorkflowStatus))
 	}
 	if p.MakerID == actorID {
+		s.writeSoDViolationAudit(ctx, id, "APPROVE", actorID.String(), "MAKER_AS_APPROVER")
 		return nil, domainerrors.New(domainerrors.Code(ErrCodeSoDViolation), "Approver tidak boleh sama dengan maker (DEC-017).")
 	}
 	if p.ReviewerID != nil && *p.ReviewerID == actorID {
+		s.writeSoDViolationAudit(ctx, id, "APPROVE", actorID.String(), "REVIEWER_AS_APPROVER")
 		return nil, domainerrors.New(domainerrors.Code(ErrCodeSoDViolation), "Approver tidak boleh sama dengan reviewer (DEC-017).")
 	}
 
@@ -805,11 +820,13 @@ func (s *Service) TerminateReview(ctx context.Context, id uuid.UUID, req Workflo
 			fmt.Sprintf("Tidak bisa review terminate dari status %s.", p.WorkflowStatus))
 	}
 	if p.MakerID == actorID {
+		s.writeSoDViolationAudit(ctx, id, "TERMINATE_REVIEW", actorID.String(), "MAKER_AS_TERMINATE_REVIEWER")
 		return nil, domainerrors.New(domainerrors.Code(ErrCodeSoDViolation),
 			"Maker tidak bisa menjadi reviewer untuk proposal terminasi yang diajukan sendiri.")
 	}
 	// F2 fix (DEC-P5-M1-005 + DEC-017): terminate proposer cannot self-review.
 	if p.TerminateMakerID != nil && *p.TerminateMakerID == actorID {
+		s.writeSoDViolationAudit(ctx, id, "TERMINATE_REVIEW", actorID.String(), "TERMINATE_MAKER_AS_TERMINATE_REVIEWER")
 		return nil, domainerrors.New(domainerrors.Code(ErrCodeSoDViolation),
 			"Anda mengajukan terminasi — tidak dapat mereview sendiri (SoD).")
 	}
@@ -876,13 +893,16 @@ func (s *Service) TerminateApprove(ctx context.Context, id uuid.UUID, req Workfl
 			fmt.Sprintf("Tidak bisa approve terminate dari status %s.", p.WorkflowStatus))
 	}
 	if p.MakerID == actorID {
+		s.writeSoDViolationAudit(ctx, id, "TERMINATE_APPROVE", actorID.String(), "MAKER_AS_TERMINATE_APPROVER")
 		return nil, domainerrors.New(domainerrors.Code(ErrCodeSoDViolation), "Terminate approver tidak boleh sama dengan maker (DEC-017).")
 	}
 	// F2 fix (DEC-P5-M1-005 + DEC-017): terminate proposer cannot self-approve.
 	if p.TerminateMakerID != nil && *p.TerminateMakerID == actorID {
+		s.writeSoDViolationAudit(ctx, id, "TERMINATE_APPROVE", actorID.String(), "TERMINATE_MAKER_AS_TERMINATE_APPROVER")
 		return nil, domainerrors.New(domainerrors.Code(ErrCodeSoDViolation), "Terminate approver tidak boleh sama dengan terminate maker (DEC-017).")
 	}
 	if p.TerminateReviewerID != nil && *p.TerminateReviewerID == actorID {
+		s.writeSoDViolationAudit(ctx, id, "TERMINATE_APPROVE", actorID.String(), "TERMINATE_REVIEWER_AS_TERMINATE_APPROVER")
 		return nil, domainerrors.New(domainerrors.Code(ErrCodeSoDViolation), "Terminate approver tidak boleh sama dengan terminate reviewer (DEC-017).")
 	}
 
@@ -1238,6 +1258,38 @@ func computeSignatureHash(userID uuid.UUID, step string, entityID uuid.UUID, sig
 	h.Write([]byte(signedAt.Format(time.RFC3339Nano)))
 	h.Write([]byte(comment))
 	return h.Sum(nil)
+}
+
+// sha256hex returns the hex-encoded SHA-256 hash of s.
+// Used to log PII-adjacent fields (e.g. settlement_account) without exposing plaintext (DEC-028).
+func sha256hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// writeSoDViolationAudit records a best-effort security audit row for a SoD violation
+// attempt. It writes via s.auditWriter (non-transactional) so the row persists even
+// after the business transaction is rolled back (security baseline §threat-model #5).
+// If the write fails, a WARN is logged but the error is NOT returned (best-effort).
+//
+// violationType examples: MAKER_AS_REVIEWER, MAKER_AS_APPROVER, REVIEWER_AS_APPROVER,
+//
+//	TERMINATE_MAKER_AS_REVIEWER, TERMINATE_MAKER_AS_APPROVER, TERMINATE_REVIEWER_AS_APPROVER.
+func (s *Service) writeSoDViolationAudit(ctx context.Context, entityID uuid.UUID, step, actorID, violationType string) {
+	err := s.sodWriter.Write(ctx, audit.EventFromContext(ctx, audit.Event{
+		Action:     "PENEMPATAN.SOD_VIOLATION_ATTEMPT",
+		EntityType: "trx.penempatan_deposito",
+		EntityID:   entityID,
+		After: map[string]any{
+			"step":           step,
+			"actor_id":       actorID,
+			"violation_type": violationType,
+		},
+	}))
+	if err != nil {
+		s.logger.WarnContext(ctx, "SoD violation audit write failed (best-effort)",
+			"entity_id", entityID, "step", step, "violation_type", violationType, "error", err)
+	}
 }
 
 // rollbackTx rolls back a transaction, logging any error at WARN level.
