@@ -625,31 +625,33 @@ func (s *Service) Approve(ctx context.Context, id uuid.UUID, req WorkflowActionR
 					eirJobID = &info.ID
 				}
 			}
-		}
-
-		approvedEvt := ApprovedEvent{
-			InstrumenID:       p.InstrumenID,
-			PenempatanID:      id,
-			KodeTransaksi:     p.KodeTransaksi,
-			KlasifikasiPSAK71: klasifikasi,
-			TanggalPenempatan: p.TanggalPenempatan,
-			TanggalJatuhTempo: p.TanggalJatuhTempo,
-			NominalIDR:        p.NominalIDR,
-			NominalFCY:        p.NominalFCY,
-			KursPenempatan:    p.KursPenempatan,
-			KuponPersen:       p.KuponPersen,
-			TenorBulan:        p.TenorBulan,
-			BiayaTransaksiIDR: p.BiayaTransaksiIDR,
-			PeriodeID:         p.PeriodeID,
-			StagingAction:     stagingAction,
-			EventTime:         now,
-			TenantID:          claims.TenantID,
-		}
-		approvedBytes, marshalErr2 := json.Marshal(approvedEvt)
-		if marshalErr2 != nil {
-			s.logger.WarnContext(ctx, "ApprovedEvent marshal failed (non-blocking)", "error", marshalErr2)
-		} else if _, enqErr2 := s.asynqClient.EnqueueContext(ctx, asynq.NewTask(PenempatanApprovedTaskType, approvedBytes)); enqErr2 != nil {
-			s.logger.WarnContext(ctx, "ApprovedEvent enqueue failed (non-blocking)", "error", enqErr2)
+			// F1 fix (DEC-P5-M1-001): ApprovedEvent is only dispatched for non-FVTPL
+			// instruments so downstream EIR/staging consumers never see FVTPL rows.
+			// Placed immediately after EIRComputeTaskType enqueue, inside !isFVTPL guard.
+			approvedEvt := ApprovedEvent{
+				InstrumenID:       p.InstrumenID,
+				PenempatanID:      id,
+				KodeTransaksi:     p.KodeTransaksi,
+				KlasifikasiPSAK71: klasifikasi,
+				TanggalPenempatan: p.TanggalPenempatan,
+				TanggalJatuhTempo: p.TanggalJatuhTempo,
+				NominalIDR:        p.NominalIDR,
+				NominalFCY:        p.NominalFCY,
+				KursPenempatan:    p.KursPenempatan,
+				KuponPersen:       p.KuponPersen,
+				TenorBulan:        p.TenorBulan,
+				BiayaTransaksiIDR: p.BiayaTransaksiIDR,
+				PeriodeID:         p.PeriodeID,
+				StagingAction:     stagingAction,
+				EventTime:         now,
+				TenantID:          claims.TenantID,
+			}
+			approvedBytes, marshalErr2 := json.Marshal(approvedEvt)
+			if marshalErr2 != nil {
+				s.logger.WarnContext(ctx, "ApprovedEvent marshal failed (non-blocking)", "error", marshalErr2)
+			} else if _, enqErr2 := s.asynqClient.EnqueueContext(ctx, asynq.NewTask(PenempatanApprovedTaskType, approvedBytes)); enqErr2 != nil {
+				s.logger.WarnContext(ctx, "ApprovedEvent enqueue failed (non-blocking)", "error", enqErr2)
+			}
 		}
 	}
 
@@ -806,6 +808,11 @@ func (s *Service) TerminateReview(ctx context.Context, id uuid.UUID, req Workflo
 		return nil, domainerrors.New(domainerrors.Code(ErrCodeSoDViolation),
 			"Maker tidak bisa menjadi reviewer untuk proposal terminasi yang diajukan sendiri.")
 	}
+	// F2 fix (DEC-P5-M1-005 + DEC-017): terminate proposer cannot self-review.
+	if p.TerminateMakerID != nil && *p.TerminateMakerID == actorID {
+		return nil, domainerrors.New(domainerrors.Code(ErrCodeSoDViolation),
+			"Anda mengajukan terminasi — tidak dapat mereview sendiri (SoD).")
+	}
 
 	now := time.Now()
 	sigHash := computeSignatureHash(actorID, "TERMINATE_REVIEW", id, now, req.Comment)
@@ -870,6 +877,10 @@ func (s *Service) TerminateApprove(ctx context.Context, id uuid.UUID, req Workfl
 	}
 	if p.MakerID == actorID {
 		return nil, domainerrors.New(domainerrors.Code(ErrCodeSoDViolation), "Terminate approver tidak boleh sama dengan maker (DEC-017).")
+	}
+	// F2 fix (DEC-P5-M1-005 + DEC-017): terminate proposer cannot self-approve.
+	if p.TerminateMakerID != nil && *p.TerminateMakerID == actorID {
+		return nil, domainerrors.New(domainerrors.Code(ErrCodeSoDViolation), "Terminate approver tidak boleh sama dengan terminate maker (DEC-017).")
 	}
 	if p.TerminateReviewerID != nil && *p.TerminateReviewerID == actorID {
 		return nil, domainerrors.New(domainerrors.Code(ErrCodeSoDViolation), "Terminate approver tidak boleh sama dengan terminate reviewer (DEC-017).")
@@ -1044,7 +1055,8 @@ func (s *Service) EIRPreview(ctx context.Context, id uuid.UUID, claims *auth.Cla
 	if p.KlasifikasiPSAK71 == "FVTPL" || p.KlasifikasiPSAK71 == "FVOCI_ELECTION" {
 		info := fmt.Sprintf("EIR tidak dihitung untuk instrumen %s (DEC-P5-M1-001). Fair value via MTM engine P5-M6.", p.KlasifikasiPSAK71)
 		return &EIRPreviewResult{
-			EIRAwal:              nil,
+			EIRAwalApprox:        nil,
+			IsApproximate:        false, // not applicable for FVTPL
 			CarryingAmountAwal:   nil,
 			PeriodePreview:       0,
 			Info:                 &info,
@@ -1092,7 +1104,8 @@ func (s *Service) EIRPreview(ctx context.Context, id uuid.UUID, claims *auth.Cla
 	}
 
 	return &EIRPreviewResult{
-		EIRAwal:              &monthlyRate,
+		EIRAwalApprox:        &monthlyRate, // F4 fix: renamed from EIRAwal to signal this is coupon approx, not Newton-Raphson EIR
+		IsApproximate:        true,         // always true — full N-R solver runs post-approve via EIR_COMPUTE job
 		CarryingAmountAwal:   &carryingAmount,
 		PeriodePreview:       previewMonths,
 		AmortizationSchedule: schedule,
