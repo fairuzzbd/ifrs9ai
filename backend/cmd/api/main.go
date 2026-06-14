@@ -63,6 +63,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/ecl/staging"
 
 	"blips-ifrs9.tugu-re.com/internal/app-b/penempatan"
+	jurnal "blips-ifrs9.tugu-re.com/internal/app-d/jurnal"
 )
 
 // version adalah versi service yang dilaporkan probe liveness.
@@ -817,6 +818,47 @@ func main() {
 	penHandler := penempatan.NewHandler(penSvc)
 	penempatan.RegisterRoutes(v1, penHandler, jwtVerifier, db)
 
+	// -----------------------------------------------------------------------
+	// APP-D P5-M2 — Jurnal Event Resolver & Posting Engine
+	// Endpoints (all under /api/v1/jurnal/):
+	//   POST   /jurnal/mapping-headers                         — create mapping draft
+	//   GET    /jurnal/mapping-headers                         — list (cursor, sort, filter)
+	//   GET    /jurnal/mapping-headers/export                  — async export
+	//   GET    /jurnal/mapping-headers/:id                     — detail
+	//   PATCH  /jurnal/mapping-headers/:id                     — edit draft
+	//   POST   /jurnal/mapping-headers/:id/{submit,review,...} — workflow transitions
+	//   POST   /jurnal/resolve                                  — resolver preview (no write)
+	//   POST   /jurnal/post                                    — manual post (PERIODE_ADJUSTMENT)
+	//   GET    /jurnal                                         — list jurnal headers
+	//   GET    /jurnal/:id                                     — jurnal detail
+	//   GET    /jurnal/:id/export                              — single jurnal export
+	//   GET    /jurnal/export                                  — bulk export
+	//   POST   /jurnal/:id/{submit,approve,reject}             — manual posting workflow
+	//   GET    /jurnal/dlq                                     — DLQ list
+	//   GET    /jurnal/dlq/:id                                 — DLQ detail
+	//   POST   /jurnal/dlq/:id/{replay,discard}               — DLQ actions
+	//
+	// DEC-P5-M1-002: 27 event codes; DEC-P5-M1-003: 6-eyes regulated.
+	// DEC-017 SoD, DEC-018 audit-in-tx, DEC-027 step-up MFA on regulated approve.
+	// Balance invariant: Σ DEBIT = Σ KREDIT enforced at service + DB level.
+	// Append-only jrnl.* enforced by DB triggers (migration 000035).
+	// -----------------------------------------------------------------------
+	jurnalMappingRepo := jurnal.NewMappingRepo(db)
+	jurnalHeaderRepo := jurnal.NewJurnalRepo(db)
+	jurnalDLQRepo := jurnal.NewDLQRepo(db)
+
+	jurnalMappingSvc := jurnal.NewMappingService(jurnalMappingRepo, auditWriter, logger)
+	jurnalResolverSvc := jurnal.NewResolverService(jurnalMappingRepo, db, logger)
+	jurnalPostingSvc := jurnal.NewPostingService(jurnalHeaderRepo, jurnalDLQRepo, jurnalResolverSvc, auditWriter, logger)
+	jurnalDLQSvc := jurnal.NewDLQService(jurnalDLQRepo, jurnalPostingSvc, auditWriter, logger)
+
+	jurnalHandler := jurnal.NewHandler(jurnalMappingSvc, jurnalResolverSvc, jurnalPostingSvc, jurnalDLQSvc)
+	jurnal.RegisterRoutes(v1, jurnalHandler, jwtVerifier, db)
+
+	// Asynq worker for P5-M2 (registered on asynqMux below when Redis is set).
+	jurnalWorker := jurnal.NewWorker(jurnalPostingSvc, jurnalDLQRepo, logger)
+	_ = jurnalWorker // registered in Redis block below
+
 	// B1 fix: Register DriftCronHandler on Asynq mux + scheduler.
 	// Previously the handler was instantiated then discarded (_ = ...), making the
 	// drift cron feature completely dead.  Now we:
@@ -845,6 +887,9 @@ func main() {
 		// P5-M1: penempatan deposito maturity check daily cron.
 		penMaturityWorker := penempatan.NewMaturityCheckHandler(penSvc, logger)
 		asynqMux.HandleFunc(penempatan.MaturityCheckTaskType, penMaturityWorker.ProcessTask)
+
+		// P5-M2: jurnal engine subscribers for penempatan events.
+		jurnalWorker.RegisterHandlers(asynqMux)
 
 		// Asynq Server — pulls tasks from Redis queue and dispatches to mux.
 		asynqServer := asynq.NewServer(asynqRedisOpt, asynq.Config{
