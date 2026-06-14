@@ -390,8 +390,12 @@ type TerminatedEvent struct {
 // ─── EIR Preview types ────────────────────────────────────────────────────────
 
 // EIRPreviewResult is returned by GET /eir-preview.
+// EIRAwalApprox is a coupon-based monthly rate approximation (F4 fix, DEC-013).
+// The full Newton-Raphson EIR is computed asynchronously post-approve by ecl-eir-engineer.
+// IsApproximate=true signals callers this is NOT the authoritative EIR.
 type EIRPreviewResult struct {
-	EIRAwal              *decimal.Decimal  `json:"eirAwal"`            // null for FVTPL
+	EIRAwalApprox        *decimal.Decimal  `json:"eirAwalApprox"`      // null for FVTPL; coupon approx, NOT authoritative EIR
+	IsApproximate        bool              `json:"isApproximate"`      // always true for preview; false only for post-compute actual EIR
 	CarryingAmountAwal   *decimal.Decimal  `json:"carryingAmountAwal"` // null for FVTPL
 	PeriodePreview       int               `json:"periodePreview"`
 	Info                 *string           `json:"info,omitempty"` // informational for FVTPL

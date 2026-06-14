@@ -1122,7 +1122,8 @@ paths:
                     $ref: "#/components/schemas/ResponseMeta"
               example:
                 data:
-                  eirAwal: 0.05250000
+                  eirAwalApprox: 0.05250000
+                  isApproximate: true
                   carryingAmountAwal: 5000000000.0000
                   periodePreview: 10
                   info: null
@@ -1869,13 +1870,18 @@ components:
       type: object
       description: |
         Hasil preview EIR (tidak dipersist). Newton-Raphson per DEC-013.
-        Jika instrumen FVTPL/FVOCI_ELECTION: eirAwal = null, info diisi, amortizationSchedule = [].
+        Jika instrumen FVTPL/FVOCI_ELECTION: eirAwalApprox = null, info diisi, amortizationSchedule = [].
+        isApproximate=true menandai bahwa nilai ini adalah aproksimasi kupon, BUKAN EIR Newton-Raphson
+        yang authoritative. EIR aktual dihitung async oleh Asynq EIR_COMPUTE job post-approve.
       properties:
-        eirAwal:
+        eirAwalApprox:
           type: number
           format: double
           nullable: true
-          description: "EIR result. NUMERIC(10,8). Null jika FVTPL/FVOCI_ELECTION."
+          description: "Aproksimasi EIR berbasis kupon (F4 fix). NUMERIC(10,8). Null jika FVTPL/FVOCI_ELECTION. Bukan EIR final — lihat isApproximate."
+        isApproximate:
+          type: boolean
+          description: "true jika nilai eirAwalApprox adalah aproksimasi kupon (bukan Newton-Raphson). false jika FVTPL (tidak berlaku)."
         carryingAmountAwal:
           type: number
           format: double
