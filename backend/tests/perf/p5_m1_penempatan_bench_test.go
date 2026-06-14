@@ -60,18 +60,18 @@ type benchSettlementBalance struct {
 // ─── Shared benchmark seed data ───────────────────────────────────────────────
 
 var (
-	benchBaseDate      = time.Date(2026, 6, 14, 0, 0, 0, 0, time.UTC)
-	benchNominalIDR    = decimal.NewFromInt(5_000_000_000)
-	benchKuponPersen   = decimal.NewFromFloat(0.05250000)
-	benchBiaya         = decimal.Zero
-	benchTenorBulan    = 12
+	benchBaseDate    = time.Date(2026, 6, 14, 0, 0, 0, 0, time.UTC)
+	benchNominalIDR  = decimal.NewFromInt(5_000_000_000)
+	benchKuponPersen = decimal.NewFromFloat(0.05250000)
+	benchBiaya       = decimal.Zero
+	benchTenorBulan  = 12
 
 	// Pre-computed values used by multiple benchmarks.
-	benchInstrACID   = uuid.New()
-	benchBankID      = uuid.New()
-	benchPeriodeID   = uuid.New()
-	benchMakerID     = uuid.New()
-	benchTenantID    = "TUGURE"
+	benchInstrACID = uuid.New()
+	benchBankID    = uuid.New()
+	benchPeriodeID = uuid.New()
+	benchMakerID   = uuid.New()
+	benchTenantID  = "TUGURE"
 
 	// Shared instrumen map (simulates mst.instrumen lookup).
 	benchInstrMap = map[uuid.UUID]*benchInstrumen{

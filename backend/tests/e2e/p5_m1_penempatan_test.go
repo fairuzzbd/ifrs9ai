@@ -8,7 +8,7 @@
 //
 //	P5-A  Full AC happy path (create → submit → review → approve → APPROVED_ACTIVE → MATURED)
 //	P5-B  FVTPL guard — staging_skipped, no EIR enqueue (DEC-P5-M1-001)
-//	P5-C  FVOCI_ELECTION guard — same skip behaviour
+//	P5-C  FVOCI_ELECTION guard — same skip behavior
 //	P5-D  SoD: maker tries to review own penempatan → 403 PENEMPATAN_SOD_VIOLATION
 //	P5-E  SoD: reviewer tries to approve → 403
 //	P5-F  Step-up MFA stale (> 5 min) → 403 PENEMPATAN_STEP_UP_REQUIRED
@@ -63,37 +63,37 @@ const (
 	statusTerminationPendingApproval = "TERMINATION_PENDING_APPROVAL"
 
 	// Klasifikasi PSAK 71 (mirrors mst.instrumen.klasifikasi_psak71).
-	klasifikasiAC           = "AC"
-	klasifikasiFVOCI        = "FVOCI"
-	klasifikasiFVTPL        = "FVTPL"
-	klasifikasiFVOCIELEC    = "FVOCI_ELECTION"
-	klasifikasiPOCI         = "POCI"
+	klasifikasiAC        = "AC"
+	klasifikasiFVOCI     = "FVOCI"
+	klasifikasiFVTPL     = "FVTPL"
+	klasifikasiFVOCIELEC = "FVOCI_ELECTION"
+	klasifikasiPOCI      = "POCI"
 
 	// Audit action constants (mirrors aud.audit_log.action values for P5-M1).
-	auditPenempatanCreated          = "PENEMPATAN.CREATED"
-	auditPenempatanSubmitted        = "PENEMPATAN.SUBMITTED"
-	auditPenempatanReviewed         = "PENEMPATAN.REVIEWED"
-	auditPenempatanApproved         = "PENEMPATAN.APPROVED"
-	auditPenempatanRejected         = "PENEMPATAN.REJECTED"
-	auditPenempatanStagingInitial   = "PENEMPATAN.STAGING_INITIAL"
-	auditPenempatanStagingSkipped   = "PENEMPATAN.STAGING_SKIPPED_FVTPL"
-	auditPenempatanMatured          = "PENEMPATAN.MATURED"
-	auditPenempatanDerecognQueued   = "PENEMPATAN.DERECOGNITION_QUEUED"
-	auditPenempatanTermProp         = "PENEMPATAN.TERMINATE_PROPOSED"
-	auditPenempatanTermReviewed     = "PENEMPATAN.TERMINATE_REVIEWED"
-	auditPenempatanTermApproved     = "PENEMPATAN.TERMINATE_APPROVED"
-	auditPenempatanTermRejected     = "PENEMPATAN.TERMINATE_REJECTED"
-	auditPenempatanSODAttempt       = "PENEMPATAN.SOD_VIOLATION_ATTEMPT"
+	auditPenempatanCreated        = "PENEMPATAN.CREATED"
+	auditPenempatanSubmitted      = "PENEMPATAN.SUBMITTED"
+	auditPenempatanReviewed       = "PENEMPATAN.REVIEWED"
+	auditPenempatanApproved       = "PENEMPATAN.APPROVED"
+	auditPenempatanRejected       = "PENEMPATAN.REJECTED"
+	auditPenempatanStagingInitial = "PENEMPATAN.STAGING_INITIAL"
+	auditPenempatanStagingSkipped = "PENEMPATAN.STAGING_SKIPPED_FVTPL"
+	auditPenempatanMatured        = "PENEMPATAN.MATURED"
+	auditPenempatanDerecognQueued = "PENEMPATAN.DERECOGNITION_QUEUED"
+	auditPenempatanTermProp       = "PENEMPATAN.TERMINATE_PROPOSED"
+	auditPenempatanTermReviewed   = "PENEMPATAN.TERMINATE_REVIEWED"
+	auditPenempatanTermApproved   = "PENEMPATAN.TERMINATE_APPROVED"
+	auditPenempatanTermRejected   = "PENEMPATAN.TERMINATE_REJECTED"
+	auditPenempatanSODAttempt     = "PENEMPATAN.SOD_VIOLATION_ATTEMPT"
 
 	// Staging action response field values.
 	stagingActionStage1Assigned = "STAGE_1_ASSIGNED"
 	stagingActionSkippedFVTPL   = "SKIPPED_FVTPL"
 
 	// Error codes (mirrors p5-m1-penempatan.md §6 error catalog).
-	errSODViolation       = "PENEMPATAN_SOD_VIOLATION"
-	errStepUpRequired     = "PENEMPATAN_STEP_UP_REQUIRED"
-	errInvalidTransition  = "PENEMPATAN_INVALID_TRANSITION"
-	errPeriodeClosed      = "PENEMPATAN_PERIODE_HARD_CLOSED"
+	errSODViolation        = "PENEMPATAN_SOD_VIOLATION"
+	errStepUpRequired      = "PENEMPATAN_STEP_UP_REQUIRED"
+	errInvalidTransition   = "PENEMPATAN_INVALID_TRANSITION"
+	errPeriodeClosed       = "PENEMPATAN_PERIODE_HARD_CLOSED"
 	errHardDeleteForbidden = "HARD_DELETE_FORBIDDEN"
 )
 
@@ -101,46 +101,46 @@ const (
 
 // penempatanRecord is the in-memory representation of trx.penempatan_deposito.
 type penempatanRecord struct {
-	ID                   uuid.UUID
-	KodeTransaksi        string
-	InstrumenID          uuid.UUID
-	KlasifikasiPsak71    string
-	CounterpartyBankID   uuid.UUID
-	PeriodeID            uuid.UUID
-	TanggalPenempatan    time.Time
-	TanggalJatuhTempo    time.Time
-	NominalIDR           decimal.Decimal
-	NominalFCY           *decimal.Decimal
-	KursPenempatan       *decimal.Decimal
-	TenorBulan           int
-	KuponPersen          decimal.Decimal
-	BiayaTransaksiIDR    decimal.Decimal
-	SettlementAccount    string
-	WorkflowStatus       string
-	MakerID              uuid.UUID
-	ReviewerID           *uuid.UUID
-	ApproverID           *uuid.UUID
-	ReviewerSignedAt     *time.Time
-	ApproverSignedAt     *time.Time
-	ReviewerSigHash      string
-	ApproverSigHash      string
-	RejectReason         string
-	TerminateReason      string
-	TerminatedAt         *time.Time
-	TerminateReviewerID  *uuid.UUID
-	TerminateApproverID  *uuid.UUID
-	TermRevSignedAt      *time.Time
-	TermApprSignedAt     *time.Time
-	TermRevSigHash       string
-	TermApprSigHash      string
-	MaturedAt            *time.Time
-	EIRAwal              *decimal.Decimal
-	CarryingAmountAwal   *decimal.Decimal
-	StagingAction        string
-	EIRComputeJobID      *string
-	RowVersion           int64
-	DeletedAt            *time.Time
-	TenantID             string
+	ID                  uuid.UUID
+	KodeTransaksi       string
+	InstrumenID         uuid.UUID
+	KlasifikasiPsak71   string
+	CounterpartyBankID  uuid.UUID
+	PeriodeID           uuid.UUID
+	TanggalPenempatan   time.Time
+	TanggalJatuhTempo   time.Time
+	NominalIDR          decimal.Decimal
+	NominalFCY          *decimal.Decimal
+	KursPenempatan      *decimal.Decimal
+	TenorBulan          int
+	KuponPersen         decimal.Decimal
+	BiayaTransaksiIDR   decimal.Decimal
+	SettlementAccount   string
+	WorkflowStatus      string
+	MakerID             uuid.UUID
+	ReviewerID          *uuid.UUID
+	ApproverID          *uuid.UUID
+	ReviewerSignedAt    *time.Time
+	ApproverSignedAt    *time.Time
+	ReviewerSigHash     string
+	ApproverSigHash     string
+	RejectReason        string
+	TerminateReason     string
+	TerminatedAt        *time.Time
+	TerminateReviewerID *uuid.UUID
+	TerminateApproverID *uuid.UUID
+	TermRevSignedAt     *time.Time
+	TermApprSignedAt    *time.Time
+	TermRevSigHash      string
+	TermApprSigHash     string
+	MaturedAt           *time.Time
+	EIRAwal             *decimal.Decimal
+	CarryingAmountAwal  *decimal.Decimal
+	StagingAction       string
+	EIRComputeJobID     *string
+	RowVersion          int64
+	DeletedAt           *time.Time
+	TenantID            string
 }
 
 // penempatanApprovedEvent is the event emitted post-approve (consumed by P5-M2).
@@ -442,9 +442,15 @@ type p5EventBus struct {
 
 func newP5EventBus() *p5EventBus { return &p5EventBus{} }
 
-func (b *p5EventBus) emitApproved(e penempatanApprovedEvent)   { b.approvedEvents = append(b.approvedEvents, e) }
-func (b *p5EventBus) emitMatured(e penempatanMaturedEvent)     { b.maturedEvents = append(b.maturedEvents, e) }
-func (b *p5EventBus) emitTerminated(e penempatanTerminatedEvent) { b.terminatedEvents = append(b.terminatedEvents, e) }
+func (b *p5EventBus) emitApproved(e penempatanApprovedEvent) {
+	b.approvedEvents = append(b.approvedEvents, e)
+}
+func (b *p5EventBus) emitMatured(e penempatanMaturedEvent) {
+	b.maturedEvents = append(b.maturedEvents, e)
+}
+func (b *p5EventBus) emitTerminated(e penempatanTerminatedEvent) {
+	b.terminatedEvents = append(b.terminatedEvents, e)
+}
 
 func (b *p5EventBus) approvedCount() int   { return len(b.approvedEvents) }
 func (b *p5EventBus) maturedCount() int    { return len(b.maturedEvents) }
@@ -459,9 +465,9 @@ type p5AsynqQueue struct {
 
 func newP5AsynqQueue() *p5AsynqQueue { return &p5AsynqQueue{} }
 
-func (q *p5AsynqQueue) enqueueEIRCompute(t eIRComputeTask)  { q.eirTasks = append(q.eirTasks, t) }
-func (q *p5AsynqQueue) enqueueMaturityCheck() { q.maturityTasks++ } //nolint:unused // harness helper
-func (q *p5AsynqQueue) eirComputeCount() int                 { return len(q.eirTasks) }
+func (q *p5AsynqQueue) enqueueEIRCompute(t eIRComputeTask) { q.eirTasks = append(q.eirTasks, t) }
+func (q *p5AsynqQueue) enqueueMaturityCheck()              { q.maturityTasks++ } //nolint:unused // harness helper
+func (q *p5AsynqQueue) eirComputeCount() int               { return len(q.eirTasks) }
 func (q *p5AsynqQueue) hasEIRTaskForPenempatan(id uuid.UUID) bool {
 	for _, t := range q.eirTasks {
 		if t.PenempatanID == id {
@@ -507,23 +513,23 @@ func computeSignatureHash(actorID uuid.UUID, step string, entityID uuid.UUID, si
 // ─── T01: Create (DRAFT) ──────────────────────────────────────────────────────
 
 type createPenempatanRequest struct {
-	InstrumenID          uuid.UUID
-	CounterpartyBankID   uuid.UUID
-	PeriodeID            uuid.UUID
-	TanggalPenempatan    time.Time
-	NominalIDR           decimal.Decimal
-	NominalFCY           *decimal.Decimal
-	MataUangKode         string
-	KursPenempatan       *decimal.Decimal
-	TenorBulan           int
-	KuponPersen          decimal.Decimal
-	BiayaTransaksiIDR    decimal.Decimal
-	SettlementAccount    string
-	IdempotencyKey       uuid.UUID
+	InstrumenID        uuid.UUID
+	CounterpartyBankID uuid.UUID
+	PeriodeID          uuid.UUID
+	TanggalPenempatan  time.Time
+	NominalIDR         decimal.Decimal
+	NominalFCY         *decimal.Decimal
+	MataUangKode       string
+	KursPenempatan     *decimal.Decimal
+	TenorBulan         int
+	KuponPersen        decimal.Decimal
+	BiayaTransaksiIDR  decimal.Decimal
+	SettlementAccount  string
+	IdempotencyKey     uuid.UUID
 }
 
 type createPenempatanResult struct {
-	Record               *penempatanRecord
+	Record                *penempatanRecord
 	SettlementBalanceHint *settlementBalanceHint
 }
 
@@ -588,9 +594,9 @@ func (s *penempatanTestService) Create(ctx context.Context, req createPenempatan
 // ─── T02: Submit (DRAFT → PENDING_REVIEW) ────────────────────────────────────
 
 type workflowActionRequest struct {
-	Comment          string
-	SignatureMethod   string
-	IdempotencyKey   uuid.UUID
+	Comment         string
+	SignatureMethod string
+	IdempotencyKey  uuid.UUID
 }
 
 func (s *penempatanTestService) Submit(ctx context.Context, id uuid.UUID, req workflowActionRequest, actor *auth.Claims) (*penempatanRecord, error) {
@@ -815,9 +821,9 @@ func (s *penempatanTestService) RunMaturityCheck(ctx context.Context, today time
 // ─── T09: Terminate propose (APPROVED_ACTIVE → TERMINATION_PENDING_REVIEW) ───
 
 type terminateRequestBody struct {
-	TerminateReason     string
-	DokumenTerminasiID  *uuid.UUID
-	IdempotencyKey      uuid.UUID
+	TerminateReason    string
+	DokumenTerminasiID *uuid.UUID
+	IdempotencyKey     uuid.UUID
 }
 
 func (s *penempatanTestService) TerminateRequest(ctx context.Context, id uuid.UUID, req terminateRequestBody, actor *auth.Claims) (*penempatanRecord, error) {
@@ -1101,7 +1107,7 @@ func TestE2E_P5M1_ScenarioA_FullACHappyPath(t *testing.T) {
 		t.Fatalf("ScenarioA: Create failed: %v", err)
 	}
 	r := res.Record
-	assertPenempatanStatus(t,r, statusDraft, "after-create")
+	assertPenempatanStatus(t, r, statusDraft, "after-create")
 	assertAuditContains(t, h, r.ID.String(), auditPenempatanCreated, "create")
 
 	// Verify kode_transaksi format PNP-{YYYY}{MM}-{######}.
@@ -1118,7 +1124,7 @@ func TestE2E_P5M1_ScenarioA_FullACHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScenarioA: Submit failed: %v", err)
 	}
-	assertPenempatanStatus(t,r, statusPendingReview, "after-submit")
+	assertPenempatanStatus(t, r, statusPendingReview, "after-submit")
 	assertAuditContains(t, h, r.ID.String(), auditPenempatanSubmitted, "submit")
 
 	// ── T04: Review ──────────────────────────────────────────────────────────
@@ -1129,7 +1135,7 @@ func TestE2E_P5M1_ScenarioA_FullACHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScenarioA: Review failed: %v", err)
 	}
-	assertPenempatanStatus(t,r, statusPendingApproval, "after-review")
+	assertPenempatanStatus(t, r, statusPendingApproval, "after-review")
 	assertAuditContains(t, h, r.ID.String(), auditPenempatanReviewed, "review")
 
 	// Verify signature hash set.
@@ -1151,7 +1157,7 @@ func TestE2E_P5M1_ScenarioA_FullACHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScenarioA: Approve failed: %v", err)
 	}
-	assertPenempatanStatus(t,r, statusApprovedActive, "after-approve")
+	assertPenempatanStatus(t, r, statusApprovedActive, "after-approve")
 
 	// Verify audit: APPROVED + STAGING_INITIAL (both in same logical transaction).
 	assertAuditContains(t, h, r.ID.String(), auditPenempatanApproved, "approve")
@@ -1201,7 +1207,7 @@ func TestE2E_P5M1_ScenarioA_FullACHappyPath(t *testing.T) {
 	if len(matured) != 1 || matured[0] != r.ID {
 		t.Errorf("ScenarioA: expected 1 matured penempatan, got %v", matured)
 	}
-	assertPenempatanStatus(t,r, statusMatured, "after-maturity-cron")
+	assertPenempatanStatus(t, r, statusMatured, "after-maturity-cron")
 	assertAuditContains(t, h, r.ID.String(), auditPenempatanMatured, "matured")
 	assertAuditContains(t, h, r.ID.String(), auditPenempatanDerecognQueued, "derecognition-queued")
 
@@ -1281,7 +1287,7 @@ func TestE2E_P5M1_ScenarioB_FVTPLGuard(t *testing.T) {
 
 // ─── Scenario P5-C: FVOCI_ELECTION guard ─────────────────────────────────────
 //
-// Same skip behaviour as P5-B — FVOCI_ELECTION is irrevocable equity classification
+// Same skip behavior as P5-B — FVOCI_ELECTION is irrevocable equity classification
 // with no ECL scope (PSAK 71 §5.7.7a, no recycling, no impairment).
 
 func TestE2E_P5M1_ScenarioC_FVOCIElectionGuard(t *testing.T) {
@@ -1346,10 +1352,10 @@ func TestE2E_P5M1_ScenarioD_SoDMakerTriesToReview(t *testing.T) {
 	ctxAReview := ctxWithApproverActor(userA, true)
 	claimsAReview := claimsFromCtx(ctxAReview)
 	_, err := h.svc.Review(ctxAReview, r.ID, workflowActionRequest{Comment: "review attempt", IdempotencyKey: uuid.New()}, claimsAReview)
-	assertPenempatanErrorCode(t,err, errSODViolation, "maker-review-SoD")
+	assertPenempatanErrorCode(t, err, errSODViolation, "maker-review-SoD")
 
 	// Workflow status must not change.
-	assertPenempatanStatus(t,r, statusPendingReview, "after-SoD-attempt")
+	assertPenempatanStatus(t, r, statusPendingReview, "after-SoD-attempt")
 
 	// Audit SOD_VIOLATION_ATTEMPT must be written.
 	assertAuditContains(t, h, r.ID.String(), auditPenempatanSODAttempt, "sod-audit-written")
@@ -1381,9 +1387,9 @@ func TestE2E_P5M1_ScenarioE_SoDReviewerTriesToApprove(t *testing.T) {
 
 	// User B (reviewer) tries to approve → SoD violation.
 	_, err := h.svc.Approve(ctxB, r.ID, workflowActionRequest{Comment: "approve attempt", IdempotencyKey: uuid.New()}, claimsB)
-	assertPenempatanErrorCode(t,err, errSODViolation, "reviewer-approve-SoD")
+	assertPenempatanErrorCode(t, err, errSODViolation, "reviewer-approve-SoD")
 
-	assertPenempatanStatus(t,r, statusPendingApproval, "after-reviewer-SoD-attempt")
+	assertPenempatanStatus(t, r, statusPendingApproval, "after-reviewer-SoD-attempt")
 	assertAuditContains(t, h, r.ID.String(), auditPenempatanSODAttempt, "reviewer-sod-audit")
 }
 
@@ -1415,10 +1421,10 @@ func TestE2E_P5M1_ScenarioF_StepUpMFAStaleOnApprove(t *testing.T) {
 	claimsCStale := claimsFromCtx(ctxCStale)
 
 	_, err := h.svc.Approve(ctxCStale, r.ID, workflowActionRequest{Comment: "approve with stale MFA", IdempotencyKey: uuid.New()}, claimsCStale)
-	assertPenempatanErrorCode(t,err, errStepUpRequired, "stale-stepup-approve")
+	assertPenempatanErrorCode(t, err, errStepUpRequired, "stale-stepup-approve")
 
 	// Status unchanged.
-	assertPenempatanStatus(t,r, statusPendingApproval, "after-stale-stepup")
+	assertPenempatanStatus(t, r, statusPendingApproval, "after-stale-stepup")
 
 	// Fresh step-up should succeed.
 	ctxCFresh := ctxWithApproverActor(userC, true)
@@ -1427,7 +1433,7 @@ func TestE2E_P5M1_ScenarioF_StepUpMFAStaleOnApprove(t *testing.T) {
 	if err != nil {
 		t.Errorf("ScenarioF: Fresh step-up should succeed, got: %v", err)
 	}
-	assertPenempatanStatus(t,r, statusApprovedActive, "after-fresh-stepup-approve")
+	assertPenempatanStatus(t, r, statusApprovedActive, "after-fresh-stepup-approve")
 	_ = userC
 }
 
@@ -1459,7 +1465,7 @@ func TestE2E_P5M1_ScenarioG_Terminate4EyesHappy(t *testing.T) {
 	_, _ = h.svc.Submit(ctxA, r.ID, workflowActionRequest{Comment: "submit", IdempotencyKey: uuid.New()}, claimsA)
 	_, _ = h.svc.Review(ctxB, r.ID, workflowActionRequest{Comment: "review", IdempotencyKey: uuid.New()}, claimsB)
 	_, _ = h.svc.Approve(ctxC, r.ID, workflowActionRequest{Comment: "approve", IdempotencyKey: uuid.New()}, claimsC)
-	assertPenempatanStatus(t,r, statusApprovedActive, "before-terminate")
+	assertPenempatanStatus(t, r, statusApprovedActive, "before-terminate")
 
 	// ── Terminate propose (User D = separate maker for terminate) ────────────
 	ctxD := ctxWithMakerActor(userD)
@@ -1471,7 +1477,7 @@ func TestE2E_P5M1_ScenarioG_Terminate4EyesHappy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScenarioG: TerminateRequest failed: %v", err)
 	}
-	assertPenempatanStatus(t,r, statusTerminationPendingReview, "after-terminate-propose")
+	assertPenempatanStatus(t, r, statusTerminationPendingReview, "after-terminate-propose")
 	assertAuditContains(t, h, r.ID.String(), auditPenempatanTermProp, "terminate-proposed")
 
 	// ── Terminate review (User E ≠ User D) ───────────────────────────────────
@@ -1484,7 +1490,7 @@ func TestE2E_P5M1_ScenarioG_Terminate4EyesHappy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScenarioG: TerminateReview failed: %v", err)
 	}
-	assertPenempatanStatus(t,r, statusTerminationPendingApproval, "after-terminate-review")
+	assertPenempatanStatus(t, r, statusTerminationPendingApproval, "after-terminate-review")
 	assertAuditContains(t, h, r.ID.String(), auditPenempatanTermReviewed, "terminate-reviewed")
 
 	// Verify terminate reviewer signature hash.
@@ -1505,7 +1511,7 @@ func TestE2E_P5M1_ScenarioG_Terminate4EyesHappy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScenarioG: TerminateApprove failed: %v", err)
 	}
-	assertPenempatanStatus(t,r, statusTerminated, "after-terminate-approve")
+	assertPenempatanStatus(t, r, statusTerminated, "after-terminate-approve")
 
 	// Verify audit chain.
 	assertAuditContains(t, h, r.ID.String(), auditPenempatanTermApproved, "terminate-approved")
@@ -1564,14 +1570,14 @@ func TestE2E_P5M1_ScenarioH_TerminateSoDViolations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScenarioH: TerminateRequest by maker should succeed: %v", err)
 	}
-	assertPenempatanStatus(t,r, statusTerminationPendingReview, "before-sod-tests")
+	assertPenempatanStatus(t, r, statusTerminationPendingReview, "before-sod-tests")
 
 	// ── Attempt 1: User A (original maker) tries to terminate-review → SoD ──
 	ctxAReview := ctxWithApproverActor(userA, true)
 	claimsAReview := claimsFromCtx(ctxAReview)
 	_, err = h.svc.TerminateReview(ctxAReview, r.ID, workflowActionRequest{Comment: "review by maker", IdempotencyKey: uuid.New()}, claimsAReview)
-	assertPenempatanErrorCode(t,err, errSODViolation, "terminate-review-by-maker")
-	assertPenempatanStatus(t,r, statusTerminationPendingReview, "after-terminate-review-SoD")
+	assertPenempatanErrorCode(t, err, errSODViolation, "terminate-review-by-maker")
+	assertPenempatanStatus(t, r, statusTerminationPendingReview, "after-terminate-review-SoD")
 	assertAuditContains(t, h, r.ID.String(), auditPenempatanSODAttempt, "terminate-review-SoD-audit")
 
 	// Legitimate reviewer (User B) reviews.
@@ -1579,19 +1585,19 @@ func TestE2E_P5M1_ScenarioH_TerminateSoDViolations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScenarioH: legitimate TerminateReview failed: %v", err)
 	}
-	assertPenempatanStatus(t,r, statusTerminationPendingApproval, "after-legitimate-terminate-review")
+	assertPenempatanStatus(t, r, statusTerminationPendingApproval, "after-legitimate-terminate-review")
 
 	// ── Attempt 2: User A (original maker) tries to terminate-approve → SoD ─
 	ctxAApprove := ctxWithApproverActor(userA, true)
 	claimsAApprove := claimsFromCtx(ctxAApprove)
 	_, err = h.svc.TerminateApprove(ctxAApprove, r.ID, workflowActionRequest{Comment: "approve by maker", IdempotencyKey: uuid.New()}, claimsAApprove)
-	assertPenempatanErrorCode(t,err, errSODViolation, "terminate-approve-by-maker")
-	assertPenempatanStatus(t,r, statusTerminationPendingApproval, "after-terminate-approve-SoD")
+	assertPenempatanErrorCode(t, err, errSODViolation, "terminate-approve-by-maker")
+	assertPenempatanStatus(t, r, statusTerminationPendingApproval, "after-terminate-approve-SoD")
 
 	// ── Attempt 3: User B (terminate_reviewer) tries to terminate-approve → SoD
 	_, err = h.svc.TerminateApprove(ctxB, r.ID, workflowActionRequest{Comment: "approve by reviewer", IdempotencyKey: uuid.New()}, claimsB)
-	assertPenempatanErrorCode(t,err, errSODViolation, "terminate-approve-by-reviewer")
-	assertPenempatanStatus(t,r, statusTerminationPendingApproval, "after-terminate-reviewer-SoD")
+	assertPenempatanErrorCode(t, err, errSODViolation, "terminate-approve-by-reviewer")
+	assertPenempatanStatus(t, r, statusTerminationPendingApproval, "after-terminate-reviewer-SoD")
 
 	// Verify total SoD attempt audits = 3.
 	sodCount := h.auditLog.countAction(r.ID.String(), auditPenempatanSODAttempt)
@@ -1627,7 +1633,7 @@ func TestE2E_P5M1_ScenarioI_SettlementBalanceHintInformational(t *testing.T) {
 	if res.SettlementBalanceHint != nil {
 		t.Errorf("ScenarioI[no-balance]: hint should be nil when no balance record, got: %+v", res.SettlementBalanceHint)
 	}
-	assertPenempatanStatus(t,res.Record, statusDraft, "no-balance-create")
+	assertPenempatanStatus(t, res.Record, statusDraft, "no-balance-create")
 
 	// ── Case 2: Stale balance (> 24h) → hint.IsStale = true, no block ────────
 	staleDate := time.Now().Add(-25 * time.Hour) // 25h ago = stale
@@ -1639,7 +1645,7 @@ func TestE2E_P5M1_ScenarioI_SettlementBalanceHintInformational(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScenarioI[stale-balance]: Create must succeed (no block): %v", err)
 	}
-	assertPenempatanStatus(t,res2.Record, statusDraft, "stale-balance-create")
+	assertPenempatanStatus(t, res2.Record, statusDraft, "stale-balance-create")
 	if res2.SettlementBalanceHint == nil {
 		t.Fatal("ScenarioI[stale-balance]: hint must be non-nil when balance record exists")
 	}
@@ -1657,7 +1663,7 @@ func TestE2E_P5M1_ScenarioI_SettlementBalanceHintInformational(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScenarioI[fresh-balance-insufficient]: Create must not be blocked even when nominal > balance: %v", err)
 	}
-	assertPenempatanStatus(t,res3.Record, statusDraft, "fresh-balance-no-block")
+	assertPenempatanStatus(t, res3.Record, statusDraft, "fresh-balance-no-block")
 	if res3.SettlementBalanceHint == nil {
 		t.Fatal("ScenarioI[fresh-balance]: hint must be non-nil")
 	}
@@ -1744,7 +1750,7 @@ func TestE2E_P5M1_ScenarioK_HardDeleteForbidden(t *testing.T) {
 
 	// Attempt hard delete → must be rejected.
 	err = h.svc.TryHardDelete(context.Background(), r.ID)
-	assertPenempatanErrorCode(t,err, errHardDeleteForbidden, "hard-delete-forbidden")
+	assertPenempatanErrorCode(t, err, errHardDeleteForbidden, "hard-delete-forbidden")
 
 	// Record must still exist in store (not deleted).
 	if h.svc.records[r.ID] == nil {
