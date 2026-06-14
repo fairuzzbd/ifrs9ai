@@ -245,10 +245,10 @@ func TestCarryingAmountFormula(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		name          string
-		nominalIDR    string
+		name           string
+		nominalIDR     string
 		biayaTransaksi string
-		want          string
+		want           string
 	}{
 		{
 			name:           "with_biaya",

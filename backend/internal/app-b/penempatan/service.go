@@ -98,7 +98,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, claims *auth.Cl
 			"Format tanggal penempatan tidak valid. Gunakan YYYY-MM-DD.")
 	}
 	today := time.Now().UTC().Truncate(24 * time.Hour)
-	if tanggalPenempatan.UTC().Truncate(24*time.Hour).After(today) {
+	if tanggalPenempatan.UTC().Truncate(24 * time.Hour).After(today) {
 		return nil, domainerrors.New(domainerrors.Code(ErrCodeTanggalPenempatanInvalid),
 			"Tanggal penempatan tidak boleh lebih dari hari ini.")
 	}
@@ -250,7 +250,7 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest, c
 			return nil, domainerrors.New(domainerrors.Code(ErrCodeTanggalPenempatanInvalid), "Format tanggal penempatan tidak valid.")
 		}
 		today := time.Now().UTC().Truncate(24 * time.Hour)
-		if newTanggal.UTC().Truncate(24*time.Hour).After(today) {
+		if newTanggal.UTC().Truncate(24 * time.Hour).After(today) {
 			return nil, domainerrors.New(domainerrors.Code(ErrCodeTanggalPenempatanInvalid), "Tanggal penempatan tidak boleh lebih dari hari ini.")
 		}
 	} else {

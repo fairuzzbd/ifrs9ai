@@ -104,40 +104,40 @@ func (r *Repo) NextKodeSeq(ctx context.Context, tx *sql.Tx, bulan time.Time) (st
 func (r *Repo) Get(ctx context.Context, id uuid.UUID, tenantID string) (*Penempatan, error) {
 	p := &Penempatan{}
 	var (
-		nominalFCY         *string
-		kursPenempatan     *string
-		eirAwal            *string
-		carryingAmountAwal *string
-		realizedGL         *string
-		reviewerID         *string
-		approverID         *string
-		reviewerSignedAt   *time.Time
-		approverSignedAt   *time.Time
-		reviewerSigHash    []byte
-		approverSigHash    []byte
-		kontrakDocID       *string
-		dokTerminasiID     *string
-		terminateMakerID   *string
-		terminateRevID     *string
-		terminateApprID    *string
-		terminateRevSignAt *time.Time
-		terminateApprSignAt *time.Time
-		terminateRevSigHash []byte
+		nominalFCY           *string
+		kursPenempatan       *string
+		eirAwal              *string
+		carryingAmountAwal   *string
+		realizedGL           *string
+		reviewerID           *string
+		approverID           *string
+		reviewerSignedAt     *time.Time
+		approverSignedAt     *time.Time
+		reviewerSigHash      []byte
+		approverSigHash      []byte
+		kontrakDocID         *string
+		dokTerminasiID       *string
+		terminateMakerID     *string
+		terminateRevID       *string
+		terminateApprID      *string
+		terminateRevSignAt   *time.Time
+		terminateApprSignAt  *time.Time
+		terminateRevSigHash  []byte
 		terminateApprSigHash []byte
-		terminateReqReason  *string
-		terminateRevComment *string
+		terminateReqReason   *string
+		terminateRevComment  *string
 		terminateApprComment *string
-		terminateRejReason  *string
-		terminatedAt        *time.Time
-		maturedAt           *time.Time
-		rejectReason        *string
-		commentReview       *string
-		commentApprove      *string
-		nomorRefBank        *string
-		settlementAccount   *string
-		catatan             *string
-		deletedAt           *time.Time
-		deletedBy           *string
+		terminateRejReason   *string
+		terminatedAt         *time.Time
+		maturedAt            *time.Time
+		rejectReason         *string
+		commentReview        *string
+		commentApprove       *string
+		nomorRefBank         *string
+		settlementAccount    *string
+		catatan              *string
+		deletedAt            *time.Time
+		deletedBy            *string
 	)
 
 	err := r.db.QueryRowContext(ctx, `
@@ -293,16 +293,16 @@ func (r *Repo) Get(ctx context.Context, id uuid.UUID, tenantID string) (*Penempa
 func (r *Repo) GetForUpdate(ctx context.Context, tx *sql.Tx, id uuid.UUID, tenantID string) (*Penempatan, error) {
 	p := &Penempatan{}
 	var (
-		reviewerID  *string
-		approverID  *string
-		terminateMakerID *string
-		terminateRevID   *string
-		terminateApprID  *string
-		rejectReason     *string
+		reviewerID         *string
+		approverID         *string
+		terminateMakerID   *string
+		terminateRevID     *string
+		terminateApprID    *string
+		rejectReason       *string
 		terminateReqReason *string
-		deletedAt   *time.Time
-		deletedBy   *string
-		statusStr   string
+		deletedAt          *time.Time
+		deletedBy          *string
+		statusStr          string
 	)
 
 	err := tx.QueryRowContext(ctx, `
@@ -473,24 +473,24 @@ func (r *Repo) UpdateDraft(ctx context.Context, tx *sql.Tx, id uuid.UUID, req Up
 
 // StatusUpdate holds fields for a workflow status transition.
 type StatusUpdate struct {
-	NewStatus            Status
-	ReviewerID           *uuid.UUID
-	ReviewerSignedAt     *time.Time
+	NewStatus             Status
+	ReviewerID            *uuid.UUID
+	ReviewerSignedAt      *time.Time
 	ReviewerSignatureHash []byte
-	ApproverID           *uuid.UUID
-	ApproverSignedAt     *time.Time
+	ApproverID            *uuid.UUID
+	ApproverSignedAt      *time.Time
 	ApproverSignatureHash []byte
-	RejectReason         *string
-	CommentReview        *string
-	CommentApprove       *string
+	RejectReason          *string
+	CommentReview         *string
+	CommentApprove        *string
 	// Terminate workflow fields
 	TerminateMakerID               *uuid.UUID
 	TerminateReviewerID            *uuid.UUID
 	TerminateApproverID            *uuid.UUID
 	TerminateReviewerSignedAt      *time.Time
 	TerminateApproverSignedAt      *time.Time
-	TerminateReviewerSignatureHash  []byte
-	TerminateApproverSignatureHash  []byte
+	TerminateReviewerSignatureHash []byte
+	TerminateApproverSignatureHash []byte
 	TerminateRequestReason         *string
 	TerminateReviewComment         *string
 	TerminateApproveComment        *string
