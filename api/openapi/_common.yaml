@@ -353,6 +353,23 @@ components:
         - ROLL_FORWARD_SCOPE_MISMATCH           # 422 — scope run partial vs all-active tidak kompatibel untuk roll-forward
         - ROLL_FORWARD_INVALID_CALC_RUN_STATUS  # 422 — currentCalcRunId berstatus DRAFT (alias untuk current_invalid_state, UI-facing)
         - ROLL_FORWARD_INVALID_PRIOR_PERIOD     # 422 — priorCalcRunId dari periode yang sama atau lebih baru (alias periode_mismatch, UI-facing)
+        # APP-D P5-M2 — Jurnal Engine
+        - JURNAL_EVENT_NOT_MAPPED            # 422 — tidak ada mapping APPROVED untuk event_code
+        - JURNAL_KLASIFIKASI_NOT_ELIGIBLE    # 422 — event_code × klasifikasi_psak71 tidak match
+        - JURNAL_BALANCE_INVARIANT           # 422 — sum debit ≠ sum kredit (resolver atau template rusak)
+        - JURNAL_PERIODE_HARD_CLOSED         # 423 — periode HARD_CLOSED, posting tidak bisa dilakukan
+        - JURNAL_DUPLICATE_POST              # 409 — same source_event_id + event_code sudah ada di jrnl.header
+        - JURNAL_INVALID_TRANSITION          # 422 — state machine reject transition mapping atau manual posting
+        - JURNAL_SOD_VIOLATION               # 403 — SoD violation di mapping 6-eyes atau manual posting
+        - JURNAL_STEP_UP_REQUIRED            # 403 — approve regulated / approve-2 butuh step-up MFA (DEC-027)
+        - JURNAL_AMOUNT_INVALID              # 422 — amountIdr ≤ 0
+        - JURNAL_INSTRUMEN_NOT_FOUND         # 404 — instrumen_id tidak ada di mst.instrumen
+        - JURNAL_HEADER_NOT_FOUND            # 404 — mapping jurnal header tidak ditemukan
+        - JURNAL_DLQ_NOT_FOUND              # 404 — DLQ entry tidak ditemukan di sys.dlq_jurnal_post
+        - JURNAL_DLQ_ALREADY_REPLAYED       # 409 — DLQ entry sudah REPLAYED_OK, tidak bisa di-replay ulang
+        - JURNAL_DLQ_DISCARD_REASON_TOO_SHORT # 422 — discard/reject reason < 30 karakter
+        - JURNAL_DLQ_REPLAY_PERIODE_HARD_CLOSED # 423 — replay tidak bisa karena periode masih HARD_CLOSED
+        - JURNAL_MAPPING_WORKFLOW_GATE       # 422 — regulated code tanpa 6-eyes path (misconfiguration)
         # APP-B P5-M1 — Penempatan Deposito
         - PENEMPATAN_INSTRUMEN_NOT_FOUND           # 404 — instrumen_id tidak ada atau soft-deleted
         - PENEMPATAN_INSTRUMEN_INVALID_KLASIFIKASI # 422 — klasifikasi instrumen belum APPROVED di mst.instrumen
