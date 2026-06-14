@@ -1,0 +1,658 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — Common Schemas & Responses
+  version: "1.0.0"
+  description: |
+    Shared schemas: error envelope, success envelope, cursor pagination,
+    error codes catalogue, common request headers.
+    Di-$ref dari semua modul OpenAPI.
+
+    Konvensi:
+    - Path: kebab-case
+    - Query params: snake_case
+    - JSON body: camelCase
+    - DB columns: snake_case (tidak exposed ke API)
+    - Dates: ISO 8601 dengan TZ (TIMESTAMPTZ) atau date-only string
+    - Money: number (bukan string), presisi sesuai tipe
+    - DEC-020, DEC-021, DEC-022
+
+paths: {}   # File ini hanya berisi components
+
+components:
+  # -------------------------------------------------------------------------
+  # Security Schemes
+  # -------------------------------------------------------------------------
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT RSA-2048 signed oleh Keycloak. Access token TTL 15 menit (DEC-025).
+        Claims wajib: sub, preferred_username, roles[], permissions[],
+        tenant_id, mfa_verified, exp, iat, nbf.
+        Permission check di service layer pakai {entity}.{action}, bukan role string.
+
+  # -------------------------------------------------------------------------
+  # Headers
+  # -------------------------------------------------------------------------
+  headers:
+    IdempotencyKey:
+      description: |
+        UUID v4 unik per request. Wajib di semua mutating endpoints (DEC-021).
+        TTL replay window: 24 jam.
+        - Same key + same payload → IDEMPOTENCY_REPLAY 200 (original response)
+        - Same key + beda payload → IDEMPOTENCY_MISMATCH 422
+      schema:
+        type: string
+        format: uuid
+      required: true
+
+    XTraceId:
+      description: Trace ID untuk distributed tracing. Gateway inject otomatis.
+      schema:
+        type: string
+
+    XStepUpToken:
+      description: |
+        Token dari POST /auth/step-up. Diperlukan untuk action sensitif:
+        hard-close periode, ECL parameter approve, klasifikasi approve,
+        calc-run seal (DEC-027).
+      schema:
+        type: string
+
+  # -------------------------------------------------------------------------
+  # Parameters (query)
+  # -------------------------------------------------------------------------
+  parameters:
+    cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+      description: Opaque base64 cursor dari pagination.nextCursor response sebelumnya (DEC-022)
+
+    limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+      description: Jumlah item per halaman. Default 50, max 200.
+
+    sortParam:
+      name: sort
+      in: query
+      required: false
+      schema:
+        type: string
+        pattern: "^[a-z_]+(:(asc|desc))?(,[a-z_]+(:(asc|desc))?)*$"
+      description: "Multi-column sort. Format: col1:asc,col2:desc. Max 3 kolom."
+      example: "created_at:desc,kode:asc"
+
+    searchParam:
+      name: q
+      in: query
+      required: false
+      schema:
+        type: string
+        maxLength: 200
+      description: "Text search global. Server menentukan kolom yang di-scan."
+
+    includeDeleted:
+      name: include_deleted
+      in: query
+      required: false
+      schema:
+        type: boolean
+        default: false
+      description: "Tampilkan soft-deleted records. Hanya untuk ROLE-AUDIT."
+
+  # -------------------------------------------------------------------------
+  # Schemas — Common
+  # -------------------------------------------------------------------------
+  schemas:
+
+    # ---- Pagination -------------------------------------------------------
+    PaginationResponse:
+      type: object
+      required: [nextCursor, hasMore]
+      properties:
+        nextCursor:
+          type: string
+          nullable: true
+          description: Cursor untuk halaman berikutnya. null jika tidak ada lagi.
+          example: "eyJpZCI6IjAxSFhZLi4uIn0="
+        hasMore:
+          type: boolean
+        totalEstimate:
+          type: integer
+          description: Estimasi total row (bukan COUNT pasti — dari EXPLAIN). Untuk UI saja.
+          nullable: true
+        limit:
+          type: integer
+
+    # ---- Response meta ----------------------------------------------------
+    ResponseMeta:
+      type: object
+      properties:
+        traceId:
+          type: string
+          example: "01HXY..."
+
+    # ---- Success envelope -------------------------------------------------
+    SuccessEnvelope:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          description: Object atau array. Type-specific per endpoint.
+        meta:
+          $ref: "#/components/schemas/ResponseMeta"
+
+    # ---- List envelope (dengan pagination) --------------------------------
+    ListEnvelope:
+      type: object
+      required: [data, pagination, meta]
+      properties:
+        data:
+          type: array
+          description: Array item
+        pagination:
+          $ref: "#/components/schemas/PaginationResponse"
+        appliedSort:
+          type: array
+          items:
+            type: object
+            properties:
+              col:
+                type: string
+              dir:
+                type: string
+                enum: [asc, desc]
+        appliedFilter:
+          type: object
+          additionalProperties: true
+          description: Filter yang sedang aktif (echo back dari server)
+        meta:
+          $ref: "#/components/schemas/ResponseMeta"
+
+    # ---- Error envelope ---------------------------------------------------
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details, traceId]
+          properties:
+            code:
+              $ref: "#/components/schemas/ErrorCode"
+            message:
+              type: string
+              description: Human-readable message (Bahasa Indonesia). JANGAN expose stack trace.
+            details:
+              type: array
+              items:
+                $ref: "#/components/schemas/ErrorDetail"
+            traceId:
+              type: string
+
+    ErrorDetail:
+      type: object
+      properties:
+        field:
+          type: string
+          description: "Dot-notation field path, mis. 'body.tanggalPenempatan'"
+        rule:
+          type: string
+          description: "Nama rule yang gagal, mis. 'required', 'min', 'date_format'"
+        message:
+          type: string
+          description: Pesan spesifik untuk field ini
+
+    # ---- Error codes catalogue (stable strings) ---------------------------
+    ErrorCode:
+      type: string
+      description: |
+        Stable error code string. Tidak pernah berubah antar versi minor.
+        Kode baru boleh ditambah; kode lama tidak boleh dihapus/rename
+        tanpa major version bump (DEC-020).
+      enum:
+        # Generic
+        - VALIDATION_FAILED          # 400 — field/cross-field validation
+        - UNAUTHORIZED               # 401 — JWT invalid/missing/expired
+        - IDLE_TIMEOUT               # 401 — refresh valid tapi idle > 15m
+        - FORBIDDEN                  # 403 — permission tidak terpenuhi
+        - SOD_VIOLATION              # 403 — maker=reviewer=approver
+        - MFA_REQUIRED               # 403 — action butuh MFA yg belum verified
+        - MFA_CHALLENGE_FAILED       # 403 — TOTP/WEBAUTHN/PUSH salah
+        - NOT_FOUND                  # 404 — entity tidak ditemukan
+        - CONFLICT                   # 409 — optimistic lock (row_version mismatch)
+        - IDEMPOTENCY_REPLAY         # 200 — same key, return original response
+        - IDEMPOTENCY_MISMATCH       # 422 — same key, payload beda
+        - WORKFLOW_INVALID_TRANSITION # 422 — state machine reject transition
+        - PERIODE_CLOSED             # 423 — periode hard-closed
+        - ECL_PARAM_FROZEN           # 423 — calc run sealed
+        - RATE_LIMITED               # 429 — too many requests
+        - INTERNAL                   # 500 — unexpected
+        # Domain-specific
+        - SPPI_TEST_INCOMPLETE       # 422 — belum semua Q1-Q10 dijawab
+        - BM_ASSESSMENT_REQUIRED     # 422 — BM belum di-assess untuk portofolio
+        - SOD_APPROVER1_SAME_AS_MAKER     # 403 — 6-eyes: approver1 = maker
+        - SOD_APPROVER2_SAME_AS_REVIEWER  # 403 — 6-eyes: approver2 = reviewer/maker
+        - INVALID_SORT_COL           # 400 — sort column tidak di whitelist
+        - STEP_UP_REQUIRED           # 403 — action butuh step-up MFA
+        - STEP_UP_EXPIRED            # 403 — step-up token sudah > 5 menit
+        - JOB_NOT_CANCELLABLE        # 422 — job tidak bisa di-cancel di state ini
+        - JOB_NOT_FOUND              # 404 — job ID tidak ditemukan
+        # SSE-specific (security hardening)
+        - BAD_SSE_TOKEN_IN_QUERY    # 400 — JWT di ?token= query param terdeteksi dan ditolak
+        - BAD_SSE_AUTH_CONFLICT     # 400 — Authorization header + SSE ticket dari user berbeda
+        - SSE_TICKET_INVALID        # 401 — SSE ticket tidak valid, sudah dipakai, atau expired
+        # Master data (APP-A)
+        - SYSTEM_CURRENCY_PROTECTED # 403 — Mata uang fungsional sistem tidak bisa dihapus/diubah kode
+        - ENTITY_IN_USE             # 409 — Record tidak bisa dihapus karena masih direferensikan
+        - MASTER_APPROVED_NO_EDIT   # 403 — Record APPROVED tidak bisa diedit langsung (ajukan amandemen)
+        - WORKFLOW_NOT_RETURNED     # 422 — Re-submit hanya bisa dari state RETURNED
+        - ACTIVE_FLAG_REF_CONFLICT  # 422 — aktif_flag tidak bisa diubah false karena ada referensi aktif
+        # Staging engine (APP-C, P4-M1)
+        - STAGING_EVAL_INSTRUMEN_NOT_FOUND   # 404 — instrumen tidak ada di mst.instrumen
+        - STAGING_OVERRIDE_INVALID_TRANSITION # 422 — transisi stage tidak valid (mis. Stage3→Stage1 langsung)
+        - STAGING_DPD_MISSING               # 422 — DPD record belum ada untuk instrumen+periode
+        - STAGING_CURE_PERIODE_INSUFFICIENT  # 422 — belum 3 periode consecutive untuk cure
+        - STAGING_OVERRIDE_EXPIRED          # 410 — override proposal sudah kadaluarsa
+        - STAGING_RATING_BASELINE_MISSING   # 422 — rating_at_origination tidak ditemukan
+        - STAGING_CALC_RUN_SEALED           # 423 — calc run periode sudah sealed, tidak bisa override
+        # ECL Helpers (APP-C, P4-M2)
+        - PD_LOOKUP_RATING_MISSING          # 422 — rating aktif counterparty tidak ada per evaluationDate
+        - PD_LOOKUP_CURVE_NOT_FOUND         # 422 — tidak ada pd_pefindo APPROVED untuk rating+periode
+        - PD_LOOKUP_PARAMETER_INACTIVE      # 422 — impact_pd tidak ada row APPROVED untuk periodeId
+        - PD_LOOKUP_FL_PARAM_MISSING        # 422 — impact_mev_pd (GOOD/BAD) tidak ada untuk skenario+periode
+        - PD_LOOKUP_TENOR_OUT_OF_RANGE      # 422 — tenor_remaining negatif (instrumen sudah jatuh tempo)
+        - LGD_LOOKUP_POOL_NOT_FOUND         # 422 — tidak ada row APPROVED di mst.lgd_basel untuk tipe_eksposur
+        - LGD_LOOKUP_MAPPING_NOT_FOUND      # 422 — tipe_counterparty tidak ada di LGD_COUNTERPARTY_TYPE_MAPPING
+        - LGD_COLLATERAL_HAIRCUT_INVALID    # 422 — collateral haircut value di luar range [0, 1)
+        - LGD_LOOKUP_USE_LOOKTHROUGH        # 422 — instrumen REKSADANA harus via look-through P4-M4
+        - EAD_FX_RATE_MISSING               # 422 — kurs BI JISDOR tidak tersedia per evaluationDate
+        - EAD_FX_RATE_NOT_APPROVED          # 422 — kurs ada tapi workflow_status bukan APPROVED
+        - EAD_INSTRUMEN_NOT_FOUND           # 404 — instrumenId tidak ada di mst.instrumen
+        - CCF_CONFIG_MISSING                # 422 — sys.config CCF_TABLE tidak ditemukan
+        - CCF_INSTRUMEN_TYPE_UNKNOWN        # 422 — tipe_instrumen bukan nilai enum yang valid
+        - HELPERS_BULK_TOO_LARGE            # 413 — request array > 1000 item
+        - HELPERS_PARAMETER_SNAPSHOT_MISMATCH # 409 — calc run sealed pakai snapshot lama (defer ke M7)
+        - INSTRUMENT_ECL_NOT_APPLICABLE     # 422 — instrumen FVTPL/FVOCI_ELECTION tidak butuh ECL
+        - ECL_PARAM_NOT_READY               # 422 — parameter belum semua APPROVED untuk periode
+        # LPS Aggregator (APP-C, P4-M3)
+        - LPS_COVERAGE_NO_ACTIVE_PARAM        # 422 — tidak ada mst.lps_coverage APPROVED berlaku pada evaluationDate; blocking calc run
+        - LPS_OVERRIDE_INSTRUMEN_NOT_FOUND    # 404 — instrumenId tidak ada di mst.instrumen atau sudah soft-deleted
+        - LPS_OVERRIDE_REASON_TOO_SHORT       # 422 — alasan exclusion < 30 karakter
+        - LPS_OVERRIDE_INVALID_TRANSITION     # 422 — transisi workflow LPS override tidak valid untuk state saat ini
+        - LPS_OVERRIDE_EXPIRED               # 410 — proposal/override sudah melewati effectiveTo atau periode sudah expired
+        - LPS_OVERRIDE_SOD_VIOLATION         # 403 — approver_id = maker_id pada LPS exclusion override (4-eyes SoD)
+        - LPS_OVERRIDE_PERIODE_INVALID       # 422 — effectiveFrom > effectiveTo pada proposal override
+        - LPS_AGGREGATE_INSTRUMEN_NOT_DEPOSITO # 422 — instrumen bukan tipe DEPOSITO (scope Phase 4 = DEPOSITO only)
+        - LPS_AGGREGATE_BULK_TOO_LARGE       # 413 — instrumen dalam scope bulk aggregate > 50.000
+        # Look-through Reksadana (APP-C, P4-M4)
+        - LOOKTHROUGH_FUND_COMPOSITION_MISSING  # 422 — tidak ada composition APPROVED berlaku per evaluationDate untuk instrumen
+        - LOOKTHROUGH_NAB_MISSING               # 422 — NAB instrumen Reksadana IS NULL (feed belum diupload)
+        - LOOKTHROUGH_WEIGHT_INVALID            # 422 — sum weight_pct fund composition ≠ 100% ± 0.01% (submit atau defensive runtime)
+        - LOOKTHROUGH_INSTRUMEN_NOT_REKSADANA   # 422 — instrumen bukan tipe REKSADANA
+        - LOOKTHROUGH_ASSET_CLASS_UNKNOWN       # 422 — asset_class bukan enum valid (GOVT_BOND/CORP_BOND/CASH/EQUITY/OTHER)
+        - LOOKTHROUGH_PD_LGD_CLASS_MISSING      # 422 — PD atau LGD tidak tersedia per asset class + periodeId
+        - LOOKTHROUGH_COMPOSITION_REVIEW_INVALID_TRANSITION  # 422 — transisi workflow fund composition tidak valid
+        - LOOKTHROUGH_COMPOSITION_SOD_VIOLATION # 403 — SoD: reviewer=maker atau approver=maker/reviewer pada composition
+        - LOOKTHROUGH_BULK_TOO_LARGE            # 413 — jumlah Reksadana aktif dalam scope > 10.000
+        - LOOKTHROUGH_POCI_DEFERRED             # 422 — POCI Reksadana di-skip dari look-through compute (defer ke M7)
+        # EIR Solver + Amortisasi Schedule (APP-C, P4-M5)
+        - EIR_NON_CONVERGENT                  # 422 — Newton-Raphson exceeded max 100 iterations (DEC-013)
+        - EIR_DIVERGENT                       # 422 — residual growing or f'(r) near zero
+        - EIR_CASHFLOW_INVALID                # 422 — null/empty cashflow, negative amount, or missing jatuh tempo
+        - EIR_CASHFLOW_SIGN_MISMATCH          # 422 — CF[0] must be negative (initial outflow)
+        - EIR_INSTRUMEN_FVTPL_NO_EIR          # 422 — FVTPL or FVOCI_ELECTION does not use amortized cost
+        - EIR_SCHEDULE_NOT_FOUND              # 404 — no schedule rows found for instrumen
+        - EIR_SCHEDULE_PERIODE_OUT_OF_RANGE   # 422 — requested periode exceeds instrumen maturity date
+        - EIR_DUPLICATE_SCHEDULE_VERSION      # 409 — active schedule already exists; use amendment workflow
+        - EIR_POCI_REQUIRES_PD_ADJUSTED_CF    # 422 — POCI instrumen but cashflow not PD-adjusted
+        - EIR_BULK_RECOMPUTE_INVALID_SCOPE    # 400 — scope parameter not valid
+        - EIR_INSTRUMEN_NOT_FOUND             # 404 — instrumenId not found in mst.instrumen
+        - EIR_ALREADY_COMPUTED                # 409 — eir_awal already set; use amendment or forceRecompute
+        - EIR_NOT_YET_COMPUTED                # 422 — generate schedule attempted before EIR was computed
+        # M9 warning codes (non-error, informational — returned in HTTP 200 warnings[] field)
+        - STAGING_SICR_EVIDENCE_UNAVAILABLE   # warning — trigger_payload_jsonb null (pre-migration-0022 rows or INITIAL trigger)
+        - EIR_SOLVER_METADATA_EMPTY           # warning — solverMetadata not available for compute records pre-M9
+        # Calc Run Orchestration (APP-C, P4-M8)
+        - CALC_RUN_NOT_FOUND               # 404 — calc_run id tidak ada di ecl.calc_run
+        - CALC_RUN_INVALID_TRANSITION      # 422 — transisi status state machine tidak valid
+        - CALC_RUN_DUPLICATE_IN_PROGRESS   # 409 — sudah ada IN_PROGRESS untuk periode yang sama
+        - CALC_RUN_PERIODE_ALREADY_SEALED  # 409 — sudah ada SEALED calc_run untuk periode yang sama
+        - CALC_RUN_PERIODE_HARD_CLOSED     # 422 — periode buku HARD_CLOSED saat create atau start
+        - CALC_RUN_PARAMETER_SNAPSHOT_INVALID  # 422 — satu atau lebih parameter ECL belum APPROVED untuk periode
+        - CALC_RUN_SEAL_REQUIRES_COMPLETED     # 422 — seal/request hanya valid dari status COMPLETED
+        - CALC_RUN_SEAL_NOT_REQUESTED          # 422 — seal/approve atau reject tapi status bukan SEAL_REQUESTED
+        - CALC_RUN_SEAL_SOD_VIOLATION          # 403 — approver = requester (4-eyes SoD)
+        - CALC_RUN_SEAL_STEP_UP_REQUIRED       # 403 — seal/approve dipanggil tanpa step-up MFA valid
+        - CALC_RUN_HAS_ERRORS                  # 422 — seal/request dipanggil tapi error_count > 0
+        - CALC_RUN_CANCEL_REASON_TOO_SHORT     # 422 — cancel_reason < 30 karakter
+        - CALC_RUN_CANCEL_AFTER_COMPLETED      # 422 — tidak bisa cancel setelah COMPLETED/SEALED
+        - FX_RATE_NOT_FOUND                    # 422 — kurs BI JISDOR tidak tersedia untuk evaluation_date
+        - ECL_PARAM_NOT_FOUND                  # 422 — parameter ECL tidak ditemukan atau belum APPROVED
+        # Roll-Forward CKPN (APP-C, P4-M11)
+        - ROLL_FORWARD_PRIOR_NOT_FOUND          # 404 — priorCalcRunId tidak ada di ecl.calc_run
+        - ROLL_FORWARD_PRIOR_NOT_SEALED         # 422 — prior bukan SEALED (DRAFT/COMPLETED = preview only, warning)
+        - ROLL_FORWARD_CURRENT_INVALID_STATE    # 422 — currentCalcRunId harus COMPLETED atau SEALED
+        - ROLL_FORWARD_PERIODE_MISMATCH         # 422 — current periode harus setelah prior periode
+        - ROLL_FORWARD_DETECTION_METHOD_INVALID # 422 — detectionMethod bukan nilai valid enum
+        - ROLL_FORWARD_EXPORT_MISMATCH_FORBIDDEN # 422 — export diblokir karena reconcileStatus=MISMATCH dan force_mismatch=false
+        - ROLL_FORWARD_PORTFOLIO_NOT_FOUND      # 404 — portofolioId tidak ditemukan di mst.portofolio
+        - ROLL_FORWARD_TREND_INSUFFICIENT_DATA  # 422 — butuh ≥ 2 SEALED calc run untuk menampilkan tren
+        - ROLL_FORWARD_SCOPE_MISMATCH           # 422 — scope run partial vs all-active tidak kompatibel untuk roll-forward
+        - ROLL_FORWARD_INVALID_CALC_RUN_STATUS  # 422 — currentCalcRunId berstatus DRAFT (alias untuk current_invalid_state, UI-facing)
+        - ROLL_FORWARD_INVALID_PRIOR_PERIOD     # 422 — priorCalcRunId dari periode yang sama atau lebih baru (alias periode_mismatch, UI-facing)
+
+    # ---- Timestamps -------------------------------------------------------
+    TimestampISO:
+      type: string
+      format: date-time
+      description: "ISO 8601 dengan timezone. Contoh: 2026-06-02T10:30:00+07:00"
+      example: "2026-06-02T10:30:00+07:00"
+
+    DateOnly:
+      type: string
+      format: date
+      description: "Date only ISO 8601. Contoh: 2026-06-02"
+      example: "2026-06-02"
+
+    # ---- Audit fields (wajib ada di semua entity response) ----------------
+    AuditFields:
+      type: object
+      properties:
+        createdAt:
+          $ref: "#/components/schemas/TimestampISO"
+        createdBy:
+          type: string
+          format: uuid
+        updatedAt:
+          $ref: "#/components/schemas/TimestampISO"
+        updatedBy:
+          type: string
+          format: uuid
+        deletedAt:
+          $ref: "#/components/schemas/TimestampISO"
+          nullable: true
+        rowVersion:
+          type: integer
+          description: Optimistic lock counter. Increment on every UPDATE.
+
+    # ---- Workflow state ---------------------------------------------------
+    WorkflowState:
+      type: string
+      enum:
+        - DRAFT
+        - PENDING_REVIEW
+        - PENDING_APPROVAL     # 4-eyes: satu approver
+        - PENDING_APPROVAL_2   # 6-eyes: menunggu approver kedua
+        - APPROVED
+        - REJECTED
+      description: |
+        State machine workflow entity.
+        DRAFT → PENDING_REVIEW → PENDING_APPROVAL → APPROVED|REJECTED (4-eyes)
+        DRAFT → PENDING_REVIEW → PENDING_APPROVAL → PENDING_APPROVAL_2 → APPROVED|REJECTED (6-eyes)
+
+    WorkflowConfig:
+      type: object
+      description: |
+        Konfigurasi workflow engine per entity type.
+        Disimpan di sys.config dengan key 'WORKFLOW_CONFIG_{ENTITY_TYPE}'.
+        Backend-engineer-go baca config ini untuk determine 4-eyes vs 6-eyes.
+      required: [entityType, eyes, requiredPermissions]
+      properties:
+        entityType:
+          type: string
+          description: Entity yang menggunakan workflow ini
+          example: "KLASIFIKASI"
+        eyes:
+          type: integer
+          enum: [4, 6]
+          description: |
+            4 = 4-eyes (Maker → Reviewer → Approver)
+            6 = 6-eyes (Maker → Reviewer → Approver1 → Approver2)
+            DEC-017: 6-eyes hanya untuk klasifikasi PSAK 71 + parameter master.
+        requiredPermissions:
+          type: object
+          description: Permission yang dibutuhkan per step
+          properties:
+            submit:
+              type: string
+              example: "klasifikasi.submit"
+            review:
+              type: string
+              example: "klasifikasi.review"
+            approve:
+              type: string
+              example: "klasifikasi.approve"
+            approve2:
+              type: string
+              nullable: true
+              description: Hanya untuk 6-eyes. null untuk 4-eyes.
+              example: "klasifikasi.approve"
+            reject:
+              type: string
+              example: "klasifikasi.reject"
+        stepUpRequired:
+          type: object
+          description: Step mana yang butuh step-up MFA (DEC-027)
+          properties:
+            approve:
+              type: boolean
+              default: false
+            approve2:
+              type: boolean
+              default: false
+        sodRules:
+          type: object
+          description: SoD rules yang berlaku. Hard-coded per DEC-017.
+          properties:
+            reviewerNotMaker:
+              type: boolean
+              default: true
+            approverNotMakerOrReviewer:
+              type: boolean
+              default: true
+            approver2NotAnyPrevious:
+              type: boolean
+              description: Hanya relevan untuk 6-eyes
+              default: true
+
+    # ---- Signing record (disimpan di DB, tidak boleh diupdate) -----------
+    WorkflowSignature:
+      type: object
+      description: Record penandatanganan workflow — IMMUTABLE setelah dibuat
+      required: [userId, role, action, signedAt, signatureHash, signatureMethod]
+      properties:
+        userId:
+          type: string
+          format: uuid
+        role:
+          type: string
+          description: Role aktif user saat signing
+        action:
+          type: string
+          enum: [SUBMIT, REVIEW, APPROVE, APPROVE2, REJECT]
+        signedAt:
+          $ref: "#/components/schemas/TimestampISO"
+        signatureHash:
+          type: string
+          description: "SHA-256(userId || action || entityId || signedAt || comment)"
+        signatureMethod:
+          type: string
+          enum: [JWT_STEP_UP, JWT_STANDARD]
+        comment:
+          type: string
+          nullable: true
+          maxLength: 1000
+
+  # -------------------------------------------------------------------------
+  # Responses (reusable)
+  # -------------------------------------------------------------------------
+  responses:
+    ValidationFailed:
+      description: Validasi field atau cross-field gagal
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: VALIDATION_FAILED
+              message: "3 field tidak valid"
+              details:
+                - field: "body.tanggalPenempatan"
+                  rule: "required"
+                  message: "Tanggal penempatan wajib diisi"
+                - field: "body.nominal"
+                  rule: "min"
+                  message: "Nominal harus lebih dari 0"
+              traceId: "01HXY..."
+
+    Unauthorized:
+      description: JWT tidak valid, missing, atau expired
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: UNAUTHORIZED
+              message: "Token JWT tidak valid atau sudah expired"
+              details: []
+              traceId: "01HXY..."
+
+    Forbidden:
+      description: Permission tidak terpenuhi
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: FORBIDDEN
+              message: "Anda tidak memiliki permission 'instrumen.create'"
+              details: []
+              traceId: "01HXY..."
+
+    SodViolation:
+      description: SoD violation — maker tidak boleh menjadi reviewer/approver
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: SOD_VIOLATION
+              message: "Anda tidak bisa menjadi reviewer untuk transaksi yang Anda buat sendiri"
+              details: []
+              traceId: "01HXY..."
+
+    NotFound:
+      description: Entity tidak ditemukan
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: NOT_FOUND
+              message: "Entity tidak ditemukan"
+              details: []
+              traceId: "01HXY..."
+
+    Conflict:
+      description: "Optimistic lock conflict — row_version mismatch"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: CONFLICT
+              message: "Data sudah diubah oleh user lain. Refresh dan ulangi."
+              details: []
+              traceId: "01HXY..."
+
+    WorkflowInvalidTransition:
+      description: State machine menolak transisi ini
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: WORKFLOW_INVALID_TRANSITION
+              message: "Tidak bisa approve dari state DRAFT. Harus melalui review terlebih dahulu."
+              details:
+                - field: "state"
+                  rule: "invalid_transition"
+                  message: "Transition DRAFT → APPROVED tidak valid"
+              traceId: "01HXY..."
+
+    PeriodeClosed:
+      description: Periode buku sudah hard-closed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: PERIODE_CLOSED
+              message: "Periode buku Juni 2026 sudah hard-closed. Tidak bisa mutasi."
+              details: []
+              traceId: "01HXY..."
+
+    IdempotencyMismatch:
+      description: Idempotency-Key sudah dipakai dengan payload yang berbeda
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: IDEMPOTENCY_MISMATCH
+              message: "Idempotency-Key sudah dipakai dengan payload berbeda dari request sebelumnya"
+              details: []
+              traceId: "01HXY..."
+
+    RateLimited:
+      description: Too many requests
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Detik sampai rate limit reset
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: RATE_LIMITED
+              message: "Terlalu banyak request. Coba lagi dalam 60 detik."
+              details: []
+              traceId: "01HXY..."
+
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: INTERNAL
+              message: "Terjadi kesalahan internal. Hubungi admin dengan traceId."
+              details: []
+              traceId: "01HXY..."

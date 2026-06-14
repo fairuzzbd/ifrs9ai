@@ -1,6 +1,6 @@
 # BLIPS Agent Team — Peran, Handoff, & Decision Rights
 
-13 subagent terpasang di `.claude/agents/`. Dokumen ini meringkas peran, alur kolaborasi, dan hak keputusan masing-masing.
+14 subagent terpasang di `.claude/agents/`. Dokumen ini meringkas peran, alur kolaborasi, dan hak keputusan masing-masing.
 
 ---
 
@@ -49,6 +49,12 @@
 |---|---|---|
 | **tech-lead-orchestrator** | Decompose, delegate, reconcile. Entry point untuk perubahan non-trivial. Tidak menulis kode. | **opus** |
 
+### Governance / Oversight
+
+| Agent | Peran | Model |
+|---|---|---|
+| **mda** (Monitoring & Decision Agent) | **Conformance Monitor — advisory, NON-blocking.** Mengamati pekerjaan subagent terhadap dokumen sumber kebenaran (Decision Log, FSD, SoW, ERD, BRD). Dipanggil **on-demand** via `/audit` atau di milestone (tidak otomatis). Menghasilkan laporan drift (`docs/audit/AUDIT-*.md`): temuan + severity + saran. **Bukan** entry gate, **tidak** memblok kerja, tidak menulis kode/skema. Tidak menggantikan gate BLOCKING compliance/security — hanya menandai. | **opus (4.8)** |
+
 ---
 
 ## 2. Standard Handoff Flow
@@ -56,6 +62,8 @@
 ```mermaid
 flowchart TD
     U[User Request] --> O[tech-lead-orchestrator]
+    O -.->|on-demand: /audit atau milestone| MDA[mda — Conformance Monitor · advisory non-blocking]
+    MDA -.->|laporan drift: temuan + saran<br/>TIDAK memblok| O
     O --> BA[business-analyst]
     BA --> SA[system-analyst]
     SA -->|schema change?| DM[data-modeler]
@@ -78,6 +86,10 @@ flowchart TD
     DEV --> DONE[Done]
 ```
 
+> **MDA = Conformance Monitor (advisory, non-blocking)**: `mda` **bukan** entry gate dan **tidak** di jalur kritis. Default flow `user → tech-lead-orchestrator → subagent` jalan penuh; MDA mengamati dari samping. MDA dipanggil **on-demand** — (a) via slash command `/audit`, atau (b) di milestone bila orchestrator/user menilai perlu. **Tidak otomatis** di akhir run (sengaja, demi velocity). MDA membaca diff + dokumen sumber kebenaran → menulis laporan drift di `docs/audit/AUDIT-{yyyymmdd-HHMM}.md` (temuan HIGH/MEDIUM/LOW + bukti + referensi dokumen + saran + owner). **Tidak ada verdict yang menghentikan kerja** — tim self-correct dari laporan. MDA tidak menggantikan gate BLOCKING `ifrs9-compliance-reviewer`/`security-engineer`; ia hanya menandai bila path regulated tersentuh.
+>
+> **Laporan audit**: output utama MDA adalah file di `docs/audit/`. Opsional, temuan HIGH yang perlu jejak permanen bisa diringkas ke `.claude/memory/mda-ledger.md` (append-only). Tidak ada kewajiban ledger-per-aksi — itu model lama yang sudah ditinggalkan demi velocity.
+
 ---
 
 ## 3. Decision Rights & Veto Power
@@ -91,6 +103,7 @@ flowchart TD
 | Auth, PII, audit, encryption | security-engineer (BLOCKING) | — |
 | Deployment & infra | devops-engineer | security-engineer for destructive ops |
 | Cross-cutting tie-breaks | tech-lead-orchestrator | — |
+| Keputusan strategis / GO-NO-GO atas rekomendasi orchestrator | **mda** (APPROVED/REJECTED/NEED_HUMAN, berbasis dokumen) | tidak menimpa veto BLOCKING ifrs9-compliance-reviewer / security-engineer |
 
 ---
 
@@ -110,6 +123,7 @@ flowchart TD
 | "test", "UAT", "integration test", "E2E", "Playwright", "regression", "k6" | qa-engineer |
 | "Docker", "K8s", "Helm", "Terraform", "Ansible", "GitLab CI", "Grafana", "alert", "DR", "backup" | devops-engineer |
 | "plan", "design proposal", "cross-module", "siapa yang…" | tech-lead-orchestrator |
+| "audit", "konformansi", "drift dari dokumen", "cek sesuai FSD/SoW/DEC?", "review kepatuhan" | **mda** (advisory monitor; on-demand via `/audit` atau di milestone) |
 
 ---
 
@@ -120,7 +134,7 @@ Di Claude Code (interactive):
 > "Tolong implementasi penempatan deposito modul APP-B dengan workflow Maker-Reviewer-Approver"
 ```
 
-Claude Code akan otomatis routing ke `tech-lead-orchestrator` (karena lintas modul + workflow), yang lalu memanggil agent lain via Task tool. Atau panggil langsung:
+Karena `.claude/settings.json` men-set `"agent": "mda"`, main thread sesi adalah **mda** (entry gate). Request Anda dinilai MDA dulu (cek dokumen + locked decisions, catat ledger), lalu — bila `APPROVED` — didelegasikan ke `tech-lead-orchestrator`, yang fan-out ke specialist via Task tool. Anda tetap bisa memanggil agent tertentu langsung:
 
 ```
 > "@business-analyst tolong tulis user story untuk amandemen kontrak deposito"

@@ -1,0 +1,752 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — Generic Workflow Signing Endpoints
+  version: "1.0.0"
+  description: |
+    Generic Maker-Reviewer-Approver workflow endpoints.
+    Berlaku untuk semua entity workflow-bearing:
+    penempatan, klasifikasi, ecl_parameter, periode, jurnal, upload_batch, dll.
+
+    Endpoint pola: POST /api/v1/{resource}/{id}/{action}
+    Action: submit | review | approve | approve2 | reject
+
+    State machine:
+    - 4-eyes (default): DRAFT → PENDING_REVIEW → PENDING_APPROVAL → APPROVED|REJECTED
+    - 6-eyes (config): DRAFT → PENDING_REVIEW → PENDING_APPROVAL → PENDING_APPROVAL_2 → APPROVED|REJECTED
+
+    DEC-017: SoD maker≠reviewer≠approver, server-side enforcement.
+    DEC-021: Idempotency-Key wajib.
+    DEC-027: approve + approve2 untuk entity tertentu butuh step-up MFA.
+
+servers:
+  - url: /api/v1
+    description: BLIPS REST API v1
+
+tags:
+  - name: workflow
+    description: Generic workflow signing — Maker-Reviewer-Approver
+
+paths:
+  # -----------------------------------------------------------------------
+  # SUBMIT (Maker → PENDING_REVIEW)
+  # Guard: state = DRAFT, permission = {entity}.submit
+  # SoD: tidak ada di submit (Maker adalah submitter)
+  # -----------------------------------------------------------------------
+  /{resource}/{id}/submit:
+    post:
+      operationId: workflowSubmit
+      summary: Maker submit entity ke review
+      description: |
+        Transisi: DRAFT → PENDING_REVIEW.
+        Guard:
+        - Current state HARUS DRAFT
+        - User HARUS punya permission {entity}.submit
+        - Entity TIDAK boleh soft-deleted
+
+        Idempotency-Key wajib. Jika replay: return original PENDING_REVIEW response.
+      tags: [workflow]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/resourceParam"
+        - $ref: "#/components/parameters/entityIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowActionRequest"
+      responses:
+        "200":
+          description: Submit sukses — entity sekarang PENDING_REVIEW
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowActionResponse"
+              example:
+                data:
+                  entityId: "01HXYZ..."
+                  entityType: "penempatan"
+                  previousState: "DRAFT"
+                  currentState: "PENDING_REVIEW"
+                  action: "SUBMIT"
+                  performedBy: "budi.santoso"
+                  performedAt: "2026-06-02T10:30:00+07:00"
+                  signature:
+                    signatureHash: "sha256:abc..."
+                    signatureMethod: "JWT_STANDARD"
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/WorkflowInvalidTransition"
+        "423":
+          $ref: "#/components/responses/PeriodeClosed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # -----------------------------------------------------------------------
+  # REVIEW (Reviewer → PENDING_APPROVAL)
+  # Guard: state = PENDING_REVIEW, permission = {entity}.review
+  # SoD: reviewer_id ≠ maker_id
+  # -----------------------------------------------------------------------
+  /{resource}/{id}/review:
+    post:
+      operationId: workflowReview
+      summary: Reviewer sign-off — approve ke approval stage
+      description: |
+        Transisi: PENDING_REVIEW → PENDING_APPROVAL.
+        Guard:
+        - Current state HARUS PENDING_REVIEW
+        - User HARUS punya permission {entity}.review
+        - reviewer_id ≠ maker_id (SoD, DEC-017) → SOD_VIOLATION jika gagal
+        - Entity TIDAK boleh soft-deleted
+
+        Comment opsional tapi dianjurkan.
+        Idempotency-Key wajib.
+      tags: [workflow]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/resourceParam"
+        - $ref: "#/components/parameters/entityIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowActionRequest"
+      responses:
+        "200":
+          description: Review sukses — entity sekarang PENDING_APPROVAL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowActionResponse"
+        "403":
+          description: Forbidden atau SoD violation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                forbidden:
+                  value:
+                    error:
+                      code: FORBIDDEN
+                      message: "Anda tidak memiliki permission untuk mereview entity ini"
+                      details: []
+                      traceId: "01HXY..."
+                sodViolation:
+                  value:
+                    error:
+                      code: SOD_VIOLATION
+                      message: "Anda tidak bisa mereview entity yang Anda buat sendiri"
+                      details: []
+                      traceId: "01HXY..."
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/WorkflowInvalidTransition"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # -----------------------------------------------------------------------
+  # APPROVE (Approver1 → APPROVED [4-eyes] atau PENDING_APPROVAL_2 [6-eyes])
+  # Guard: state = PENDING_APPROVAL, permission = {entity}.approve
+  # SoD: approver_id ≠ maker_id AND approver_id ≠ reviewer_id
+  # Step-up MFA: entity-dependent (config-driven, DEC-027)
+  # -----------------------------------------------------------------------
+  /{resource}/{id}/approve:
+    post:
+      operationId: workflowApprove
+      summary: Approver sign-off — approve entity (final untuk 4-eyes, atau lanjut ke approver2 untuk 6-eyes)
+      description: |
+        Transisi (4-eyes): PENDING_APPROVAL → APPROVED
+        Transisi (6-eyes): PENDING_APPROVAL → PENDING_APPROVAL_2
+
+        Guard:
+        - Current state HARUS PENDING_APPROVAL
+        - User HARUS punya permission {entity}.approve
+        - approver_id ≠ maker_id AND approver_id ≠ reviewer_id (SoD, DEC-017)
+        - Jika entity config stepUpRequired.approve=true:
+          - Header X-Step-Up-Token wajib hadir
+          - Token HARUS valid dan < 5 menit dari issued (DEC-027)
+          - Jika tidak ada/expired → STEP_UP_REQUIRED / STEP_UP_EXPIRED
+
+        Engine baca WorkflowConfig.eyes dari sys.config untuk determine transisi berikutnya.
+        Idempotency-Key wajib.
+      tags: [workflow]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/resourceParam"
+        - $ref: "#/components/parameters/entityIdParam"
+        - name: X-Step-Up-Token
+          in: header
+          required: false
+          schema:
+            type: string
+          description: |
+            Token dari /auth/step-up. Wajib jika entitas config stepUpRequired.approve=true.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowActionRequest"
+      responses:
+        "200":
+          description: |
+            Approve sukses.
+            - 4-eyes: entity APPROVED
+            - 6-eyes: entity PENDING_APPROVAL_2 (menunggu approver kedua)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowActionResponse"
+        "403":
+          description: Forbidden, SoD violation, atau step-up required/expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                sodViolation:
+                  value:
+                    error:
+                      code: SOD_VIOLATION
+                      message: "Anda tidak bisa meng-approve entity yang Anda buat atau review sendiri"
+                      details: []
+                      traceId: "01HXY..."
+                stepUpRequired:
+                  value:
+                    error:
+                      code: STEP_UP_REQUIRED
+                      message: "Action ini memerlukan MFA step-up. Lakukan POST /auth/step-up terlebih dahulu."
+                      details: []
+                      traceId: "01HXY..."
+                stepUpExpired:
+                  value:
+                    error:
+                      code: STEP_UP_EXPIRED
+                      message: "Token step-up sudah expired (> 5 menit). Ulangi step-up MFA."
+                      details: []
+                      traceId: "01HXY..."
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/WorkflowInvalidTransition"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # -----------------------------------------------------------------------
+  # APPROVE2 (6-eyes only — Approver2 → APPROVED)
+  # Guard: state = PENDING_APPROVAL_2, permission = {entity}.approve
+  # SoD: approver2_id ≠ maker_id, reviewer_id, approver1_id
+  # -----------------------------------------------------------------------
+  /{resource}/{id}/approve2:
+    post:
+      operationId: workflowApprove2
+      summary: Approver kedua (6-eyes only) — final approval
+      description: |
+        Hanya valid untuk entity 6-eyes (WorkflowConfig.eyes = 6).
+        Transisi: PENDING_APPROVAL_2 → APPROVED
+
+        Guard:
+        - Current state HARUS PENDING_APPROVAL_2
+        - WorkflowConfig.eyes HARUS = 6 (jika tidak → WORKFLOW_INVALID_TRANSITION)
+        - User HARUS punya permission {entity}.approve
+        - approver2_id ≠ maker_id, reviewer_id, approver1_id (SoD DEC-017)
+        - Jika entity config stepUpRequired.approve2=true: X-Step-Up-Token wajib
+
+        Error code SOD_APPROVER2_SAME_AS_REVIEWER jika SoD gagal di step ini.
+        Idempotency-Key wajib.
+      tags: [workflow]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/resourceParam"
+        - $ref: "#/components/parameters/entityIdParam"
+        - name: X-Step-Up-Token
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowActionRequest"
+      responses:
+        "200":
+          description: Approve2 sukses — entity APPROVED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowActionResponse"
+        "403":
+          description: Forbidden, SoD violation, atau step-up required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                sodViolation:
+                  value:
+                    error:
+                      code: SOD_APPROVER2_SAME_AS_REVIEWER
+                      message: "Approver kedua tidak bisa sama dengan maker, reviewer, atau approver pertama"
+                      details: []
+                      traceId: "01HXY..."
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/WorkflowInvalidTransition"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # -----------------------------------------------------------------------
+  # REJECT (Reviewer atau Approver → REJECTED)
+  # Guard: state ∈ {PENDING_REVIEW, PENDING_APPROVAL, PENDING_APPROVAL_2}
+  # Reject selalu kembali ke REJECTED (bukan DRAFT) — Maker harus buat ulang
+  # atau create amendment workflow.
+  # -----------------------------------------------------------------------
+  /{resource}/{id}/reject:
+    post:
+      operationId: workflowReject
+      summary: Reviewer atau Approver menolak entity
+      description: |
+        Transisi dari state mana pun yang sedang pending:
+        - PENDING_REVIEW → REJECTED (oleh reviewer)
+        - PENDING_APPROVAL → REJECTED (oleh approver1)
+        - PENDING_APPROVAL_2 → REJECTED (oleh approver2)
+
+        Guard:
+        - Current state HARUS salah satu dari PENDING_*
+        - User HARUS punya permission {entity}.reject
+        - Comment WAJIB (tidak boleh kosong) — audit accountability
+        - SoD: sama dengan step yang sedang dilakukan
+          (reviewer reject → reviewer_id ≠ maker_id)
+
+        Entity tidak dikembalikan ke DRAFT. Maker perlu buat entity baru
+        atau trigger amendment workflow (untuk entity seperti penempatan).
+        Idempotency-Key wajib.
+      tags: [workflow]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/resourceParam"
+        - $ref: "#/components/parameters/entityIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowRejectRequest"
+      responses:
+        "200":
+          description: Reject sukses — entity sekarang REJECTED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowActionResponse"
+        "400":
+          description: Comment wajib diisi untuk reject
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: VALIDATION_FAILED
+                  message: "Comment wajib diisi saat reject"
+                  details:
+                    - field: "body.comment"
+                      rule: "required"
+                      message: "Alasan penolakan wajib diisi"
+                  traceId: "01HXY..."
+        "403":
+          $ref: "#/components/responses/SodViolation"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/WorkflowInvalidTransition"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # -----------------------------------------------------------------------
+  # GET workflow status + history
+  # -----------------------------------------------------------------------
+  /{resource}/{id}/workflow:
+    get:
+      operationId: workflowGetStatus
+      summary: Ambil status workflow + riwayat signing
+      description: |
+        Return current state + semua signature records (immutable history).
+        Permission: {entity}.read
+      tags: [workflow]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/resourceParam"
+        - $ref: "#/components/parameters/entityIdParam"
+      responses:
+        "200":
+          description: Workflow status + history
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowStatusResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+# -----------------------------------------------------------------------
+components:
+# -----------------------------------------------------------------------
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    resourceParam:
+      name: resource
+      in: path
+      required: true
+      schema:
+        type: string
+        enum:
+          - penempatan
+          - klasifikasi
+          - ecl-parameter
+          - ecl-run
+          - periode
+          - jurnal
+          - upload-batch
+          - sppi-test
+          - bm-assessment
+          # APP-A master data (Phase 3)
+          - mata-uang
+          - periode-buku
+          - portofolio
+          - chart-of-accounts
+          - mapping-jurnal
+          - kurs
+          - counterparty
+          - instrumen
+      description: Resource type — menentukan entity dan workflow config yang dipakai
+
+    entityIdParam:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: UUID entity target
+
+  schemas:
+    # ---- Request bodies ------------------------------------------------
+
+    WorkflowActionRequest:
+      type: object
+      required: [signatureMethod]
+      properties:
+        comment:
+          type: string
+          maxLength: 1000
+          description: Komentar opsional (wajib untuk reject, lihat WorkflowRejectRequest)
+          example: "Data sudah diperiksa dan sesuai instruksi penempatan dari Treasury Manager"
+        signatureMethod:
+          type: string
+          enum: [JWT_STEP_UP, JWT_STANDARD]
+          description: |
+            JWT_STANDARD: cukup access token biasa.
+            JWT_STEP_UP: butuh step-up MFA selesai (X-Step-Up-Token header wajib ada).
+          default: JWT_STANDARD
+        rowVersion:
+          type: integer
+          description: |
+            Optimistic lock. Kirim row_version yang terakhir dibaca.
+            Server reject dengan CONFLICT jika tidak cocok.
+
+    WorkflowRejectRequest:
+      type: object
+      required: [comment, signatureMethod]
+      properties:
+        comment:
+          type: string
+          minLength: 10
+          maxLength: 1000
+          description: Alasan penolakan. WAJIB tidak kosong (min 10 karakter).
+          example: "Nominal penempatan melebihi limit portofolio. Harap revisi dan submit ulang."
+        signatureMethod:
+          type: string
+          enum: [JWT_STEP_UP, JWT_STANDARD]
+          default: JWT_STANDARD
+        rowVersion:
+          type: integer
+
+    # ---- Response bodies -----------------------------------------------
+
+    WorkflowActionResponse:
+      type: object
+      properties:
+        data:
+          $ref: "#/components/schemas/WorkflowActionResult"
+        meta:
+          type: object
+          properties:
+            traceId:
+              type: string
+
+    WorkflowActionResult:
+      type: object
+      required:
+        - entityId
+        - entityType
+        - previousState
+        - currentState
+        - action
+        - performedBy
+        - performedAt
+      properties:
+        entityId:
+          type: string
+          format: uuid
+        entityType:
+          type: string
+          example: "penempatan"
+        previousState:
+          $ref: "#/components/schemas/WorkflowState"
+        currentState:
+          $ref: "#/components/schemas/WorkflowState"
+        action:
+          type: string
+          enum: [SUBMIT, REVIEW, APPROVE, APPROVE2, REJECT]
+        performedBy:
+          type: string
+          description: preferred_username dari JWT
+        performedAt:
+          type: string
+          format: date-time
+        signature:
+          type: object
+          properties:
+            signatureHash:
+              type: string
+              description: SHA-256 hash yang disimpan di DB
+            signatureMethod:
+              type: string
+              enum: [JWT_STEP_UP, JWT_STANDARD]
+        nextActions:
+          type: array
+          items:
+            type: string
+          description: |
+            Actions yang tersedia berikutnya dari state ini.
+            Kosong jika sudah terminal (APPROVED/REJECTED).
+          example: ["approve", "reject"]
+        workflowEyes:
+          type: integer
+          enum: [4, 6]
+          description: Tipe workflow yang berlaku untuk entity ini
+
+    WorkflowStatusResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          required: [entityId, entityType, currentState, workflowEyes, history]
+          properties:
+            entityId:
+              type: string
+              format: uuid
+            entityType:
+              type: string
+            currentState:
+              $ref: "#/components/schemas/WorkflowState"
+            workflowEyes:
+              type: integer
+              enum: [4, 6]
+            makerId:
+              type: string
+              format: uuid
+              nullable: true
+            reviewerId:
+              type: string
+              format: uuid
+              nullable: true
+            approverId:
+              type: string
+              format: uuid
+              nullable: true
+            approver2Id:
+              type: string
+              format: uuid
+              nullable: true
+              description: Hanya untuk 6-eyes
+            history:
+              type: array
+              items:
+                $ref: "#/components/schemas/WorkflowSignatureRecord"
+        meta:
+          type: object
+          properties:
+            traceId:
+              type: string
+
+    WorkflowSignatureRecord:
+      type: object
+      description: Immutable — tidak pernah diupdate setelah dibuat
+      properties:
+        action:
+          type: string
+          enum: [SUBMIT, REVIEW, APPROVE, APPROVE2, REJECT]
+        userId:
+          type: string
+          format: uuid
+        username:
+          type: string
+        role:
+          type: string
+        signedAt:
+          type: string
+          format: date-time
+        signatureHash:
+          type: string
+        signatureMethod:
+          type: string
+          enum: [JWT_STEP_UP, JWT_STANDARD]
+        comment:
+          type: string
+          nullable: true
+
+    # ---- Shared refs (dari _common.yaml — inline untuk self-contain) ----
+    WorkflowState:
+      type: string
+      enum:
+        - DRAFT
+        - PENDING_REVIEW
+        - PENDING_APPROVAL
+        - PENDING_APPROVAL_2
+        - APPROVED
+        - REJECTED
+
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details, traceId]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  rule:
+                    type: string
+                  message:
+                    type: string
+            traceId:
+              type: string
+
+  responses:
+    ValidationFailed:
+      description: Validasi gagal
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Unauthorized:
+      description: JWT tidak valid
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Forbidden:
+      description: Permission tidak terpenuhi
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    SodViolation:
+      description: SoD violation
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    NotFound:
+      description: Entity tidak ditemukan
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Conflict:
+      description: Optimistic lock conflict
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    WorkflowInvalidTransition:
+      description: State machine menolak transisi
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    PeriodeClosed:
+      description: Periode buku hard-closed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    RateLimited:
+      description: Too many requests
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"

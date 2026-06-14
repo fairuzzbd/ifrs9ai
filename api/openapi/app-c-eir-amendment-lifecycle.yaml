@@ -1,0 +1,1793 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-C EIR Amendment Lifecycle (P4-M6)
+  version: "1.0.0"
+  description: |
+    EIR amendment lifecycle endpoints: auto-detection dari document upload, scheduled drift
+    detection, cancel/withdraw proposal, review queue DataTable, drift report read + generate.
+
+    Story set: APP-C-M6-001..005
+    FSD: FSD-APP-C-ECL-EIR-v1.0.docx §4.4–4.5 (amendment re-estimation, bulk operations)
+    Depends on: P4-M5 (PR #60) — existing amendment CRUD + BulkService
+
+    ## Scope M6 (endpoints BARU — bukan pengganti M5)
+    M5 tetap berlaku untuk: POST /amendments, GET /amendments/{id},
+    POST /amendments/{id}/review, POST /amendments/{id}/approve,
+    POST /amendments/{id}/reject, POST /bulk-recompute, GET /jobs/{jobId}.
+
+    M6 menambahkan:
+    - POST /ecl/eir/amendments/detect          — trigger dari pipeline upload dokumen
+    - POST /ecl/eir/amendments/{id}/cancel     — cancel oleh maker pre-approval
+    - GET  /ecl/eir/amendments/queue           — review queue DataTable (UX §1)
+    - GET  /ecl/eir/amendments/queue/export    — async export queue
+    - GET  /ecl/eir/drift-reports              — list drift report history
+    - GET  /ecl/eir/drift-reports/{id}         — detail satu drift report
+    - POST /ecl/eir/drift-reports/generate     — ad-hoc drift detection (202 + jobId)
+    - PATCH /ecl/eir/amendments/{id}/cashflows — ROLE-AKUN isi cashflow revisi
+                                                  untuk proposal auto-created (OQ-M6-2)
+
+    ## Decisions
+    - DEC-013: EIR Newton-Raphson, tolerance 1e-10, max 100 iter, presisi 8 desimal
+    - DEC-016: NUMERIC precision. No float64.
+    - DEC-017: 4-eyes workflow. SoD maker_id ≠ reviewer_id ≠ approver_id.
+    - DEC-018: ecl.* no hard delete, schedule rows immutable setelah INSERT.
+    - DEC-021: Idempotency-Key wajib di semua mutating endpoints.
+    - DEC-022: Cursor pagination only (no offset).
+
+    ## Permissions M6
+    - eir.amendment.detect      — ROLE-RISK (manual), System worker (auto dari upload event)
+    - eir.amendment.cancel      — ROLE-AKUN (maker own proposal only)
+    - eir.amendment_review.read — ROLE-RISK, ROLE-ALCO, ROLE-AKUN (milik sendiri), ROLE-AUDIT
+    - eir.drift_report.read     — ROLE-RISK, ROLE-AUDIT
+    - eir.amendment.update_cf   — ROLE-AKUN (maker, untuk proposal auto-created)
+
+    ## Drift threshold (dari sys.parameter — DEC-010 extended)
+    - drift_low_threshold   = 0.0001 (1 bp)  — flag only, REVIEW_RECOMMENDED
+    - drift_high_threshold  = 0.001  (10 bp) — auto-create proposal [NEEDS ALCO SIGN-OFF: OQ-M6-3]
+    Keduanya dapat di-override global via sys.parameter (bukan per periode; OQ-M6-5 open).
+
+    ## Audit events M6
+    EIR.AMEND_AUTO_CREATED, EIR.AMEND_AUTO_SKIPPED, EIR.AMEND_AUTO_FAILED,
+    EIR.AMEND_CANCELLED, EIR.AMENDMENT_EXPORT,
+    EIR.DRIFT_DETECTED, EIR.BULK_RECOMPUTE_STARTED, EIR.BULK_RECOMPUTE_COMPLETED,
+    EIR.BULK_RECOMPUTE_CANCELLED
+
+    ## Performance SLA (M6)
+    - detect endpoint: ≤ 200ms P99
+    - drift report query (GET): ≤ 500ms P99
+    - drift generation cron/ad-hoc: ≤ 5s per 1000 instrumen
+    - queue list: ≤ 300ms P99
+
+servers:
+  - url: /api/v1
+    description: BLIPS REST API v1
+
+tags:
+  - name: eir-amendment-lifecycle
+    description: M6 — Auto-detect, cancel, review queue
+  - name: eir-drift-report
+    description: M6 — Drift report generation, history, detail
+
+paths:
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/eir/amendments/detect — auto-detect dari document upload (M6-001)
+  # ---------------------------------------------------------------------------
+  /ecl/eir/amendments/detect:
+    post:
+      operationId: detectEIRAmendmentFromDocument
+      summary: Trigger auto-deteksi amandemen EIR dari dokumen yang di-upload
+      description: |
+        Dipanggil oleh pipeline upload dokumen setelah dokumen disetujui (status = APPROVED).
+        Berdasarkan metadata dokumen (document_type, entity_id), service menentukan apakah
+        instrumen target memerlukan draft proposal amandemen EIR.
+
+        Kondisi yang diperlukan untuk membuat proposal:
+        1. document_type IN ('AMENDMENT_KONTRAK_DEPOSITO', 'AMENDMENT_KONTRAK_OBLIGASI')
+        2. entity_type = 'mst.instrumen'
+        3. Instrumen target: status=AKTIF, eir_method_flag=TRUE,
+           klasifikasi_psak71 IN ('AC','FVOCI'), eir_awal IS NOT NULL
+        4. Tidak ada proposal non-terminal aktif (status tidak IN ('APPROVED','REJECTED','CANCELLED'))
+
+        Jika kondisi 3 gagal (eir_awal IS NULL): audit EIR.AMEND_AUTO_FAILED, notif ke uploader,
+        return 422 EIR_AMENDMENT_DETECTION_NO_MATCH.
+        Jika kondisi 4 gagal (proposal aktif sudah ada): audit EIR.AMEND_AUTO_SKIPPED,
+        notif ROLE-RISK, return 422 EIR_AMENDMENT_DETECTION_NO_MATCH dengan detail.
+        Jika instrumen FVTPL/FVOCI_ELECTION: skip tanpa error (log only), return 422.
+
+        Proposal yang terbentuk SELALU mulai dalam status PENDING_REVIEW.
+        revised_cashflow_json BOLEH NULL pada saat pembuatan — ROLE-AKUN wajib melengkapi
+        via PATCH /ecl/eir/amendments/{id}/cashflows sebelum reviewer bisa forward ke
+        PENDING_APPROVAL.
+
+        Audit event EIR.AMEND_AUTO_CREATED ditulis in-transaction saat proposal dibuat.
+        Notifikasi in-app ke semua user ROLE-RISK setelah proposal terbentuk.
+
+        Permission: eir.amendment.detect
+        Roles: System worker (dari pipeline upload), ROLE-RISK (manual test/trigger)
+        SLA: ≤ 200ms P99
+
+        Idempotency-Key wajib.
+        Caller dari pipeline upload harus include Idempotency-Key = documentId.
+      tags: [eir-amendment-lifecycle]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AmendmentDetectRequest"
+            example:
+              documentId: "doc-uuid-abc123"
+              instrumenId: "550e8400-e29b-41d4-a716-446655440010"
+              detectedAt: "2026-06-12T14:30:00+07:00"
+      responses:
+        "201":
+          description: Proposal amandemen berhasil dibuat secara otomatis
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AmendmentDetectResponse"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  amendmentId: "amend-uuid-001"
+                  status: "PENDING_REVIEW"
+                  instrumenId: "550e8400-e29b-41d4-a716-446655440010"
+                  instrumenKode: "OBL-2026-00001"
+                  documentId: "doc-uuid-abc123"
+                  triggerSource: "DOCUMENT_UPLOAD"
+                  eirLama: "0.04200000"
+                  cashflowRevisiRequired: true
+                  createdAt: "2026-06-12T14:30:00+07:00"
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Dokumen atau instrumen tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: EIR_INSTRUMEN_NOT_FOUND
+                  message: "Instrumen tidak ditemukan"
+                  details: []
+                  traceId: "01HXY..."
+        "409":
+          description: Idempotency-Key sudah diproses sebelumnya
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: IDEMPOTENCY_REPLAY
+                  message: "Request ini sudah diproses sebelumnya."
+                  details: []
+                  traceId: "01HXY..."
+        "422":
+          description: |
+            Deteksi tidak menghasilkan proposal — instrumen tidak eligible, proposal
+            aktif sudah ada, atau document_type tidak relevan.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                noMatch:
+                  summary: Instrumen tidak eligible untuk EIR amendment
+                  value:
+                    error:
+                      code: EIR_AMENDMENT_DETECTION_NO_MATCH
+                      message: "Dokumen tidak memicu pembuatan proposal amandemen EIR. Instrumen tidak eligible atau sudah punya proposal aktif."
+                      details:
+                        - field: "instrumen.eirAwal"
+                          rule: "not_null"
+                          message: "EIR belum pernah dihitung untuk instrumen ini. Compute EIR terlebih dahulu."
+                      traceId: "01HXY..."
+                activeProposal:
+                  summary: Proposal aktif sudah ada
+                  value:
+                    error:
+                      code: EIR_AMENDMENT_DETECTION_NO_MATCH
+                      message: "Sudah ada proposal amandemen aktif (ID: amend-uuid-999). Selesaikan atau batalkan proposal yang ada."
+                      details:
+                        - field: "instrumen.activeProposalId"
+                          rule: "no_active_proposal"
+                          message: "Proposal amend-uuid-999 dalam status PENDING_REVIEW."
+                      traceId: "01HXY..."
+                wrongDocType:
+                  summary: document_type tidak relevan
+                  value:
+                    error:
+                      code: EIR_AMENDMENT_DETECTION_NO_MATCH
+                      message: "document_type INVOICE tidak memicu auto-amendment. Gunakan AMENDMENT_KONTRAK_DEPOSITO atau AMENDMENT_KONTRAK_OBLIGASI."
+                      details: []
+                      traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/eir/amendments/{id}/cancel — cancel proposal (M6-005)
+  # ---------------------------------------------------------------------------
+  /ecl/eir/amendments/{id}/cancel:
+    post:
+      operationId: cancelEIRAmendment
+      summary: Maker membatalkan proposal amandemen EIR (hanya DRAFT atau PENDING_REVIEW)
+      description: |
+        Mengubah status proposal dari DRAFT atau PENDING_REVIEW menjadi CANCELLED.
+        Proposal yang sudah masuk PENDING_APPROVAL (reviewer sudah sign) TIDAK bisa
+        di-cancel oleh maker — harus melalui Reject oleh reviewer/approver.
+        Proposal terminal (APPROVED, REJECTED, CANCELLED) tidak bisa di-cancel.
+
+        Validasi:
+        - workflow_status harus DRAFT atau PENDING_REVIEW
+        - actor.user_id harus sama dengan proposal.maker_id (bukan SoD — ini ownership check)
+        - cancel_reason wajib, panjang minimum 20 karakter
+
+        Setelah cancel:
+        - ecl.eir_reestimation_log.workflow_status = 'CANCELLED'
+        - ecl.eir_reestimation_log.cancelled_at = now()
+        - ecl.eir_reestimation_log.cancel_reason = request.cancelReason
+        - Amounts finansial (eir_lama, eir_baru, catch_up_adjustment) TIDAK berubah
+        - ecl.eir_amortization_schedule TIDAK berubah (schedule aktif tetap sama)
+        - Instrumen kembali eligible menerima proposal baru
+
+        Audit event EIR.AMEND_CANCELLED ditulis in-transaction.
+        Notifikasi in-app ke semua user ROLE-RISK bahwa proposal dibatalkan.
+
+        Permission: eir.amendment.cancel
+        Role: ROLE-AKUN (hanya maker dari proposal ini)
+        Idempotency-Key wajib.
+
+        Idempotent: cancel proposal yang sudah CANCELLED dengan Idempotency-Key sama
+        → 200 IDEMPOTENCY_REPLAY. Cancel dengan key baru → 422 EIR_AMENDMENT_INVALID_TRANSITION.
+      tags: [eir-amendment-lifecycle]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/amendmentIdPath"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AmendmentCancelRequest"
+            example:
+              cancelReason: "Kontrak amandemen dibatalkan oleh counterparty, cashflow tetap original sesuai konfirmasi tanggal 2026-06-11."
+      responses:
+        "200":
+          description: Proposal berhasil dibatalkan
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/EIRAmendmentProposalM6"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  id: "amend-uuid-001"
+                  instrumenId: "550e8400-e29b-41d4-a716-446655440010"
+                  workflowStatus: "CANCELLED"
+                  cancelledAt: "2026-06-12T15:00:00+07:00"
+                  cancelReason: "Kontrak amandemen dibatalkan oleh counterparty, cashflow tetap original sesuai konfirmasi tanggal 2026-06-11."
+                  eirLama: "0.04200000"
+                  eirBaru: null
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Permission tidak terpenuhi atau bukan maker dari proposal ini
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                notMaker:
+                  summary: Bukan maker dari proposal ini
+                  value:
+                    error:
+                      code: EIR_AMENDMENT_CANCEL_FORBIDDEN
+                      message: "Hanya maker proposal yang boleh membatalkan proposal ini."
+                      details: []
+                      traceId: "01HXY..."
+                forbidden:
+                  summary: Permission tidak ada
+                  value:
+                    error:
+                      code: FORBIDDEN
+                      message: "Permission eir.amendment.cancel diperlukan."
+                      details: []
+                      traceId: "01HXY..."
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: |
+            Transisi tidak valid (proposal sudah PENDING_APPROVAL, APPROVED, REJECTED,
+            atau CANCELLED) atau cancel_reason terlalu pendek.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                pendingApproval:
+                  summary: Reviewer sudah sign — tidak bisa di-cancel maker
+                  value:
+                    error:
+                      code: EIR_AMENDMENT_INVALID_TRANSITION
+                      message: "Proposal dalam status PENDING_APPROVAL tidak bisa di-cancel oleh maker. Minta reviewer atau approver untuk Reject."
+                      details: []
+                      traceId: "01HXY..."
+                approved:
+                  summary: Proposal sudah APPROVED
+                  value:
+                    error:
+                      code: EIR_AMENDMENT_INVALID_TRANSITION
+                      message: "Proposal yang sudah APPROVED tidak bisa dibatalkan."
+                      details: []
+                      traceId: "01HXY..."
+                reasonTooShort:
+                  summary: cancel_reason kurang dari 20 karakter
+                  value:
+                    error:
+                      code: EIR_AMENDMENT_CANCEL_REASON_TOO_SHORT
+                      message: "cancel_reason harus minimal 20 karakter."
+                      details:
+                        - field: "body.cancelReason"
+                          rule: "min_length_20"
+                          message: "cancel_reason harus minimal 20 karakter. Saat ini: 10 karakter."
+                      traceId: "01HXY..."
+                terminalState:
+                  summary: Proposal sudah dalam status terminal CANCELLED
+                  value:
+                    error:
+                      code: EIR_AMENDMENT_INVALID_TRANSITION
+                      message: "Proposal sudah dalam status terminal CANCELLED."
+                      details: []
+                      traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # PATCH /ecl/eir/amendments/{id}/cashflows — isi cashflow revisi (M6-001/OQ-M6-2)
+  # ---------------------------------------------------------------------------
+  /ecl/eir/amendments/{id}/cashflows:
+    patch:
+      operationId: updateEIRAmendmentCashflows
+      summary: ROLE-AKUN melengkapi cashflow revisi untuk proposal auto-created
+      description: |
+        Untuk proposal yang dibuat secara otomatis via DOCUMENT_UPLOAD atau CRON_DRIFT,
+        revised_cashflow_json bisa NULL saat proposal dibuat. ROLE-AKUN (maker) wajib
+        melengkapi cashflow revisi sebelum reviewer (ROLE-RISK) bisa memajukan proposal
+        ke PENDING_APPROVAL.
+
+        Hanya boleh diakses jika proposal dalam status DRAFT atau PENDING_REVIEW
+        DAN revised_cashflow_json masih NULL.
+        Jika revised_cashflow_json sudah terisi → 409 CONFLICT.
+
+        Validasi:
+        - actor = proposal.maker_id (atau ROLE-RISK dengan permission eir.amendment.detect)
+        - workflowStatus harus DRAFT atau PENDING_REVIEW
+        - revisedCashflows: tidak boleh kosong, CF[0] harus negatif, minimal 2 items
+        - amendmentDate wajib diisi bersamaan dengan cashflow
+
+        Audit event EIR.AMEND_CF_UPDATED ditulis in-transaction.
+
+        Permission: eir.amendment.update_cf
+        Role: ROLE-AKUN (maker), ROLE-RISK (dapat update jika proposal auto-created tanpa maker)
+        Idempotency-Key wajib.
+      tags: [eir-amendment-lifecycle]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/amendmentIdPath"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AmendmentCashflowUpdateRequest"
+            example:
+              amendmentDate: "2028-01-01"
+              revisedCashflows:
+                - date: "2028-01-01"
+                  amountIdr: -1015337600.0000
+                - date: "2028-07-01"
+                  amountIdr: 45602592.0000
+                - date: "2031-01-01"
+                  amountIdr: 1045602592.0000
+              alasan: "Amandemen kupon dari 8% ke 9% per addendum tanggal 2027-12-15"
+      responses:
+        "200":
+          description: Cashflow revisi berhasil disimpan
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/EIRAmendmentProposalM6"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cashflow revisi sudah terisi sebelumnya
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: CONFLICT
+                  message: "revised_cashflow_json sudah terisi. Gunakan amendment baru jika cashflow perlu diubah lagi."
+                  details: []
+                  traceId: "01HXY..."
+        "422":
+          $ref: "#/components/responses/WorkflowInvalidTransition"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/eir/amendments/queue — review queue DataTable (M6-004, UX §1)
+  # ---------------------------------------------------------------------------
+  /ecl/eir/amendments/queue:
+    get:
+      operationId: listEIRAmendmentQueue
+      summary: Review queue — daftar proposal amandemen pending (DataTable, sort+filter+paging)
+      description: |
+        DataTable untuk pending amendment proposals. Mendukung cursor pagination, multi-column
+        sort, per-column filter, dan text search (UX patterns §1).
+
+        Visibilitas data berdasarkan role:
+        - ROLE-RISK: semua proposal semua status
+        - ROLE-ALCO: semua proposal (terutama PENDING_APPROVAL+)
+        - ROLE-AKUN: hanya proposal dengan maker_id = user_id (milik sendiri)
+        - ROLE-AUDIT: semua proposal semua status (read-only)
+
+        Tab kontekstual "Menunggu Aksi Saya":
+        - ROLE-RISK filter default: workflow_status = PENDING_REVIEW
+        - ROLE-ALCO filter default: workflow_status = PENDING_APPROVAL
+        Tambahkan query param ?my_queue=true untuk aktivasi filter kontekstual ini.
+
+        Kolom yang bisa di-sort: created_at, instrumen_kode, workflow_status,
+                                  trigger_source, abs_diff, tanggal_amendemen
+        Kolom yang bisa di-filter: workflow_status, trigger_source, instrumen_id,
+                                    created_at (range), abs_diff (gte/lte/between)
+        Text search (q=): instrumen_kode, instrumen_nama
+
+        Setiap row berisi:
+        - instrumenId, kodeInstrumen, workflowStatus, triggerSource
+        - eirLama, absDiff (jika trigger CRON_DRIFT atau AD_HOC_BULK)
+        - createdAt, makerId
+        - driftSeverity (LOW | HIGH | MISSING_SCHEDULE | null jika trigger MANUAL/DOCUMENT_UPLOAD)
+
+        Permission: eir.amendment_review.read
+        Audit: read tidak di-audit. Export di-audit EIR.AMENDMENT_EXPORT.
+        SLA: ≤ 300ms P99
+      tags: [eir-amendment-lifecycle]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/cursor"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/sortParam"
+        - $ref: "#/components/parameters/searchParam"
+        - name: filter[workflow_status]
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [DRAFT, PENDING_REVIEW, PENDING_APPROVAL, APPROVED, REJECTED, CANCELLED]
+          description: Filter by workflow status. Multi-value dipisah koma (mis. PENDING_REVIEW,PENDING_APPROVAL).
+          example: "PENDING_REVIEW"
+        - name: filter[trigger_source]
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [MANUAL, DOCUMENT_UPLOAD, CRON_DRIFT, AD_HOC_BULK]
+          description: Filter by trigger source
+        - name: filter[instrumen_id]
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Filter by instrumen UUID
+        - name: filter[created_at]
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Filter range. Format: between:2026-01-01,2026-06-30 atau gte:2026-06-01"
+        - name: filter[abs_diff]
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Filter by drift delta. Format: gte:0.001 atau between:0.0001,0.001"
+        - name: my_queue
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: |
+            true = filter kontekstual per role:
+            ROLE-RISK → workflow_status=PENDING_REVIEW,
+            ROLE-ALCO → workflow_status=PENDING_APPROVAL,
+            ROLE-AKUN → maker_id=self.
+            Diabaikan untuk ROLE-AUDIT.
+      responses:
+        "200":
+          description: |
+            List proposal amandemen. data=[] jika tidak ada proposal yang cocok (bukan 4xx).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AmendmentQueueListResponse"
+              example:
+                data:
+                  - id: "amend-uuid-001"
+                    instrumenId: "550e8400-e29b-41d4-a716-446655440010"
+                    kodeInstrumen: "OBL-2026-00001"
+                    namaInstrumen: "Obligasi XYZ 2026"
+                    workflowStatus: "PENDING_REVIEW"
+                    triggerSource: "DOCUMENT_UPLOAD"
+                    eirLama: "0.04200000"
+                    absDiff: null
+                    driftSeverity: null
+                    cashflowRevisiTersedia: false
+                    makerId: "user-uuid-akun01"
+                    createdAt: "2026-06-12T10:00:00+07:00"
+                    deadlineReview: null
+                pagination:
+                  nextCursor: "eyJpZCI6..."
+                  hasMore: false
+                  totalEstimate: 8
+                  limit: 50
+                appliedSort:
+                  - col: "created_at"
+                    dir: "asc"
+                appliedFilter:
+                  workflow_status: "PENDING_REVIEW"
+                meta:
+                  traceId: "01HXY..."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/eir/amendments/queue/export — async export queue (M6-004, UX §1.4)
+  # ---------------------------------------------------------------------------
+  /ecl/eir/amendments/queue/export:
+    get:
+      operationId: exportEIRAmendmentQueue
+      summary: Export daftar amendment proposals ke CSV atau XLSX (async jika > 10k rows)
+      description: |
+        Export queue list dengan format CSV atau XLSX. Filter aktif dihormati.
+        Dataset queue umumnya < 10k row — inline export (bukan async).
+        Jika jumlah rows > 10k: submit Asynq job, return 202 + jobId (UX §3).
+
+        CSV: UTF-8 with BOM, header Bahasa Indonesia, delimiter koma.
+        XLSX: header bold + freeze row, money #,##0.00000000, date YYYY-MM-DD.
+
+        Audit event EIR.AMENDMENT_EXPORT ditulis untuk setiap request export.
+
+        Permission: eir.amendment_review.read
+        Roles: ROLE-RISK, ROLE-ALCO, ROLE-AUDIT (sesuai visibilitas queue)
+      tags: [eir-amendment-lifecycle]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: format
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [csv, xlsx]
+          description: Format output file
+        - name: filter[workflow_status]
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter yang sama dengan endpoint queue
+        - name: filter[trigger_source]
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: sort
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Sort order yang sama dengan endpoint queue
+      responses:
+        "200":
+          description: File export (inline, dataset ≤ 10k rows)
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              example: "attachment; filename=\"eir-amendment-queue-20260612.csv\""
+            X-Total-Rows:
+              schema:
+                type: integer
+              description: Jumlah rows dalam file
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+                description: UTF-8 with BOM
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        "202":
+          description: Dataset besar — job di-queue. Subscribe SSE di streamUrl untuk progress.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/JobAcceptedResponse"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: Format tidak valid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: VALIDATION_FAILED
+                  message: "format harus csv atau xlsx"
+                  details:
+                    - field: "query.format"
+                      rule: "enum"
+                      message: "Nilai valid: csv, xlsx"
+                  traceId: "01HXY..."
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/eir/drift-reports — list drift report history (M6-002, DataTable UX §1)
+  # ---------------------------------------------------------------------------
+  /ecl/eir/drift-reports:
+    get:
+      operationId: listEIRDriftReports
+      summary: List riwayat drift report (DataTable, sort+filter+paging)
+      description: |
+        List sys.drift_report dengan cursor pagination, sort, filter.
+        Default sort: run_at DESC (terbaru di atas).
+
+        Kolom yang bisa di-sort: run_at, trigger_type, total_scanned, drift_count,
+                                  proposal_auto_created, missing_count
+        Kolom yang bisa di-filter: trigger_type, run_at (range), drift_count (gte/gt/eq/between)
+
+        Permission: eir.drift_report.read
+        Roles: ROLE-RISK, ROLE-AUDIT
+        Audit: read tidak di-audit.
+        SLA: ≤ 300ms P99
+      tags: [eir-drift-report]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/cursor"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/sortParam"
+        - name: filter[trigger_type]
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [CRON_DAILY, AD_HOC, PRE_ECL_CALC]
+          description: Filter by trigger type
+        - name: filter[run_at]
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Filter range. Format: between:2026-06-01,2026-06-30 atau gte:2026-06-01"
+        - name: filter[drift_count]
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Format: gt:0 atau gte:5 atau eq:0"
+        - name: periode
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+          description: |
+            Filter laporan berdasarkan periode buku. Format YYYY-MM-DD (awal bulan).
+            Mengembalikan laporan yang run_at jatuh dalam bulan periode tersebut.
+            SLA: ≤ 500ms P99
+      responses:
+        "200":
+          description: List drift reports
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DriftReportListResponse"
+              example:
+                data:
+                  - id: "drift-uuid-001"
+                    runAt: "2026-06-12T02:00:00+07:00"
+                    triggerType: "CRON_DAILY"
+                    totalScanned: 300
+                    driftCount: 5
+                    missingCount: 1
+                    proposalAutoCreated: 3
+                    jobId: null
+                pagination:
+                  nextCursor: null
+                  hasMore: false
+                  totalEstimate: 12
+                  limit: 50
+                appliedSort:
+                  - col: "run_at"
+                    dir: "desc"
+                appliedFilter: {}
+                meta:
+                  traceId: "01HXY..."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: periode parameter out of range atau format tidak valid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: EIR_DRIFT_REPORT_PERIODE_OUT_OF_RANGE
+                  message: "Periode 2015-01-01 berada di luar rentang data yang tersedia."
+                  details: []
+                  traceId: "01HXY..."
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # GET /ecl/eir/drift-reports/{id} — detail satu drift report (M6-002)
+  # ---------------------------------------------------------------------------
+  /ecl/eir/drift-reports/{id}:
+    get:
+      operationId: getEIRDriftReport
+      summary: Baca detail satu drift report termasuk result_jsonb per instrumen
+      description: |
+        Kembalikan sys.drift_report lengkap termasuk result_jsonb (detail per instrumen).
+        result_jsonb dapat berisi ratusan entries — frontend wajib render dengan
+        collapsible/paginated view, bukan dump JSON mentah.
+
+        result_jsonb structure:
+        - driftEntries: array { instrumenId, kodeInstrumen, eirStored, eirComputed,
+                                 absDiff, severity (LOW|HIGH), skipped (boolean), skipReason }
+        - missingEntries: array { instrumenId, kodeInstrumen }
+        - errorEntries: array { instrumenId, kodeInstrumen, error }
+
+        Permission: eir.drift_report.read
+        Roles: ROLE-RISK, ROLE-AUDIT
+        SLA: ≤ 500ms P99
+      tags: [eir-drift-report]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/driftReportIdPath"
+      responses:
+        "200":
+          description: Detail drift report
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/DriftReportDetail"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  id: "drift-uuid-001"
+                  runAt: "2026-06-12T02:00:00+07:00"
+                  triggerType: "CRON_DAILY"
+                  totalScanned: 300
+                  driftCount: 5
+                  missingCount: 1
+                  proposalAutoCreated: 3
+                  jobId: null
+                  result:
+                    driftEntries:
+                      - instrumenId: "550e8400-e29b-41d4-a716-446655440010"
+                        kodeInstrumen: "OBL-2026-00001"
+                        eirStored: "0.04000000"
+                        eirComputed: "0.04200000"
+                        absDiff: "0.00200000"
+                        severity: "HIGH"
+                        skipped: false
+                        skipReason: null
+                      - instrumenId: "550e8400-e29b-41d4-a716-446655440099"
+                        kodeInstrumen: "OBL-2026-00099"
+                        eirStored: "0.04000000"
+                        eirComputed: "0.04005000"
+                        absDiff: "0.00005000"
+                        severity: "LOW"
+                        skipped: false
+                        skipReason: null
+                    missingEntries:
+                      - instrumenId: "550e8400-e29b-41d4-a716-446655440050"
+                        kodeInstrumen: "DEP-2026-00050"
+                    errorEntries: []
+                  createdAt: "2026-06-12T02:00:00+07:00"
+                  createdBy: "system"
+                meta:
+                  traceId: "01HXY..."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Drift report tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: EIR_DRIFT_REPORT_NOT_FOUND
+                  message: "Drift report tidak ditemukan."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # POST /ecl/eir/drift-reports/generate — ad-hoc drift detection (M6-003)
+  # ---------------------------------------------------------------------------
+  /ecl/eir/drift-reports/generate:
+    post:
+      operationId: generateEIRDriftReport
+      summary: Trigger ad-hoc bulk drift detection — generate drift report baru (202 + jobId)
+      description: |
+        Trigger Asynq job untuk menjalankan bulk drift detection (M5 BulkService dengan
+        M6 extension: persistensi ke sys.drift_report + auto-create proposals).
+        Long-running per UX §3 — return 202 + jobId, progress via SSE.
+
+        Job steps:
+        1. Query instrumen eligible: eir_method_flag=TRUE, klasifikasi_psak71 IN ('AC','FVOCI'),
+           status=AKTIF. Skip FVTPL dan FVOCI_ELECTION.
+        2. Jika scope=SUBSET: hanya instrumen dalam instrumenIds atau portofolio tertentu.
+        3. Per instrumen: re-compute EIR via Newton-Raphson, bandingkan dengan eir_awal.
+           Hitung abs_diff = |eir_stored - eir_computed|.
+        4. Flag instrumen tanpa schedule rows aktif sebagai MISSING_SCHEDULE.
+        5. INSERT sys.drift_report dengan semua hasil.
+        6. Untuk instrumen dengan abs_diff > drift_high_threshold (sys.parameter)
+           DAN belum punya proposal aktif: INSERT ecl.eir_reestimation_log
+           dengan trigger_source = 'AD_HOC_BULK' atau 'PRE_ECL_CALC'.
+        7. TIDAK mengubah eir_awal atau ecl.eir_amortization_schedule.
+
+        Partial failure: instrumen error tidak menghentikan batch. Dicatat di result_jsonb.
+        Job status menjadi "completed_with_errors" jika ada partial failure.
+
+        Concurrency guard: 409 EIR_DRIFT_GENERATION_IN_PROGRESS jika job aktif sudah berjalan
+        untuk tenant yang sama.
+
+        Audit events in-transaction:
+        - EIR.BULK_RECOMPUTE_STARTED (saat job mulai)
+        - EIR.BULK_RECOMPUTE_COMPLETED atau EIR.BULK_RECOMPUTE_CANCELLED
+
+        Pre-ECL gate mode: jika triggerSource = PRE_ECL_CALC, result advisory (warning saja,
+        bukan blocker per OQ-M6-6).
+
+        Permission: eir.amendment.detect
+        Roles: ROLE-RISK, System (cron dipanggil dengan service account)
+        Idempotency-Key wajib.
+        SLA: ≤ 5 detik per 1000 instrumen (compute + validation, no UI wait).
+      tags: [eir-drift-report]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DriftReportGenerateRequest"
+            example:
+              scope: "ALL_ACTIVE"
+              triggerSource: "AD_HOC"
+              reason: "Rekonsiliasi semesteran sebelum ECL calc run Juni 2026"
+      responses:
+        "202":
+          description: |
+            Job diterima dan di-queue. Subscribe SSE di streamUrl untuk progress.
+            SSE events: {"progress":47,"currentStep":"Re-estimasi instrumen 470 dari 1000","driftFoundSoFar":3}
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/JobAcceptedResponse"
+                  meta:
+                    $ref: "#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  jobId: "01JXYZ-DRIFT-001"
+                  type: "EIR_DRIFT_GENERATE"
+                  statusUrl: "/api/v1/jobs/01JXYZ-DRIFT-001"
+                  streamUrl: "/api/v1/jobs/01JXYZ-DRIFT-001/stream"
+                  estimatedDurationSeconds: 5
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: Request body tidak valid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: VALIDATION_FAILED
+                  message: "scope harus ALL_ACTIVE atau SUBSET. Jika SUBSET, instrumenIds wajib diisi."
+                  details:
+                    - field: "body.instrumenIds"
+                      rule: "required_if_subset"
+                      message: "instrumenIds wajib diisi jika scope = SUBSET"
+                  traceId: "01HXY..."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Job drift generation sudah berjalan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: EIR_DRIFT_GENERATION_IN_PROGRESS
+                  message: "Drift detection job sudah berjalan (jobId: 01JXYZ-DRIFT-000). Tunggu hingga selesai."
+                  details: []
+                  traceId: "01HXY..."
+        "422":
+          description: Drift threshold tidak valid di sys.parameter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: EIR_DRIFT_THRESHOLD_INVALID
+                  message: "drift_high_threshold di sys.parameter harus antara 0.0000000001 dan 1.0. Nilai saat ini tidak valid."
+                  details:
+                    - field: "sys.parameter.drift_high_threshold"
+                      rule: "range"
+                      message: "Nilai harus antara 0.0000000001 dan 1.0"
+                  traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+# =============================================================================
+# COMPONENTS
+# =============================================================================
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT RSA-2048 signed oleh Keycloak. Access token TTL 15 menit (DEC-025).
+
+  parameters:
+    amendmentIdPath:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: UUID proposal dari ecl.eir_reestimation_log
+
+    driftReportIdPath:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: UUID drift report dari sys.drift_report
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: UUID v4 unik per request. TTL replay 24 jam (DEC-021).
+
+    cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+      description: Opaque base64 cursor dari pagination.nextCursor (DEC-022)
+
+    limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+      description: Jumlah item per halaman. Default 50, max 200.
+
+    sortParam:
+      name: sort
+      in: query
+      required: false
+      schema:
+        type: string
+        pattern: "^[a-z_]+(:(asc|desc))?(,[a-z_]+(:(asc|desc))?)*$"
+      description: "Multi-column sort. Format: col1:asc,col2:desc. Max 3 kolom."
+
+    searchParam:
+      name: q
+      in: query
+      required: false
+      schema:
+        type: string
+        maxLength: 200
+      description: Text search global (instrumen_kode, instrumen_nama)
+
+  schemas:
+
+    # ---- Common reuse -------------------------------------------------------
+    ResponseMeta:
+      type: object
+      properties:
+        traceId:
+          type: string
+          example: "01HXY..."
+
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details, traceId]
+          properties:
+            code:
+              $ref: "#/components/schemas/M6ErrorCode"
+            message:
+              type: string
+              description: Human-readable message Bahasa Indonesia. Jangan expose stack trace.
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  rule:
+                    type: string
+                  message:
+                    type: string
+            traceId:
+              type: string
+
+    M6ErrorCode:
+      type: string
+      description: |
+        Error codes M6 (tambahan terhadap M5 dan _common.yaml).
+        Semua error codes M5 tetap berlaku.
+      enum:
+        # Inherited dari _common.yaml
+        - VALIDATION_FAILED
+        - UNAUTHORIZED
+        - FORBIDDEN
+        - SOD_VIOLATION
+        - NOT_FOUND
+        - CONFLICT
+        - IDEMPOTENCY_REPLAY
+        - IDEMPOTENCY_MISMATCH
+        - WORKFLOW_INVALID_TRANSITION
+        - RATE_LIMITED
+        - INTERNAL
+        # Inherited dari M5
+        - EIR_INSTRUMEN_NOT_FOUND
+        - EIR_CASHFLOW_INVALID
+        - EIR_CASHFLOW_SIGN_MISMATCH
+        - EIR_NON_CONVERGENT
+        - EIR_NOT_YET_COMPUTED
+        # M6-specific (BARU)
+        - EIR_AMENDMENT_DETECTION_NO_MATCH    # 422 — instrumen tidak eligible atau proposal duplikat
+        - EIR_AMENDMENT_CANCEL_FORBIDDEN      # 403 — caller bukan maker, atau reviewer sudah sign
+        - EIR_AMENDMENT_CANCEL_REASON_TOO_SHORT # 422 — cancel_reason < 20 karakter
+        - EIR_AMENDMENT_INVALID_TRANSITION    # 422 — state machine reject transition (cancel dari state terlarang)
+        - EIR_DRIFT_REPORT_NOT_FOUND          # 404 — sys.drift_report tidak ditemukan
+        - EIR_DRIFT_REPORT_PERIODE_OUT_OF_RANGE # 422 — periode di luar rentang data
+        - EIR_DRIFT_GENERATION_IN_PROGRESS    # 409 — concurrent drift generation job
+        - EIR_DRIFT_THRESHOLD_INVALID         # 422 — drift threshold di sys.parameter tidak valid
+
+    # ---- Job accepted (202) ------------------------------------------------
+    JobAcceptedResponse:
+      type: object
+      required: [jobId, type, statusUrl, streamUrl]
+      properties:
+        jobId:
+          type: string
+          description: "Job identifier (ULID). Persistent di sys.job."
+          example: "01JXYZ-DRIFT-001"
+        type:
+          type: string
+          enum: [EIR_DRIFT_GENERATE, EIR_AMENDMENT_QUEUE_EXPORT]
+          description: "Job type identifier"
+          example: "EIR_DRIFT_GENERATE"
+        statusUrl:
+          type: string
+          description: "GET /api/v1/jobs/{jobId}"
+          example: "/api/v1/jobs/01JXYZ-DRIFT-001"
+        streamUrl:
+          type: string
+          description: "SSE stream — gunakan Authorization: Bearer header"
+          example: "/api/v1/jobs/01JXYZ-DRIFT-001/stream"
+        estimatedDurationSeconds:
+          type: integer
+          nullable: true
+          description: Estimasi durasi berdasarkan jumlah instrumen aktif
+
+    # ---- Pagination envelope -----------------------------------------------
+    PaginationEnvelope:
+      type: object
+      required: [nextCursor, hasMore, limit]
+      properties:
+        nextCursor:
+          type: string
+          nullable: true
+          description: Opaque base64 cursor untuk halaman berikutnya. null jika tidak ada halaman lagi.
+        hasMore:
+          type: boolean
+        totalEstimate:
+          type: integer
+          nullable: true
+          description: Estimasi total rows (tidak selalu akurat — dari limit+1 trick)
+        limit:
+          type: integer
+
+    # ---- Amendment Detect Request ------------------------------------------
+    AmendmentDetectRequest:
+      type: object
+      required: [documentId, instrumenId, detectedAt]
+      properties:
+        documentId:
+          type: string
+          format: uuid
+          description: UUID dokumen dari doc.document yang baru di-approve
+          example: "doc-uuid-abc123"
+        instrumenId:
+          type: string
+          format: uuid
+          description: UUID instrumen target dari mst.instrumen
+          example: "550e8400-e29b-41d4-a716-446655440010"
+        detectedAt:
+          type: string
+          format: date-time
+          description: Timestamp deteksi (saat dokumen di-approve). ISO 8601 dengan TZ.
+          example: "2026-06-12T14:30:00+07:00"
+
+    # ---- Amendment Detect Response -----------------------------------------
+    AmendmentDetectResponse:
+      type: object
+      required: [amendmentId, status, instrumenId, documentId, triggerSource, eirLama, createdAt]
+      properties:
+        amendmentId:
+          type: string
+          format: uuid
+          description: UUID proposal amandemen baru dari ecl.eir_reestimation_log
+        status:
+          type: string
+          enum: [PENDING_REVIEW]
+          description: Proposal auto-created selalu mulai dalam PENDING_REVIEW
+        instrumenId:
+          type: string
+          format: uuid
+        instrumenKode:
+          type: string
+          example: "OBL-2026-00001"
+        documentId:
+          type: string
+          format: uuid
+        triggerSource:
+          type: string
+          enum: [DOCUMENT_UPLOAD]
+        eirLama:
+          type: string
+          description: "eir_awal yang tersimpan sebelum amandemen. NUMERIC(10,8) sebagai string."
+          example: "0.04200000"
+        cashflowRevisiRequired:
+          type: boolean
+          description: |
+            true = revised_cashflow_json masih NULL, ROLE-AKUN wajib melengkapi via
+            PATCH /ecl/eir/amendments/{id}/cashflows sebelum bisa di-review.
+          example: true
+        createdAt:
+          type: string
+          format: date-time
+
+    # ---- Amendment Cancel Request ------------------------------------------
+    AmendmentCancelRequest:
+      type: object
+      required: [cancelReason]
+      properties:
+        cancelReason:
+          type: string
+          minLength: 20
+          maxLength: 2000
+          description: |
+            Alasan pembatalan. Wajib, minimal 20 karakter.
+            Disimpan ke ecl.eir_reestimation_log.cancel_reason.
+          example: "Kontrak amandemen dibatalkan oleh counterparty, cashflow tetap original sesuai konfirmasi tanggal 2026-06-11."
+
+    # ---- Amendment Cashflow Update Request ---------------------------------
+    AmendmentCashflowUpdateRequest:
+      type: object
+      required: [amendmentDate, revisedCashflows]
+      properties:
+        amendmentDate:
+          type: string
+          format: date
+          description: |
+            Tanggal efektif amandemen kontrak. Semua schedule rows setelah tanggal ini
+            akan di-supersede saat proposal APPROVED.
+          example: "2028-01-01"
+        revisedCashflows:
+          type: array
+          items:
+            $ref: "#/components/schemas/CashflowItem"
+          minItems: 2
+          description: |
+            Cashflow proyeksi revisi mulai amendmentDate. CF[0] = initial outflow (negatif).
+            Minimal 2 items. Setelah di-save, reviewer dapat memajukan proposal ke PENDING_APPROVAL.
+        alasan:
+          type: string
+          maxLength: 2000
+          description: Deskripsi alasan perubahan cashflow (opsional, tapi disarankan)
+
+    # ---- Cashflow Item (reuse dari M5 schema) ------------------------------
+    CashflowItem:
+      type: object
+      required: [date, amountIdr]
+      properties:
+        date:
+          type: string
+          format: date
+          description: Tanggal cashflow. ISO 8601 date-only.
+          example: "2026-07-01"
+        amountIdr:
+          type: number
+          description: |
+            Amount IDR. CF[0] HARUS negatif (initial outflow).
+            CF[t>0] positif (kupon + pokok). Presisi NUMERIC(20,4).
+          example: 40000000.0000
+
+    # ---- Amendment Proposal M6 (extended dari M5 untuk cancel fields) ------
+    EIRAmendmentProposalM6:
+      type: object
+      required: [id, instrumenId, workflowStatus, triggerSource, eirLama, createdAt]
+      description: |
+        Extended dari EIRAmendmentProposal M5 dengan tambahan fields cancel + trigger_source.
+        Backward-compatible: fields baru nullable.
+      properties:
+        id:
+          type: string
+          format: uuid
+        instrumenId:
+          type: string
+          format: uuid
+        kodeInstrumen:
+          type: string
+          example: "OBL-2026-00001"
+        workflowStatus:
+          type: string
+          enum: [DRAFT, PENDING_REVIEW, PENDING_APPROVAL, APPROVED, REJECTED, CANCELLED]
+        triggerSource:
+          type: string
+          enum: [MANUAL, DOCUMENT_UPLOAD, CRON_DRIFT, AD_HOC_BULK]
+          description: Sumber trigger pembuatan proposal
+        eirLama:
+          type: string
+          description: "eir_awal sebelum amandemen. NUMERIC(10,8) sebagai string."
+          example: "0.04200000"
+        eirBaru:
+          type: string
+          nullable: true
+          description: "EIR baru setelah diapprove. Null jika belum approved."
+          example: null
+        catchUpAdjustment:
+          type: string
+          nullable: true
+          description: "NPV difference pada amendmentDate. Null sampai approved. NUMERIC(20,4)."
+        absDiff:
+          type: string
+          nullable: true
+          description: "Drift absolute value. Populated jika trigger CRON_DRIFT atau AD_HOC_BULK."
+          example: "0.00200000"
+        driftReportId:
+          type: string
+          format: uuid
+          nullable: true
+          description: FK ke sys.drift_report. Null jika trigger MANUAL atau DOCUMENT_UPLOAD.
+        documentId:
+          type: string
+          format: uuid
+          nullable: true
+          description: FK ke doc.document. Null jika trigger CRON_DRIFT atau AD_HOC_BULK.
+        cashflowRevisiTersedia:
+          type: boolean
+          description: true jika revised_cashflow_json sudah terisi
+        cancelledAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Timestamp saat proposal di-cancel. Null jika belum cancelled.
+        cancelReason:
+          type: string
+          nullable: true
+          description: Alasan pembatalan. Null jika belum cancelled.
+        makerId:
+          type: string
+          format: uuid
+          nullable: true
+          description: User yang membuat proposal. Null untuk proposal yang dibuat oleh System.
+        reviewerId:
+          type: string
+          format: uuid
+          nullable: true
+        approverId:
+          type: string
+          format: uuid
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    # ---- Amendment Queue Row (untuk list endpoint) -------------------------
+    AmendmentQueueRow:
+      type: object
+      required: [id, instrumenId, kodeInstrumen, workflowStatus, triggerSource, eirLama, createdAt]
+      description: Summary row untuk DataTable queue — tidak include full cashflow JSON
+      properties:
+        id:
+          type: string
+          format: uuid
+        instrumenId:
+          type: string
+          format: uuid
+        kodeInstrumen:
+          type: string
+          example: "OBL-2026-00001"
+        namaInstrumen:
+          type: string
+          example: "Obligasi XYZ 2026"
+        workflowStatus:
+          type: string
+          enum: [DRAFT, PENDING_REVIEW, PENDING_APPROVAL, APPROVED, REJECTED, CANCELLED]
+        triggerSource:
+          type: string
+          enum: [MANUAL, DOCUMENT_UPLOAD, CRON_DRIFT, AD_HOC_BULK]
+        eirLama:
+          type: string
+          description: "NUMERIC(10,8) sebagai string"
+          example: "0.04200000"
+        absDiff:
+          type: string
+          nullable: true
+          description: "Drift delta. Null jika trigger MANUAL atau DOCUMENT_UPLOAD."
+          example: "0.00200000"
+        driftSeverity:
+          type: string
+          nullable: true
+          enum: [LOW, HIGH, MISSING_SCHEDULE, null]
+          description: |
+            LOW = abs_diff > drift_low_threshold tetapi ≤ drift_high_threshold
+            HIGH = abs_diff > drift_high_threshold
+            MISSING_SCHEDULE = tidak ada schedule aktif
+            null = tidak ada drift info (trigger MANUAL/DOCUMENT_UPLOAD)
+        cashflowRevisiTersedia:
+          type: boolean
+          description: true jika revised_cashflow_json sudah terisi
+        makerId:
+          type: string
+          format: uuid
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        deadlineReview:
+          type: string
+          format: date-time
+          nullable: true
+          description: Deadline review jika ada (opsional, tergantung konfigurasi SLA review)
+
+    # ---- Amendment Queue List Response -------------------------------------
+    AmendmentQueueListResponse:
+      type: object
+      required: [data, pagination, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/AmendmentQueueRow"
+        pagination:
+          $ref: "#/components/schemas/PaginationEnvelope"
+        appliedSort:
+          type: array
+          items:
+            type: object
+            properties:
+              col:
+                type: string
+              dir:
+                type: string
+                enum: [asc, desc]
+        appliedFilter:
+          type: object
+          additionalProperties: true
+          description: Filter yang sedang aktif (mirror dari query params)
+        meta:
+          $ref: "#/components/schemas/ResponseMeta"
+
+    # ---- Drift Report Summary (untuk list) ---------------------------------
+    DriftReportSummary:
+      type: object
+      required: [id, runAt, triggerType, totalScanned, driftCount, missingCount, proposalAutoCreated]
+      properties:
+        id:
+          type: string
+          format: uuid
+        runAt:
+          type: string
+          format: date-time
+          description: Waktu scan berjalan
+        triggerType:
+          type: string
+          enum: [CRON_DAILY, AD_HOC, PRE_ECL_CALC]
+        totalScanned:
+          type: integer
+          description: Jumlah instrumen yang di-scan
+        driftCount:
+          type: integer
+          description: Jumlah instrumen dengan abs_diff > drift_low_threshold
+        missingCount:
+          type: integer
+          description: Jumlah instrumen tanpa schedule aktif
+        proposalAutoCreated:
+          type: integer
+          description: Jumlah proposal yang di-auto-create (drift > drift_high_threshold)
+        jobId:
+          type: string
+          nullable: true
+          description: FK ke sys.job.id jika run via async job
+
+    # ---- Drift Report Detail (untuk GET /drift-reports/{id}) ---------------
+    DriftReportDetail:
+      allOf:
+        - $ref: "#/components/schemas/DriftReportSummary"
+        - type: object
+          required: [result, createdAt, createdBy]
+          properties:
+            result:
+              type: object
+              required: [driftEntries, missingEntries, errorEntries]
+              properties:
+                driftEntries:
+                  type: array
+                  description: Instrumen dengan drift terdeteksi (abs_diff > drift_low_threshold)
+                  items:
+                    $ref: "#/components/schemas/DriftEntry"
+                missingEntries:
+                  type: array
+                  description: Instrumen tanpa schedule aktif
+                  items:
+                    type: object
+                    required: [instrumenId, kodeInstrumen]
+                    properties:
+                      instrumenId:
+                        type: string
+                        format: uuid
+                      kodeInstrumen:
+                        type: string
+                errorEntries:
+                  type: array
+                  description: Instrumen yang gagal diproses (partial failure)
+                  items:
+                    type: object
+                    required: [instrumenId, kodeInstrumen, error]
+                    properties:
+                      instrumenId:
+                        type: string
+                        format: uuid
+                      kodeInstrumen:
+                        type: string
+                      error:
+                        type: string
+                        description: Error message (masking internal detail)
+            createdAt:
+              type: string
+              format: date-time
+            createdBy:
+              type: string
+              description: "User UUID atau 'system' untuk cron jobs"
+
+    # ---- Drift Entry -------------------------------------------------------
+    DriftEntry:
+      type: object
+      required: [instrumenId, kodeInstrumen, eirStored, eirComputed, absDiff, severity, skipped]
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+        kodeInstrumen:
+          type: string
+          example: "OBL-2026-00001"
+        eirStored:
+          type: string
+          description: "eir_awal yang tersimpan. NUMERIC(10,8) sebagai string."
+          example: "0.04000000"
+        eirComputed:
+          type: string
+          description: "EIR hasil re-compute Newton-Raphson. NUMERIC(10,8) sebagai string."
+          example: "0.04200000"
+        absDiff:
+          type: string
+          description: "|eirStored - eirComputed|. NUMERIC(10,8) sebagai string."
+          example: "0.00200000"
+        severity:
+          type: string
+          enum: [LOW, HIGH]
+          description: |
+            LOW = abs_diff > drift_low_threshold (0.0001) tetapi ≤ drift_high_threshold (0.001)
+            HIGH = abs_diff > drift_high_threshold (0.001)
+        skipped:
+          type: boolean
+          description: true jika instrumen di-skip (sudah punya proposal aktif)
+        skipReason:
+          type: string
+          nullable: true
+          enum: [active_proposal_exists, null]
+          description: Alasan skip. Null jika tidak di-skip.
+
+    # ---- Drift Report List Response ----------------------------------------
+    DriftReportListResponse:
+      type: object
+      required: [data, pagination, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/DriftReportSummary"
+        pagination:
+          $ref: "#/components/schemas/PaginationEnvelope"
+        appliedSort:
+          type: array
+          items:
+            type: object
+            properties:
+              col:
+                type: string
+              dir:
+                type: string
+                enum: [asc, desc]
+        appliedFilter:
+          type: object
+          additionalProperties: true
+        meta:
+          $ref: "#/components/schemas/ResponseMeta"
+
+    # ---- Drift Report Generate Request -------------------------------------
+    DriftReportGenerateRequest:
+      type: object
+      properties:
+        scope:
+          type: string
+          enum: [ALL_ACTIVE, SUBSET]
+          default: ALL_ACTIVE
+          description: |
+            ALL_ACTIVE: scan semua instrumen eligible (eir_method_flag=TRUE, AC/FVOCI, AKTIF).
+            SUBSET: hanya instrumen dalam instrumenIds atau portofolioId.
+        instrumenIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          nullable: true
+          description: |
+            Wajib jika scope = SUBSET dan portofolioId tidak diisi.
+            Max 500 instrumen per request.
+          maxItems: 500
+        portofolioId:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Opsional jika scope = SUBSET. Scan semua instrumen dalam portofolio ini.
+            Diabaikan jika instrumenIds diisi.
+        triggerSource:
+          type: string
+          enum: [AD_HOC, PRE_ECL_CALC]
+          default: AD_HOC
+          description: |
+            AD_HOC: triggered manual oleh ROLE-RISK.
+            PRE_ECL_CALC: dipanggil sebagai pre-gate sebelum ECL calc run (advisory mode).
+        reason:
+          type: string
+          maxLength: 500
+          nullable: true
+          description: Alasan ad-hoc run (opsional, untuk audit trail)
+
+  responses:
+    ValidationFailed:
+      description: Field validation gagal
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: VALIDATION_FAILED
+              message: "Validasi request gagal"
+              details:
+                - field: "body.cancelReason"
+                  rule: "min_length_20"
+                  message: "cancel_reason harus minimal 20 karakter"
+              traceId: "01HXY..."
+
+    Unauthorized:
+      description: JWT invalid, expired, atau tidak ada
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: UNAUTHORIZED
+              message: "Token tidak valid atau sudah expired. Silakan login ulang."
+              details: []
+              traceId: "01HXY..."
+
+    Forbidden:
+      description: Permission tidak terpenuhi
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: FORBIDDEN
+              message: "Permission eir.amendment.cancel diperlukan."
+              details: []
+              traceId: "01HXY..."
+
+    NotFound:
+      description: Entity tidak ditemukan
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: NOT_FOUND
+              message: "Entity tidak ditemukan."
+              details: []
+              traceId: "01HXY..."
+
+    WorkflowInvalidTransition:
+      description: State machine menolak transisi
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: EIR_AMENDMENT_INVALID_TRANSITION
+              message: "Transisi tidak valid untuk status saat ini."
+              details: []
+              traceId: "01HXY..."
+
+    RateLimited:
+      description: Too many requests
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: RATE_LIMITED
+              message: "Terlalu banyak request. Coba lagi dalam 60 detik."
+              details: []
+              traceId: "01HXY..."
+
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: INTERNAL
+              message: "Terjadi kesalahan internal. Cek traceId untuk investigasi."
+              details: []
+              traceId: "01HXY..."

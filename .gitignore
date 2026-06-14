@@ -54,3 +54,7 @@ Thumbs.db
 .claude/settings.local.json
 .claude/.multica-issuemap/
 .claude/plans/
+
+# build artifacts
+backend/api
+/backend/*coverage*.out

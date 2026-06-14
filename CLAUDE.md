@@ -1,6 +1,6 @@
 # BLIPS IFRS9 — Claude Code Project Guide
 
-Repository ini adalah implementasi BLIPS (Bond, Loan, Investment Portfolio System) untuk Tugu Reasuransi, sesuai PSAK 71 / IFRS 9. Project ini dikelola oleh tim **13 subagent Claude Code** dengan pembagian peran yang ketat.
+Repository ini adalah implementasi BLIPS (Bond, Loan, Investment Portfolio System) untuk Tugu Reasuransi, sesuai PSAK 71 / IFRS 9. Project ini dikelola oleh tim **14 subagent Claude Code** dengan pembagian peran yang ketat.
 
 ## Konvensi project (read this first)
 
@@ -89,7 +89,7 @@ Memory files berisi domain knowledge & konvensi yang dipakai berulang oleh semua
 
 ## Tim subagent
 
-13 agent terpasang di `.claude/agents/`. Lihat `.claude/AGENT-TEAM.md` untuk peran, handoff order, dan decision rights.
+14 agent terpasang di `.claude/agents/`. Lihat `.claude/AGENT-TEAM.md` untuk peran, handoff order, dan decision rights.
 
 ### Quick reference
 | Squad | Agents |
@@ -100,11 +100,12 @@ Memory files berisi domain knowledge & konvensi yang dipakai berulang oleh semua
 | **Quality & Compliance** | qa-engineer · security-engineer · ifrs9-compliance-reviewer |
 | **Platform** | devops-engineer |
 | **Orchestration** | tech-lead-orchestrator |
+| **Governance / Oversight** | mda (Conformance Monitor — **advisory, non-blocking**; mengamati pekerjaan subagent terhadap dokumen, menghasilkan laporan drift via `/audit`. BUKAN entry gate, tidak memblok) |
 
 ### Standard flow untuk perubahan
 ```
 user request
-  → tech-lead-orchestrator (plan + delegate)
+  → tech-lead-orchestrator (plan + delegate; entry point untuk perubahan non-trivial)
   → business-analyst (story + AC)
   → system-analyst (OpenAPI + state machine)
   → data-modeler (if schema)
@@ -112,14 +113,31 @@ user request
   → backend-engineer-go / ecl-eir-engineer / integration-engineer
   → frontend-engineer-nextjs
   → qa-engineer (tests + UAT)
-  → security-engineer (review)
+  → security-engineer (review — BLOCKING untuk auth/PII/audit)
   → ifrs9-compliance-reviewer (GATE for ECL/EIR/SPPI/BM)
   → devops-engineer (deploy)
+
+  ⟳ mda (Conformance Monitor) — berjalan PARALEL/di samping, bukan di jalur kritis:
+       dipanggil via /audit, di milestone, atau saat diminta →
+       baca diff + dokumen → tulis laporan drift (temuan + severity + saran) →
+       tim self-correct. TIDAK memblok, TIDAK menghentikan kerja.
 ```
 
-### Blocking veto rights
+### Blocking veto rights (HANYA dua — pada path regulated spesifik)
 - `ifrs9-compliance-reviewer` — BLOCKING veto untuk merge yang menyentuh ECL/EIR/SPPI/BM/klasifikasi.
 - `security-engineer` — BLOCKING veto untuk auth/PII/audit changes.
+
+> Hanya dua gate ini yang benar-benar memblok, dan hanya pada path regulated mereka. Selebihnya kerja jalan tanpa blocker di depan.
+
+### Governance layer (mda) — Conformance Monitor (advisory, non-blocking)
+- `mda` adalah **monitor konformansi yang advisory** — mengamati apakah pekerjaan subagent konsisten dengan dokumen sumber kebenaran (Decision Log, FSD, SoW, ERD, BRD). **Bukan** entry gate, **bukan** blocker.
+- **Tidak di jalur kritis**: request user TIDAK lewat MDA dulu. Default flow `user → tech-lead-orchestrator → subagent` jalan dengan kecepatan penuh. MDA berjalan di samping.
+- **Dipanggil berkala/on-demand**: via slash command `/audit`, di milestone (mis. setelah satu modul selesai), atau saat user/orchestrator meminta — **tidak** menyela tiap aksi subagent.
+- **Output = laporan drift, bukan verdict blocking**: MDA membaca diff + dokumen relevan → menulis `docs/audit/AUDIT-{yyyymmdd-HHMM}.md` berisi temuan (HIGH/MEDIUM/LOW) + bukti + referensi dokumen + saran perbaikan + owner. **Tidak** ada APPROVED/REJECTED yang menghentikan kerja.
+- **Tidak menggantikan gate BLOCKING**: untuk path regulated, MDA hanya **menandai** agar `ifrs9-compliance-reviewer` / `security-engineer` dipanggil — MDA sendiri tidak memblok dan tidak meng-override mereka.
+- **Eskalasi human = flag, bukan halt**: hal yang butuh otoritas manusia (recompute ECL/EIR, reopen DEC, override parameter, hard-close, reklasifikasi PSAK 71) ditandai `[NEEDS-HUMAN]` di laporan — tim eskalasi sesuai RACI; kerja lain tidak berhenti.
+- **Batas tool**: `Read`/`Grep`/`Glob` + `Bash` read-only (`git diff`/`git log`) untuk melihat perubahan. `Write`/`Edit` hanya untuk laporan audit (`docs/audit/`) + opsional jejak HIGH di `.claude/memory/mda-ledger.md`. Tidak menulis kode/skema.
+- **Velocity-first**: tujuan MDA adalah membantu aplikasi **cepat jadi & tetap sesuai dokumen** — menandai drift nyata, bukan nitpick, dan memberi kredit untuk yang sudah benar.
 
 ## Slash commands (.claude/commands/)
 
@@ -137,6 +155,7 @@ Shortcut prompt untuk trigger workflow agent. Pakai `/` di Claude Code:
 | `/uat <story>` | qa-engineer → UAT script + tests |
 | `/security <scope>` | security-engineer → checklist + remediation |
 | `/compliance <scope>` | ifrs9-compliance-reviewer → VERDICT gate |
+| `/audit <scope>` | mda → conformance audit (advisory, non-blocking) → laporan drift |
 | `/deploy <env>` | devops-engineer → IaC + pipeline + runbook |
 | `/release <version>` | Generate release notes + SemVer bump + signed tag |
 | `/standup <range>` | cross-module status dari git + plans |

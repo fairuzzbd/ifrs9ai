@@ -1,0 +1,625 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — Auth Endpoints
+  version: "1.0.0"
+  description: |
+    Auth via Keycloak OIDC callback, token refresh, step-up MFA.
+    DEC-006 (Keycloak), DEC-025 (RSA-2048, access 15m / refresh 8h / idle 15m),
+    DEC-026/027 (MFA mandatory roles + step-up actions).
+    Semua response dalam format envelope standar (_common.yaml).
+
+servers:
+  - url: /api/v1
+    description: BLIPS REST API v1
+
+tags:
+  - name: auth
+    description: Authentication & session management
+
+paths:
+  # -----------------------------------------------------------------------
+  # OIDC callback — Keycloak redirects ke sini setelah autentikasi sukses.
+  # Backend verify authorization_code, exchange token, return JWT pair.
+  # -----------------------------------------------------------------------
+  /auth/callback:
+    post:
+      operationId: authOidcCallback
+      summary: OIDC authorization-code callback (Keycloak)
+      description: |
+        Terima authorization_code dari Keycloak redirect. Backend exchange ke
+        token pair (access + refresh). Verify RSA-2048 signature. Set refresh
+        token di httpOnly Secure cookie. Return access token di response body.
+
+        DEC-006: Keycloak sebagai SSO Hub.
+        DEC-025: access_token TTL = 15 menit, refresh_token TTL = 8 jam.
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OidcCallbackRequest"
+      responses:
+        "200":
+          description: Token pair berhasil diterbitkan
+          headers:
+            Set-Cookie:
+              description: |
+                `refresh_token=<jwt>; HttpOnly; Secure; SameSite=Strict;
+                Path=/api/v1/auth/refresh; Max-Age=28800`
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # -----------------------------------------------------------------------
+  # Token refresh — menggunakan httpOnly refresh token cookie.
+  # Idle enforcement: jika last_activity > 15 menit → return 401 IDLE_TIMEOUT.
+  # -----------------------------------------------------------------------
+  /auth/refresh:
+    post:
+      operationId: authRefreshToken
+      summary: Refresh access token
+      description: |
+        Baca refresh token dari httpOnly cookie. Validate TTL (max 8h) +
+        idle timeout (15m). Issue access token baru (TTL 15m).
+        Jika refresh token expired → 401 UNAUTHORIZED.
+        Jika idle > 15m → 401 error code IDLE_TIMEOUT.
+
+        DEC-025: idle window 15 menit.
+      tags: [auth]
+      parameters:
+        - name: Cookie
+          in: header
+          required: true
+          schema:
+            type: string
+          description: httpOnly cookie berisi refresh_token
+      responses:
+        "200":
+          description: Access token baru diterbitkan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenRefreshResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # -----------------------------------------------------------------------
+  # Step-up MFA — re-prompt MFA bahkan jika mfa_verified=true di current JWT.
+  # Diperlukan untuk: hard-close periode, ECL param approve, klasifikasi approve,
+  # calc-run seal (DEC-027).
+  # -----------------------------------------------------------------------
+  /auth/step-up:
+    post:
+      operationId: authStepUpMfa
+      summary: Step-up MFA challenge → token berisi mfa_verified=true
+      description: |
+        Submit MFA challenge response. Jika valid, return access token baru
+        dengan claim `mfa_verified: true` dan `stepup_verified_at` timestamp.
+        Token step-up berlaku 5 menit sejak issued untuk action sensitif.
+
+        Action yang wajib: hard-close periode buku, ECL parameter approve,
+        klasifikasi PSAK 71 approve, calc-run seal.
+
+        Method MFA yang didukung: TOTP, WEBAUTHN, PUSH.
+        DEC-027.
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StepUpRequest"
+      responses:
+        "200":
+          description: Step-up sukses — access token baru dengan mfa_verified=true
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenRefreshResponse"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: MFA challenge gagal (kode salah / expired)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: MFA_CHALLENGE_FAILED
+                  message: "Kode MFA tidak valid atau sudah expired"
+                  details: []
+                  traceId: "abc123"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # -----------------------------------------------------------------------
+  # SSE ticket — FALLBACK SEKUNDER untuk SSE stream di /jobs/{id}/stream.
+  #
+  # DEFAULT auth untuk SSE: fetch()-based dengan Authorization: Bearer header.
+  # Gunakan endpoint ini HANYA jika lingkungan tidak mendukung fetch-based SSE
+  # dengan custom header (mis. legacy mobile WebView, embedded browser).
+  #
+  # SECURITY properties:
+  # - Single-use: setelah dipakai sekali di stream endpoint → langsung invalidate
+  # - TTL 30 detik sejak issued → auto-expire
+  # - Bound to: (user_id, job_id) — ticket tidak berlaku untuk job lain
+  # - Stored as: hashed (SHA-256) di sys.sse_ticket — plain ticket tidak persisted
+  # - Access log masking: Traefik config WAJIB mask ?sse_ticket=* dari access log
+  #   (lihat deploy/traefik/middleware-mask-sse-ticket.yaml)
+  # -----------------------------------------------------------------------
+  /auth/sse-ticket:
+    post:
+      operationId: authIssueSseTicket
+      summary: Issue short-lived SSE ticket (fallback sekunder)
+      description: |
+        Issue single-use SSE ticket untuk dipakai di `GET /api/v1/jobs/{jobId}/stream`
+        sebagai fallback jika fetch-based SSE dengan Authorization header tidak tersedia.
+
+        ## Kapan menggunakan endpoint ini
+
+        HANYA gunakan jika:
+        1. Browser/runtime tidak mendukung `fetch()` dengan custom header + streaming
+        2. Legacy mobile WebView yang tidak bisa set Authorization header di EventSource
+
+        Untuk environment modern (Chrome 80+, Firefox 80+, Safari 14+, Node 18+),
+        gunakan fetch-based SSE (Authorization: Bearer header) — TIDAK perlu endpoint ini.
+
+        ## Properties keamanan
+
+        - **Single-use**: satu ticket dipakai tepat sekali. Setelah stream `/jobs/{jobId}/stream`
+          menerima koneksi dan memvalidasi ticket, ticket langsung di-mark `used` di DB.
+          Koneksi kedua dengan ticket yang sama → `SSE_TICKET_INVALID`.
+        - **TTL 30 detik**: jika tidak dipakai dalam 30 detik sejak issued → expired.
+          Client harus buka koneksi SSE segera setelah menerima ticket.
+        - **Scope terbatas**: ticket hanya valid untuk `jobId` yang dispesifikasikan.
+          Tidak bisa dipakai di job lain.
+        - **Hash stored**: plain ticket tidak disimpan di DB. Hanya SHA-256(ticket) yang
+          disimpan di `sys.sse_ticket`. Jika DB bocor, plain ticket tidak terekspos.
+        - **Access log masking**: `?sse_ticket=` WAJIB di-mask di Traefik middleware.
+          Ticket bocor ke log = keamanan yang sama dengan `?token=` biasa (dilarang).
+
+        ## Rate limit
+
+        5 ticket per user per menit. Abuse → `RATE_LIMITED` 429.
+
+        Idempotency-Key wajib (seperti semua mutating endpoint).
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID v4. Replay same key → return same ticket (jika belum dipakai/expired).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SseTicketRequest"
+      responses:
+        "201":
+          description: |
+            SSE ticket berhasil issued. Gunakan dalam 30 detik.
+            Buka koneksi SSE stream segera setelah menerima response ini.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SseTicketResponse"
+              example:
+                data:
+                  ticket: "sset_a1b2c3d4e5f6..."
+                  jobId: "01JXYZ..."
+                  expiresAt: "2026-06-03T10:30:30+07:00"
+                  streamUrl: "/api/v1/jobs/01JXYZ.../stream?sse_ticket=sset_a1b2c3d4e5f6..."
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Job tidak ditemukan atau user tidak berhak mengakses job ini
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: JOB_NOT_FOUND
+                  message: "Job tidak ditemukan atau Anda tidak memiliki akses"
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # -----------------------------------------------------------------------
+  # Logout — revoke refresh token (session invalidation).
+  # -----------------------------------------------------------------------
+  /auth/logout:
+    post:
+      operationId: authLogout
+      summary: Logout — revoke session + clear refresh cookie
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                everywhere:
+                  type: boolean
+                  description: "true = revoke semua session aktif user ini"
+                  default: false
+      responses:
+        "200":
+          description: Logout sukses
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # -----------------------------------------------------------------------
+  # GET /auth/me — informasi user aktif dari JWT claims.
+  # -----------------------------------------------------------------------
+  /auth/me:
+    get:
+      operationId: authGetMe
+      summary: Informasi user yang sedang login (dari JWT)
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: User info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserInfoResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+# -----------------------------------------------------------------------
+components:
+# -----------------------------------------------------------------------
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT RSA-2048 signed oleh Keycloak. Access token TTL 15 menit.
+        Claims wajib: sub, preferred_username, roles, permissions,
+        tenant_id, mfa_verified, exp, iat, nbf.
+
+  schemas:
+    # ---- Request bodies ------------------------------------------------
+
+    OidcCallbackRequest:
+      type: object
+      required: [code, state, redirect_uri]
+      properties:
+        code:
+          type: string
+          description: Authorization code dari Keycloak
+          example: "eyJhb..."
+        state:
+          type: string
+          description: CSRF nonce yang digenerate saat initiate login
+          example: "abc123xyz"
+        redirect_uri:
+          type: string
+          format: uri
+          description: Redirect URI yang sama dipakai saat authorization request
+          example: "https://blips.tugu-re.com/auth/callback"
+
+    SseTicketRequest:
+      type: object
+      required: [jobId]
+      properties:
+        jobId:
+          type: string
+          description: |
+            Job ID yang akan di-stream. Ticket hanya berlaku untuk job ini.
+            User harus merupakan creator job ATAU ROLE-IT-ADMIN.
+          example: "01JXYZ..."
+
+    SseTicketResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          required: [ticket, jobId, expiresAt, streamUrl]
+          properties:
+            ticket:
+              type: string
+              description: |
+                Plain SSE ticket. Prefix `sset_` + 32-char random hex.
+                Single-use, TTL 30 detik. Gunakan segera.
+                JANGAN log, cache, atau simpan lebih lama dari yang diperlukan.
+              example: "sset_a1b2c3d4e5f6789012345678901234ab"
+            jobId:
+              type: string
+              description: Job ID yang di-bind ke ticket ini
+              example: "01JXYZ..."
+            expiresAt:
+              type: string
+              format: date-time
+              description: Timestamp expiry ticket (30 detik dari issued)
+              example: "2026-06-03T10:30:30+07:00"
+            streamUrl:
+              type: string
+              description: |
+                Convenience URL lengkap dengan sse_ticket sudah di-append.
+                Langsung pakai URL ini untuk buka koneksi SSE.
+                PERINGATAN: URL ini mengandung ticket — jangan log/share.
+              example: "/api/v1/jobs/01JXYZ.../stream?sse_ticket=sset_a1b2c3..."
+        meta:
+          $ref: "#/components/schemas/ResponseMeta"
+
+    StepUpRequest:
+      type: object
+      required: [method, credential]
+      properties:
+        method:
+          type: string
+          enum: [TOTP, WEBAUTHN, PUSH]
+          description: Metode MFA yang dipakai
+        credential:
+          type: string
+          description: |
+            Untuk TOTP: 6-digit code.
+            Untuk WEBAUTHN: JSON serialized assertion.
+            Untuk PUSH: confirmation token dari push notif.
+          example: "123456"
+        action_context:
+          type: string
+          description: Opsional — hint action yang trigger step-up (untuk audit log)
+          example: "PERIODE_HARD_CLOSE"
+
+    # ---- Response bodies -----------------------------------------------
+
+    TokenResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            accessToken:
+              type: string
+              description: JWT access token (RSA-2048, TTL 15m)
+            tokenType:
+              type: string
+              enum: [Bearer]
+            expiresIn:
+              type: integer
+              description: TTL dalam detik (900 = 15 menit)
+              example: 900
+            claims:
+              $ref: "#/components/schemas/JwtClaims"
+        meta:
+          $ref: "#/components/schemas/ResponseMeta"
+
+    TokenRefreshResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            accessToken:
+              type: string
+            tokenType:
+              type: string
+              enum: [Bearer]
+            expiresIn:
+              type: integer
+              example: 900
+        meta:
+          $ref: "#/components/schemas/ResponseMeta"
+
+    UserInfoResponse:
+      type: object
+      properties:
+        data:
+          $ref: "#/components/schemas/JwtClaims"
+        meta:
+          $ref: "#/components/schemas/ResponseMeta"
+
+    # ---- JWT Claims (canonical per security-baseline.md) ---------------
+
+    JwtClaims:
+      type: object
+      required:
+        - sub
+        - preferred_username
+        - roles
+        - permissions
+        - tenant_id
+        - mfa_verified
+        - exp
+        - iat
+        - nbf
+      properties:
+        sub:
+          type: string
+          format: uuid
+          description: User UUID (PK di sec.user)
+          example: "550e8400-e29b-41d4-a716-446655440001"
+        preferred_username:
+          type: string
+          description: Username untuk display
+          example: "budi.santoso"
+        roles:
+          type: array
+          items:
+            type: string
+          description: Array ROLE-* yang dimiliki user
+          example: ["ROLE-MAKER-TR"]
+        permissions:
+          type: array
+          items:
+            type: string
+          description: Array permission {entity}.{action}
+          example: ["instrumen.create", "instrumen.read", "penempatan.submit"]
+        tenant_id:
+          type: string
+          description: Tenant identifier (Phase 1 selalu "TUGURE")
+          example: "TUGURE"
+        mfa_verified:
+          type: boolean
+          description: Apakah MFA sudah diverifikasi di session ini
+        mfa_method:
+          type: string
+          enum: [TOTP, WEBAUTHN, PUSH]
+          nullable: true
+          description: Method MFA yang dipakai (present jika mfa_verified=true)
+        stepup_verified_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Timestamp step-up terakhir. Present jika step-up pernah dilakukan dalam session.
+        exp:
+          type: integer
+          description: Unix timestamp expiry
+        iat:
+          type: integer
+          description: Unix timestamp issued-at
+        nbf:
+          type: integer
+          description: Unix timestamp not-before
+
+    # ---- Common envelopes (inline untuk self-contained file ini) -------
+    # File lengkap ada di _common.yaml
+
+    SuccessEnvelope:
+      type: object
+      properties:
+        data:
+          type: object
+        meta:
+          $ref: "#/components/schemas/ResponseMeta"
+
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, traceId]
+          properties:
+            code:
+              type: string
+              description: Stable error code string
+              example: "UNAUTHORIZED"
+            message:
+              type: string
+              description: Human-readable message (Bahasa Indonesia)
+              example: "Token JWT tidak valid atau sudah expired"
+            details:
+              type: array
+              items:
+                $ref: "#/components/schemas/ErrorDetail"
+            traceId:
+              type: string
+              example: "01HXY..."
+
+    ErrorDetail:
+      type: object
+      properties:
+        field:
+          type: string
+        rule:
+          type: string
+        message:
+          type: string
+
+    ResponseMeta:
+      type: object
+      properties:
+        traceId:
+          type: string
+
+  responses:
+    ValidationFailed:
+      description: Validasi field gagal
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: VALIDATION_FAILED
+              message: "Request tidak valid"
+              details:
+                - field: "code"
+                  rule: "required"
+                  message: "Authorization code wajib diisi"
+              traceId: "01HXY..."
+
+    Unauthorized:
+      description: JWT tidak valid, expired, atau tidak ada
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: UNAUTHORIZED
+              message: "Token JWT tidak valid atau sudah expired"
+              details: []
+              traceId: "01HXY..."
+
+    InternalError:
+      description: Server error tak terduga
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: INTERNAL
+              message: "Terjadi kesalahan internal. Hubungi admin dengan traceId."
+              details: []
+              traceId: "01HXY..."
+
+    RateLimited:
+      description: Too many requests
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: RATE_LIMITED
+              message: "Terlalu banyak request. Coba lagi dalam 60 detik."
+              details: []
+              traceId: "01HXY..."

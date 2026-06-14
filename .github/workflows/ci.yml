@@ -24,6 +24,10 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop, "release/**", "hotfix/**"]
+  # Enables manual trigger via GitHub Actions UI → "Run workflow" button.
+  # deploy-uat job checks github.ref == refs/heads/develop, so dispatching
+  # from a different branch will skip the deploy step gracefully.
+  workflow_dispatch:
 
 # Cancel in-progress runs untuk PR yang sama ketika commit baru di-push.
 # Hemat runner minutes, hindari race.
@@ -38,7 +42,7 @@ permissions:
   pull-requests: read
 
 env:
-  GO_VERSION: "1.22"
+  GO_VERSION: "1.24"
   NODE_VERSION: "20"
   PNPM_VERSION: "9"
 
@@ -76,12 +80,28 @@ jobs:
           cache: true
           cache-dependency-path: backend/go.sum
 
+      # Explicitly populate GOMODCACHE from go.sum before golangci-lint runs.
+      # Without this, golangci-lint's embedded type-checker may run against
+      # an incomplete module cache if setup-go had a partial hit.
+      - name: Download Go modules
+        if: steps.changed.outputs.backend == 'true'
+        run: go mod download
+
       - uses: golangci/golangci-lint-action@v6
         if: steps.changed.outputs.backend == 'true'
         with:
-          version: v1.55
+          version: v1.64.5
           working-directory: backend
           args: ./...
+          # skip-cache: prevents golangci-lint-action from restoring its own
+          # build-artifact cache. The action keys that cache on lint config +
+          # linter version, NOT on go.sum, so a cache entry created in Phase 0
+          # (before redis/asynq/minio/migrate were added) gets restored and
+          # causes `undefined: redis` / `undefined: jwt` type-check failures
+          # even though go.mod + go.sum are correct and `go build` is green.
+          # setup-go's GOMODCACHE cache (keyed on go.sum) is still active and
+          # provides the module speed-up; only the stale build cache is skipped.
+          skip-cache: true
 
   backend-test:
     name: backend-test
@@ -109,6 +129,12 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
           cache-dependency-path: backend/go.sum
+
+      # Same rationale as backend-lint: ensure GOMODCACHE is fully populated
+      # before go test runs, regardless of setup-go cache hit/miss status.
+      - name: Download Go modules
+        if: steps.changed.outputs.backend == 'true'
+        run: go mod download
 
       - name: Run tests with race detector + coverage
         if: steps.changed.outputs.backend == 'true'
@@ -222,3 +248,147 @@ jobs:
           name: frontend-build
           path: frontend/.next
           retention-days: 1
+
+  # =========================================================================
+  # Deploy — UAT
+  #
+  # Triggers:
+  #   - workflow_dispatch (manual button in GitHub Actions UI)
+  #   - push to develop (auto-deploy after all checks pass)
+  #
+  # Prerequisites (wajib dikonfigurasi sebelum job ini fully operational):
+  #   - GitHub Environment "uat" dibuat di repo Settings → Environments.
+  #   - Secrets pada environment "uat":
+  #       UAT_HOST       — hostname/IP UAT server untuk SSH deploy
+  #       REGISTRY_URL   — URL internal container registry (mis. registry.tugu-re.local:5000)
+  #   - SSH deploy key sudah terpasang di UAT host (~deploy/.ssh/authorized_keys)
+  #     dan private key di-store sebagai secret SSH_DEPLOY_KEY.
+  #   - .env.uat sudah ada di UAT host: /opt/blips/secrets/.env.uat
+  #
+  # Setiap step yang masih stub ditandai dengan [NEEDS-DEVOPS].
+  # Cari "NEEDS-DEVOPS" di file ini untuk menemukan semua item yang perlu dikerjakan.
+  # =========================================================================
+
+  deploy-uat:
+    name: deploy-uat
+    runs-on: ubuntu-latest
+    # Hanya jalan di branch develop (baik dari push otomatis maupun workflow_dispatch).
+    if: github.ref == 'refs/heads/develop'
+    # Semua gate CI harus hijau sebelum deploy.
+    needs:
+      - backend-lint
+      - backend-test
+      - frontend-lint
+      - frontend-build
+    # Hanya satu deploy-uat boleh berjalan bersamaan.
+    # Jika ada deploy sedang berjalan saat push baru masuk, yang baru akan
+    # menunggu (pending) — bukan membatalkan yang sedang berjalan.
+    concurrency:
+      group: deploy-uat
+      cancel-in-progress: false
+    # GitHub Environment "uat" — memberikan akses ke environment secrets
+    # (UAT_HOST, REGISTRY_URL, dst) dan memungkinkan protection rules
+    # (required reviewers, wait timer) di-set per-environment di repo Settings.
+    environment: uat
+    steps:
+      - uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Hitung short SHA untuk image tagging yang immutable (DEC-008 anti-pattern
+      # melarang mutable tag seperti :latest sebagai satu-satunya tag).
+      # -----------------------------------------------------------------------
+      - name: Set image tags
+        id: tags
+        run: |
+          SHORT_SHA="${GITHUB_SHA::8}"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "tag_sha=uat-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "tag_latest=uat-latest" >> "$GITHUB_OUTPUT"
+          echo "Image tags: uat-${SHORT_SHA}, uat-latest"
+
+      # -----------------------------------------------------------------------
+      # [NEEDS-DEVOPS] Build backend Docker image
+      # Setelah registry dikonfigurasi, ganti echo dengan:
+      #   docker build \
+      #     -t ${{ secrets.REGISTRY_URL }}/blips/backend:uat-${{ steps.tags.outputs.short_sha }} \
+      #     -t ${{ secrets.REGISTRY_URL }}/blips/backend:uat-latest \
+      #     backend/
+      # -----------------------------------------------------------------------
+      - name: Build backend image
+        run: |
+          echo "[NEEDS-DEVOPS] docker build backend/ -t <REGISTRY_URL>/blips/backend:${{ steps.tags.outputs.tag_sha }} -t <REGISTRY_URL>/blips/backend:${{ steps.tags.outputs.tag_latest }}"
+
+      # -----------------------------------------------------------------------
+      # [NEEDS-DEVOPS] Build frontend Docker image
+      # -----------------------------------------------------------------------
+      - name: Build frontend image
+        run: |
+          echo "[NEEDS-DEVOPS] docker build frontend/ --build-arg NEXT_PUBLIC_API_URL=<UAT_API_URL> -t <REGISTRY_URL>/blips/frontend:${{ steps.tags.outputs.tag_sha }} -t <REGISTRY_URL>/blips/frontend:${{ steps.tags.outputs.tag_latest }}"
+
+      # -----------------------------------------------------------------------
+      # [NEEDS-DEVOPS] Push images ke internal registry
+      # Setelah registry dikonfigurasi dan docker login tersedia:
+      #   docker push ${{ secrets.REGISTRY_URL }}/blips/backend:uat-${{ steps.tags.outputs.short_sha }}
+      #   docker push ${{ secrets.REGISTRY_URL }}/blips/backend:uat-latest
+      #   docker push ${{ secrets.REGISTRY_URL }}/blips/frontend:uat-${{ steps.tags.outputs.short_sha }}
+      #   docker push ${{ secrets.REGISTRY_URL }}/blips/frontend:uat-latest
+      # -----------------------------------------------------------------------
+      - name: Push images to registry
+        run: |
+          echo "[NEEDS-DEVOPS] push to registry ${{ vars.REGISTRY_URL || '<REGISTRY_URL not configured>' }}"
+          echo "[NEEDS-DEVOPS] docker push <REGISTRY_URL>/blips/backend:${{ steps.tags.outputs.tag_sha }}"
+          echo "[NEEDS-DEVOPS] docker push <REGISTRY_URL>/blips/frontend:${{ steps.tags.outputs.tag_sha }}"
+
+      # -----------------------------------------------------------------------
+      # [NEEDS-DEVOPS] SSH ke UAT host dan deploy via docker compose
+      # Setelah UAT_HOST secret + SSH_DEPLOY_KEY secret dikonfigurasi, ganti dengan:
+      #   uses: appleboy/ssh-action@v1
+      #   with:
+      #     host: ${{ secrets.UAT_HOST }}
+      #     username: deploy
+      #     key: ${{ secrets.SSH_DEPLOY_KEY }}
+      #     script: |
+      #       cd /opt/blips/ifrs9ai
+      #       git pull origin develop
+      #       docker compose -f deploy/docker/docker-compose.uat.yml \
+      #         --env-file /opt/blips/secrets/.env.uat \
+      #         pull
+      #       docker compose -f deploy/docker/docker-compose.uat.yml \
+      #         --env-file /opt/blips/secrets/.env.uat \
+      #         up -d --remove-orphans
+      #       docker compose -f deploy/docker/docker-compose.uat.yml \
+      #         run --rm migrator up
+      # -----------------------------------------------------------------------
+      - name: Deploy to UAT host
+        run: |
+          echo "[NEEDS-DEVOPS] ssh deploy@${{ vars.UAT_HOST || '<UAT_HOST not configured>' }} 'cd /opt/blips/ifrs9ai && git pull origin develop && docker compose -f deploy/docker/docker-compose.uat.yml --env-file /opt/blips/secrets/.env.uat up -d --remove-orphans'"
+          echo "[NEEDS-DEVOPS] run migrator: docker compose -f deploy/docker/docker-compose.uat.yml run --rm migrator up"
+
+      # -----------------------------------------------------------------------
+      # [NEEDS-DEVOPS] Smoke test — verifikasi layanan UP setelah deploy
+      # Setelah deploy aktif, ganti dengan:
+      #   curl -fs https://<UAT_HOST>/healthz || (echo "Backend healthz FAILED" && exit 1)
+      #   curl -fs https://<UAT_HOST>/readyz  || (echo "Backend readyz FAILED" && exit 1)
+      # -----------------------------------------------------------------------
+      - name: Smoke test — health endpoints
+        run: |
+          echo "[NEEDS-DEVOPS] curl health endpoint after deploy"
+          echo "[NEEDS-DEVOPS] curl -fs http://${{ vars.UAT_HOST || '<UAT_HOST>' }}:8081/healthz"
+          echo "[NEEDS-DEVOPS] curl -fs http://${{ vars.UAT_HOST || '<UAT_HOST>' }}:8081/readyz"
+
+      # -----------------------------------------------------------------------
+      # Summary — ditampilkan di GitHub Actions job summary
+      # -----------------------------------------------------------------------
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "## UAT Deploy Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Item | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Branch | \`${{ github.ref_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Commit | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image tag | \`${{ steps.tags.outputs.tag_sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Triggered by | ${{ github.actor }} via ${{ github.event_name }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "> **Status**: STUB — semua deploy step masih [NEEDS-DEVOPS]. Lihat job log untuk detail." >> "$GITHUB_STEP_SUMMARY"

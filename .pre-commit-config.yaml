@@ -1,0 +1,106 @@
+# .pre-commit-config.yaml — BLIPS IFRS9
+#
+# Pre-commit hooks untuk menjaga kualitas kode sebelum commit masuk ke repo.
+# Referensi: .claude/memory/git-conventions.md §"Pre-commit hooks"
+#
+# Install:
+#   pip install pre-commit
+#   pre-commit install --install-hooks           # stage: pre-commit (default)
+#   pre-commit install --hook-type commit-msg    # stage: commit-msg (wajib untuk conventional-commit)
+#
+# Run manual untuk semua file:
+#   pre-commit run --all-files
+#
+# Update semua hook ke versi terbaru:
+#   pre-commit autoupdate
+#
+# CATATAN: gitleaks dan golangci-lint memerlukan binary terinstall di PATH.
+#   - gitleaks:     https://github.com/gitleaks/gitleaks#installing
+#   - golangci-lint: https://golangci-lint.run/usage/install/
+
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
+
+repos:
+  # ---------------------------------------------------------------------------
+  # 1. General file hygiene (pre-commit/pre-commit-hooks)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        name: Trim trailing whitespace
+        exclude: ".*\\.md$"       # Markdown: spasi ganda di akhir baris = line break intentional
+
+      - id: end-of-file-fixer
+        name: Ensure files end with newline
+        exclude: ".*\\.snap$"     # jest snapshot files
+
+      - id: check-yaml
+        name: Validate YAML syntax
+        args: [--unsafe]          # allow custom YAML tags (mis. di Helm chart)
+
+      - id: check-added-large-files
+        name: Block files > 500KB
+        args: ["--maxkb=500"]
+        # Exception: dokumen sumber kebenaran (DOCX/PDF) di docs/ boleh besar.
+        exclude: "^docs/(decisions|source)/"
+
+      - id: detect-private-key
+        name: Detect hardcoded private keys
+        # Ini BLOCKING — private key di repo = security incident langsung.
+
+      - id: check-merge-conflict
+        name: Check for merge conflict markers
+
+      - id: mixed-line-ending
+        name: Check for mixed line endings
+        args: [--fix=lf]
+
+  # ---------------------------------------------------------------------------
+  # 2. Secrets detection — gitleaks
+  #    Mendeteksi API key, credential, token, dan high-entropy strings.
+  #    Wajib per DEC-028 + security-baseline.md §"Secrets management".
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+        name: Detect secrets with gitleaks
+        # gitleaks akan membaca .gitleaks.toml jika ada (boleh tambah allowlist project-specific).
+
+  # ---------------------------------------------------------------------------
+  # 3. Go linting — golangci-lint
+  #    Menjalankan linter yang sama dengan CI (backend-lint job GitHub Actions).
+  #    Gagal di sini = pasti gagal di CI → "shift left" deteksi masalah.
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/golangci/golangci-lint
+    rev: v1.62.2
+    hooks:
+      - id: golangci-lint
+        name: Go lint (golangci-lint)
+        args:
+          - --timeout=120s
+          - --config=backend/.golangci.yml   # pakai config project; hapus baris ini jika tidak ada file tersebut
+        # Hanya jalankan pada file Go yang berubah (default behaviour golangci-lint hook).
+        pass_filenames: false                 # golangci-lint bekerja per modul, bukan per file
+        entry: golangci-lint run
+        language: system
+        types: [go]
+
+  # ---------------------------------------------------------------------------
+  # 4. Conventional Commit message validation
+  #    Memastikan setiap commit mengikuti format yang diwajibkan di BLIPS.
+  #    Referensi: .claude/memory/git-conventions.md §"Commit message — Conventional Commits"
+  # ---------------------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: conventional-commit
+        name: Validate Conventional Commit message (BLIPS format)
+        language: script
+        entry: scripts/check-commit-msg.sh
+        stages: [commit-msg]
+        # Hook ini membaca $1 (path ke .git/COMMIT_EDITMSG), bukan daftar file.
+        pass_filenames: false
+        always_run: true
