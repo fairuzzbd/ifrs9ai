@@ -221,6 +221,16 @@ type CashflowItem struct {
 	AmountIDR decimal.Decimal // NUMERIC(20,4); negative = outflow
 }
 
+// ─── Algorithm constants ──────────────────────────────────────────────────────
+
+const (
+	// AlgorithmNewtonRaphson is the algorithm label for standard EIR computation.
+	AlgorithmNewtonRaphson = "NEWTON_RAPHSON"
+	// AlgorithmNewtonRaphsonCreditAdjusted is the algorithm label for POCI CA-EIR.
+	// Returned by Solver.SolveCreditAdjusted per PSAK 71 §5.5.13 and DEC-POCI-001.
+	AlgorithmNewtonRaphsonCreditAdjusted = "NEWTON_RAPHSON_CREDIT_ADJUSTED" //nolint:gosec // algorithm name constant, not a credential
+)
+
 // SolveDetail carries Newton-Raphson solver metadata for audit and debugging.
 type SolveDetail struct {
 	// IterationsUsed is the number of NR iterations performed.
@@ -229,6 +239,13 @@ type SolveDetail struct {
 	ConvergenceResidual decimal.Decimal
 	// Converged indicates whether the solver met the tolerance criterion.
 	Converged bool
+	// IsCreditAdjusted is true when this detail was produced by SolveCreditAdjusted.
+	// Signals that the cashflows were PD-adjusted at origination (POCI, PSAK 71 §5.5.13).
+	// DEC-POCI-001.
+	IsCreditAdjusted bool
+	// Algorithm is the solver algorithm label stored in audit metadata.
+	// Standard: "NEWTON_RAPHSON". POCI: "NEWTON_RAPHSON_CREDIT_ADJUSTED".
+	Algorithm string
 }
 
 // ─── ScheduleRow ──────────────────────────────────────────────────────────────
@@ -273,10 +290,20 @@ type ComputeResult struct {
 	IterationsUsed      int
 	ConvergenceResidual decimal.Decimal
 	FlagPOCI            bool
-	EIRType             string // "STANDARD" or "CREDIT_ADJUSTED"
-	Persisted           bool   // true if eir_awal saved to mst.instrumen
+	EIRType             string // "STANDARD" or "CREDIT_ADJUSTED" — see EIRType* constants
+	Algorithm           string // "NEWTON_RAPHSON" or "NEWTON_RAPHSON_CREDIT_ADJUSTED"
+	Warnings            []string
+	Persisted           bool // true if eir_awal saved to mst.instrumen
 	ComputedAt          time.Time
 }
+
+// EIR warning codes for ComputeResult.Warnings.
+const (
+	// WarnPOCICAEIRComputed signals that CA-EIR was computed via SolveCreditAdjusted.
+	// Cashflows must have been PD-adjusted by the caller at origination.
+	// DEC-POCI-001.
+	WarnPOCICAEIRComputed = "POCI_CA_EIR_COMPUTED"
+)
 
 // EIR type constants.
 const (

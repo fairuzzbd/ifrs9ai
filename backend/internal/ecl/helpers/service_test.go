@@ -744,6 +744,73 @@ func TestPDService_POCI_Returns_NotApplicable(t *testing.T) {
 	}
 }
 
+// TestGetPD_POCI_AllowPOCI_ReturnsPDCurve verifies F1 fix (DEC-POCI-001):
+// when AllowPOCI=true is passed, POCI instruments bypass the deferral guard and
+// proceed with normal PD curve lookup. Used by M7 handlePOCI in Phase 4.5.
+func TestGetPD_POCI_AllowPOCI_ReturnsPDCurve(t *testing.T) {
+	// Setup: POCI instrument, idAA curve, AllowPOCI=true → normal PD lookup proceeds.
+	// PD_FL = PD_12M × impact_pd × impact_mev_pd(NORMAL)
+	//       = 0.00350000 × 1.05000000 × 1.0 = 0.00367500 (RoundBank(8))
+	curve := &PDCurveRow{
+		Rating:    "idAA",
+		PD12Month: d("0.00350000"),
+	}
+	impPD := &ImpactPDRow{PeriodeID: testPeriode, ImpactMultiplier: d("1.05000000")}
+	pdRepo := &stubPDRepo{curve: curve, impactPD: impPD, rating: "idAA"}
+	instrRepo := &stubInstrRepo{
+		inst: &InstrumenRow{
+			ID:                testInstrID,
+			CounterpartyID:    testCPID,
+			KlasifikasiPsak71: "POCI", // POCI instrument
+			TanggalJatuhTempo: func() *time.Time {
+				t := time.Date(2028, 6, 30, 0, 0, 0, 0, time.UTC)
+				return &t
+			}(),
+		},
+	}
+
+	svc := NewPDLookupService(pdRepo, instrRepo)
+	// Pass AllowPOCI=true — should bypass deferral guard and return PD from curve.
+	pd, detail, err := svc.GetPD(context.Background(), testInstrID, Stage1, ScenarioNormal, testPeriode, testEvalDate, true /* AllowPOCI */)
+	if err != nil {
+		t.Fatalf("GetPD with AllowPOCI=true should not error for POCI, got: %v", err)
+	}
+	expected := d("0.00367500")
+	if !pd.Equal(expected) {
+		t.Errorf("AllowPOCI=true PD want %s got %s", expected, pd)
+	}
+	if detail.RatingUsed != "idAA" {
+		t.Errorf("RatingUsed want idAA got %s", detail.RatingUsed)
+	}
+}
+
+// TestGetPDFromBatchParams_POCI_AllowPOCI_ReturnsPDCurve verifies F1 fix for the batch path:
+// when params.AllowPOCI=true, POCI batch lookup bypasses deferral and returns PD from curve.
+func TestGetPDFromBatchParams_POCI_AllowPOCI_ReturnsPDCurve(t *testing.T) {
+	inst := InstrumenRow{
+		ID: testInstrID, CounterpartyID: testCPID,
+		KlasifikasiPsak71: "POCI",
+	}
+	params := &BatchParams{
+		PDCurves: map[string]PDCurveRow{
+			"idAA": {Rating: "idAA", PD12Month: d("0.00350000")},
+		},
+		ImpactPD:    &ImpactPDRow{ImpactMultiplier: d("1.05000000")},
+		ImpactMevPD: map[string]ImpactMevPDRow{"GOOD": {Scenario: "GOOD", ImpactMultiplier: d("1.10000000")}},
+		Ratings:     map[uuid.UUID]string{testCPID: "idAA"},
+		AllowPOCI:   true, // F1 fix: bypass POCI deferral guard
+	}
+	pd, _, err := GetPDFromBatchParams(testInstrID, Stage1, ScenarioGood, inst, params, testEvalDate)
+	if err != nil {
+		t.Fatalf("GetPDFromBatchParams AllowPOCI=true should not error, got: %v", err)
+	}
+	// PD_FL = 0.00350000 × 1.05000000 × 1.10000000 = 0.00404250 (RoundBank(8))
+	expected := d("0.00404250")
+	if !pd.Equal(expected) {
+		t.Errorf("AllowPOCI=true batch PD want %s got %s", expected, pd)
+	}
+}
+
 // ─── F4: batch LGD haircut formula tests ─────────────────────────────────────
 
 func TestGetPDFromBatchParams_POCI_Returns_DeferredToM7(t *testing.T) {

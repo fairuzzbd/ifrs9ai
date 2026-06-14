@@ -205,7 +205,7 @@ type mockPDServiceDual struct {
 	impactMev decimal.Decimal
 }
 
-func (m *mockPDServiceDual) GetPD(_ context.Context, _ uuid.UUID, stage helpers.EclStage, scenario helpers.EclScenario, _ string, _ time.Time) (decimal.Decimal, helpers.PDDetail, error) {
+func (m *mockPDServiceDual) GetPD(_ context.Context, _ uuid.UUID, stage helpers.EclStage, scenario helpers.EclScenario, _ string, _ time.Time, _ ...bool) (decimal.Decimal, helpers.PDDetail, error) {
 	pd := m.pdBase
 	impactPD := m.impactPD
 	impactMev := m.impactMev

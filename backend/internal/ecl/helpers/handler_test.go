@@ -42,7 +42,7 @@ type stubPDSvc struct {
 	err    error
 }
 
-func (s *stubPDSvc) GetPD(_ context.Context, _ uuid.UUID, _ EclStage, _ EclScenario, _ string, _ time.Time) (decimal.Decimal, PDDetail, error) {
+func (s *stubPDSvc) GetPD(_ context.Context, _ uuid.UUID, _ EclStage, _ EclScenario, _ string, _ time.Time, _ ...bool) (decimal.Decimal, PDDetail, error) {
 	return s.pd, s.detail, s.err
 }
 

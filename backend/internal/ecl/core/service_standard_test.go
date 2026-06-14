@@ -176,7 +176,7 @@ type mockPDServiceStage struct {
 	stage  helpers.EclStage
 }
 
-func (m *mockPDServiceStage) GetPD(_ context.Context, _ uuid.UUID, _ helpers.EclStage, _ helpers.EclScenario, _ string, _ time.Time) (decimal.Decimal, helpers.PDDetail, error) {
+func (m *mockPDServiceStage) GetPD(_ context.Context, _ uuid.UUID, _ helpers.EclStage, _ helpers.EclScenario, _ string, _ time.Time, _ ...bool) (decimal.Decimal, helpers.PDDetail, error) {
 	// ImpactPDMultiplier defaults to 1.0 so combined FL = 1.0 × flMult = flMult.
 	// F1 fix: combined FL = ImpactPDMultiplier × ImpactMevPDMultiplier.
 	return m.pdBase.Mul(m.flMult), helpers.PDDetail{
@@ -603,5 +603,100 @@ func TestBobotSnapshot_Sum_Validate_Extended(t *testing.T) {
 	}
 	if err := bad.Validate(); err == nil {
 		t.Error("Validate invalid: expected error for sum ≠ 1")
+	}
+}
+
+// ─── Phase 4.5 POCI ECL compute tests — DEC-POCI-001..003 ───────────────────
+
+// TestECLCompute_POCI_ComputesViaStandardWithBaseline verifies that a POCI instrument
+// with flag_poci=true is routed via RoutingPOCIComputed (Phase 4.5), computes non-nil
+// ECL (initial baseline), and carries both POCI warning codes.
+//
+// Per DEC-POCI-001: CA-EIR is computed; ECL = initial baseline lifetime ECL.
+// Per DEC-POCI-002: jurnal P&L booking deferred to Phase 5.
+func TestECLCompute_POCI_ComputesViaStandardWithBaseline(t *testing.T) {
+	t.Parallel()
+
+	instrID := uuid.New()
+	reader := &mockInstrumenReader{
+		byID: map[uuid.UUID]*InstrumenSnapshot{
+			instrID: {
+				ID:                instrID,
+				KlasifikasiPsak71: "AC",
+				TipeInstrumen:     "OBLIGASI",
+				FlagPOCI:          true,
+				HasCAEIRSchedule:  true, // CA-EIR present → POCI_COMPUTED routing (F2 fix)
+				TenantID:          "TUGURE",
+			},
+		},
+	}
+
+	orch := buildOrchestratorForTest(reader, nil, nil)
+
+	req := ComputeRequest{
+		InstrumenID:    instrID,
+		EvaluationDate: time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC),
+		PeriodeID:      "PBUKU-2026-06",
+		Persist:        false,
+		ActorID:        uuid.New(),
+	}
+
+	result, err := orch.ComputeSingle(context.Background(), req)
+	if err != nil {
+		t.Fatalf("POCI ComputeSingle: unexpected error: %v", err)
+	}
+
+	// RoutingPath must be POCI_COMPUTED (Phase 4.5 — CA-EIR available).
+	if result.RoutingPath != RoutingPOCIComputed {
+		t.Errorf("RoutingPath: want %s, got %s", RoutingPOCIComputed, result.RoutingPath)
+	}
+
+	// FlagPOCI must be true.
+	if !result.FlagPOCI {
+		t.Error("FlagPOCI must be true for POCI instrument")
+	}
+
+	// ECLWeightedIDR must be non-nil and > 0 (initial baseline ECL computed via STANDARD).
+	if result.ECLWeightedIDR == nil {
+		t.Fatal("ECLWeightedIDR must be non-nil for POCI Phase 4.5 (initial baseline)")
+	}
+	if result.ECLWeightedIDR.IsZero() {
+		t.Error("ECLWeightedIDR must be > 0 for POCI with non-zero PD (mock returns 0.02)")
+	}
+
+	// Both POCI warning codes must be present (DEC-POCI-001, DEC-POCI-002).
+	wantWarnings := []string{WarnPOCIRequiresFullCAEIR, WarnPOCIECLRepresentsInitialBaseline}
+	for _, want := range wantWarnings {
+		found := false
+		for _, w := range result.Warnings {
+			if w == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("POCI: expected warning %s, got %v", want, result.Warnings)
+		}
+	}
+
+	t.Logf("POCI ECL baseline: %s, routing: %s, warnings: %v",
+		result.ECLWeightedIDR.StringFixed(4), result.RoutingPath, result.Warnings)
+}
+
+// TestECLCompute_POCI_DetermineRouting_StillReturnsPOCIDeferred verifies that
+// DetermineRouting still maps flag_poci=true → RoutingPOCIDeferred.
+// The POCI_COMPUTED override is applied at the service layer (handlePOCI), not in routing.
+// This preserves backward compat for instruments without a CA-EIR schedule.
+func TestECLCompute_POCI_DetermineRouting_StillReturnsPOCIDeferred(t *testing.T) {
+	t.Parallel()
+
+	inst := &InstrumenSnapshot{
+		KlasifikasiPsak71: "AC",
+		TipeInstrumen:     "OBLIGASI",
+		FlagPOCI:          true,
+	}
+	routing := DetermineRouting(inst)
+	if routing != RoutingPOCIDeferred {
+		t.Errorf("DetermineRouting: want %s, got %s", RoutingPOCIDeferred, routing)
 	}
 }

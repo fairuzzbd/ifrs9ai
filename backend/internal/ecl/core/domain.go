@@ -83,20 +83,47 @@ const (
 	// No ECL is required. ecl_weighted_idr = 0.0000. No ecl.calc_result_line row written.
 	RoutingSkipFVTPL RoutingPath = "SKIP_FVTPL"
 
-	// RoutingPOCIDeferred indicates a POCI (Purchased or Originated Credit Impaired) instrument.
-	// ECL computation requires credit-adjusted EIR (Phase 5 defer).
+	// RoutingPOCIDeferred indicates a POCI instrument without a CA-EIR schedule yet.
+	// Used when flag_poci=true but no credit-adjusted EIR schedule exists.
 	// ecl_weighted_idr = NULL (not 0). No ecl.calc_result_line row written.
+	// Superseded by RoutingPOCIComputed once CA-EIR is available (DEC-POCI-001).
 	RoutingPOCIDeferred RoutingPath = "POCI_DEFERRED"
+
+	// RoutingPOCIComputed indicates a POCI instrument that has been fully processed
+	// with credit-adjusted EIR per PSAK 71 §5.5.13 (Phase 4.5).
+	//
+	// ECL is computed via the STANDARD formula path using PD/LGD/EAD helpers, but
+	// the EIR used for the amortization schedule was produced by Solver.SolveCreditAdjusted
+	// (PD-adjusted cashflows at origination). ECL result represents the initial baseline
+	// lifetime ECL (not a delta from origination). Delta computation is deferred to Phase 5.
+	//
+	// ecl_weighted_idr = computed non-nil value.
+	// ecl.calc_result_line row IS written (unlike POCI_DEFERRED).
+	// DEC-POCI-001.
+	RoutingPOCIComputed RoutingPath = "POCI_COMPUTED"
 )
 
 // ─── Warning codes ────────────────────────────────────────────────────────────
 
 const (
-	// WarnPOCIRequiresFullCAEIR is emitted for POCI instruments. Phase 5 defer.
+	// WarnPOCIRequiresFullCAEIR is emitted for POCI instruments where full CA-EIR
+	// integration (jurnal P&L direct booking) is deferred to Phase 5.
+	// Still emitted in Phase 4.5 for RoutingPOCIComputed. DEC-POCI-002.
 	WarnPOCIRequiresFullCAEIR = "ECL_POCI_REQUIRES_FULL_CREDIT_ADJUSTED_EIR"
+
+	// WarnPOCIECLRepresentsInitialBaseline is emitted when ECL for a POCI instrument
+	// represents the full initial-baseline lifetime ECL, NOT the change-in-ECL-since-origination.
+	// Per PSAK 71 §5.5.13, the correct POCI ECL delta is computed starting Phase 5.
+	// DEC-POCI-001: Phase 4.5 limitation — baseline persisted; delta deferred.
+	WarnPOCIECLRepresentsInitialBaseline = "POCI_ECL_REPRESENTS_INITIAL_BASELINE_NOT_DELTA"
 
 	// WarnFVTPLSkip is emitted for FVTPL / FVOCI_ELECTION instruments.
 	WarnFVTPLSkip = "FVTPL_SKIP"
+
+	// WarnPOCIStageForcedToLifetime is emitted when a POCI instrument's resolved stage
+	// is Stage 1, which is prohibited by PSAK 71 §5.5.13. Stage is forced to Stage 2
+	// (Lifetime PD) to ensure compliance. DEC-POCI-004.
+	WarnPOCIStageForcedToLifetime = "POCI_STAGE_FORCED_TO_LIFETIME"
 
 	// WarnStage3NetCarryingFirstRun is emitted when there is no prior sealed ECL.
 	// net_carrying_idr = ead_idr (assumes ECL allowance = 0 for first run).
@@ -489,6 +516,12 @@ type InstrumenSnapshot struct {
 	NasabahID         uuid.UUID // filled for DEPOSITO/CASH (counterparty as nasabah)
 	PortofolioID      *uuid.UUID
 	TenantID          string
+	// HasCAEIRSchedule is true when a credit-adjusted EIR schedule exists for this
+	// instrument (ecl.amortisasi_schedule with flag_poci=true row). Populated by
+	// InstrumenReaderIface.GetByID via HasPOCISchedule repo call.
+	// Used by DetermineRouting to distinguish POCI_COMPUTED vs POCI_DEFERRED (F2 fix).
+	// Phase 4.5: set to true when FlagPOCI=true and schedule exists. DEC-POCI-001.
+	HasCAEIRSchedule bool
 }
 
 // IsFVTPL returns true if the instrument should be skipped (no ECL).
@@ -627,6 +660,12 @@ type InstrumenReaderIface interface {
 	// ListActiveByScope returns active instruments in scope.
 	// If scope is nil, returns all active non-deleted instruments.
 	ListActiveByScope(ctx context.Context, scope *BulkScope) ([]InstrumenSnapshot, error)
+
+	// HasPOCISchedule returns true if a credit-adjusted EIR schedule exists for the
+	// instrument (ecl.amortisasi_schedule with flag_poci=true). Used by GetByID to
+	// populate InstrumenSnapshot.HasCAEIRSchedule for POCI routing (F2 fix, DEC-POCI-001).
+	// Real impl queries the DB; stub returns false (POCI_DEFERRED) or true (POCI_COMPUTED).
+	HasPOCISchedule(ctx context.Context, instrumenID uuid.UUID) (bool, error)
 }
 
 // StagingServiceIface is the M1 staging service interface used by M7.

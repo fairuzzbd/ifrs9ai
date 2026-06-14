@@ -255,6 +255,143 @@ func TestSolve_Precision8Decimals(t *testing.T) {
 	}
 }
 
+// ─── CA-EIR (POCI) tests — DEC-POCI-001, PSAK 71 §5.5.13 ────────────────────
+
+// pdAdjustedCashflows builds a PD-adjusted cashflow for a 3-year bullet bond.
+// Contractual: CF[0]=-1B, CF[1..2]=50M coupon, CF[3]=1050M (coupon+principal).
+// PD-adjusted (assuming 10% default, 40% LGD, survival ~ 0.9):
+//
+//	CF_expected[t] = CF_contractual[t] × (1 − PD_cumulative × LGD)
+//
+// For test purposes we apply a uniform 5% haircut on inflows to simulate PD-adjustment.
+// This is a simplified illustrative vector — real usage supplies actual expected CFs.
+func pdAdjustedCashflows() []CashflowItem {
+	haircut := mustDec("0.95") // 5% haircut simulating PD × LGD reduction
+	return []CashflowItem{
+		{Date: date(2026, 1, 1), AmountIDR: mustDec("-1000000000")},
+		{Date: date(2027, 1, 1), AmountIDR: mustDec("50000000").Mul(haircut)},
+		{Date: date(2028, 1, 1), AmountIDR: mustDec("50000000").Mul(haircut)},
+		{Date: date(2029, 1, 1), AmountIDR: mustDec("1050000000").Mul(haircut)},
+	}
+}
+
+// TestSolveCreditAdjusted_Convergence verifies that SolveCreditAdjusted converges
+// for PD-adjusted cashflows within DEC-013 tolerance.
+// PSAK 71 §5.5.13 / DEC-POCI-001.
+func TestSolveCreditAdjusted_Convergence(t *testing.T) {
+	t.Parallel()
+	solver := NewSolver()
+	cfs := pdAdjustedCashflows()
+
+	caEIR, detail, err := solver.SolveCreditAdjusted(cfs, ptrDec("0.05"))
+	if err != nil {
+		t.Fatalf("SolveCreditAdjusted: unexpected error: %v", err)
+	}
+	if !detail.Converged {
+		t.Errorf("SolveCreditAdjusted: expected convergence, Converged=false")
+	}
+	if detail.IterationsUsed > 100 {
+		t.Errorf("SolveCreditAdjusted: exceeded max 100 iterations, got %d", detail.IterationsUsed)
+	}
+	// CA-EIR should be lower than contractual EIR (PD-adjusted cashflows reduce yield).
+	// For 5% haircut on 5% coupon bond, CA-EIR should be positive but < 0.05.
+	if caEIR.LessThanOrEqual(decimal.Zero) {
+		t.Errorf("CA-EIR should be positive, got %s", caEIR.StringFixed(8))
+	}
+	// Residual within acceptable threshold for ACT/365 fractional periods.
+	residualThreshold := decimal.NewFromFloat(1e-4)
+	if detail.ConvergenceResidual.GreaterThan(residualThreshold) {
+		t.Errorf("CA-EIR residual %s exceeds 1e-4 threshold", detail.ConvergenceResidual.String())
+	}
+	// 8-decimal precision (DEC-016, DEC-013).
+	if !caEIR.Equal(caEIR.RoundBank(8)) {
+		t.Errorf("CA-EIR must be RoundBank(8), got %s", caEIR.String())
+	}
+	t.Logf("CA-EIR per period: %s, iterations: %d, residual: %s",
+		caEIR.StringFixed(8), detail.IterationsUsed, detail.ConvergenceResidual.String())
+}
+
+// TestSolveCreditAdjusted_MetadataFlag verifies that SolveDetail carries
+// IsCreditAdjusted=true and Algorithm="NEWTON_RAPHSON_CREDIT_ADJUSTED".
+// DEC-POCI-001, DEC-POCI-003.
+func TestSolveCreditAdjusted_MetadataFlag(t *testing.T) {
+	t.Parallel()
+	solver := NewSolver()
+	cfs := pdAdjustedCashflows()
+
+	_, detail, err := solver.SolveCreditAdjusted(cfs, nil)
+	if err != nil {
+		t.Fatalf("SolveCreditAdjusted: unexpected error: %v", err)
+	}
+
+	// IsCreditAdjusted must be true (distinguishes CA-EIR from standard EIR in audit trail).
+	if !detail.IsCreditAdjusted {
+		t.Error("SolveCreditAdjusted: detail.IsCreditAdjusted must be true")
+	}
+
+	// Algorithm must be NEWTON_RAPHSON_CREDIT_ADJUSTED.
+	if detail.Algorithm != AlgorithmNewtonRaphsonCreditAdjusted {
+		t.Errorf("Algorithm: want %s, got %s", AlgorithmNewtonRaphsonCreditAdjusted, detail.Algorithm)
+	}
+}
+
+// TestSolve_StandardAlgorithmLabel verifies that standard Solve sets
+// Algorithm="NEWTON_RAPHSON" (not credit-adjusted).
+func TestSolve_StandardAlgorithmLabel(t *testing.T) {
+	t.Parallel()
+	solver := NewSolver()
+	cfs := obligasiAtDiscount()
+
+	_, detail, err := solver.Solve(cfs, ptrDec("0.04"))
+	if err != nil {
+		t.Fatalf("Solve: unexpected error: %v", err)
+	}
+
+	if detail.IsCreditAdjusted {
+		t.Error("Solve: detail.IsCreditAdjusted must be false for standard path")
+	}
+	if detail.Algorithm != AlgorithmNewtonRaphson {
+		t.Errorf("Algorithm: want %s, got %s", AlgorithmNewtonRaphson, detail.Algorithm)
+	}
+}
+
+// TestSolveCreditAdjusted_ProducesLowerEIRThanContractual verifies the economic
+// property: CA-EIR (PD-adjusted) < contractual EIR for same bond with credit risk haircut.
+// This is a property-based check consistent with IFRS 9 B5.4.7.
+func TestSolveCreditAdjusted_ProducesLowerEIRThanContractual(t *testing.T) {
+	t.Parallel()
+	solver := NewSolver()
+
+	// Contractual cashflows (no PD haircut).
+	contractual := []CashflowItem{
+		{Date: date(2026, 1, 1), AmountIDR: mustDec("-1000000000")},
+		{Date: date(2027, 1, 1), AmountIDR: mustDec("50000000")},
+		{Date: date(2028, 1, 1), AmountIDR: mustDec("50000000")},
+		{Date: date(2029, 1, 1), AmountIDR: mustDec("1050000000")},
+	}
+
+	// PD-adjusted cashflows (5% haircut on inflows).
+	pdAdjusted := pdAdjustedCashflows()
+
+	contractualEIR, _, err := solver.Solve(contractual, ptrDec("0.05"))
+	if err != nil {
+		t.Fatalf("Solve (contractual): %v", err)
+	}
+	caEIR, _, err := solver.SolveCreditAdjusted(pdAdjusted, ptrDec("0.05"))
+	if err != nil {
+		t.Fatalf("SolveCreditAdjusted: %v", err)
+	}
+
+	// CA-EIR must be lower than contractual EIR (PD haircut reduces expected yield).
+	if caEIR.GreaterThanOrEqual(contractualEIR) {
+		t.Errorf("CA-EIR %s should be < contractual EIR %s for PD-adjusted cashflows",
+			caEIR.StringFixed(8), contractualEIR.StringFixed(8))
+	}
+	t.Logf("Contractual EIR: %s, CA-EIR: %s, diff: %s",
+		contractualEIR.StringFixed(8), caEIR.StringFixed(8),
+		contractualEIR.Sub(caEIR).StringFixed(8))
+}
+
 // ─── Benchmark ────────────────────────────────────────────────────────────────
 
 func BenchmarkSolve_Iterations(b *testing.B) {

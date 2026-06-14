@@ -1274,6 +1274,143 @@ func TestIsEIRApplicable(t *testing.T) {
 	}
 }
 
+// ─── Phase 4.5 POCI / CA-EIR tests — DEC-POCI-001..003 ─────────────────────
+
+// TestEIRCompute_POCIInstrumen_UsesCreditAdjusted verifies that Service.Compute
+// routes POCI instruments through SolveCreditAdjusted and returns:
+//   - EIRType = "CREDIT_ADJUSTED"
+//   - Algorithm = "NEWTON_RAPHSON_CREDIT_ADJUSTED"
+//   - Warnings contains "POCI_CA_EIR_COMPUTED"
+//   - FlagPOCI = true
+//
+// Per PSAK 71 §5.5.13 and DEC-POCI-001.
+func TestEIRCompute_POCIInstrumen_UsesCreditAdjusted(t *testing.T) {
+	t.Parallel()
+
+	instrID := uuid.New()
+	repo := newStubInstrumenRepo()
+	repo.put(InstrumenForEIR{
+		ID:                instrID,
+		KodeInstrumen:     "POCI-001",
+		KlasifikasiPsak71: "AC",
+		EIRMethodFlag:     true,
+		FlagPOCI:          true,
+		Nominal:           mustDec("1000000000"),
+		TenantID:          "TUGURE",
+	})
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	// No DB interactions expected for non-persist mode.
+	_ = mock
+
+	svc := NewService(db, repo, &stubAuditWriter{}, nil)
+
+	// PD-adjusted cashflows (5% haircut — expected, not contractual).
+	pdCFs := []CashflowItem{
+		{Date: date(2026, 1, 1), AmountIDR: mustDec("-1000000000")},
+		{Date: date(2027, 1, 1), AmountIDR: mustDec("47500000")}, // 50M × 0.95
+		{Date: date(2028, 1, 1), AmountIDR: mustDec("47500000")},
+		{Date: date(2029, 1, 1), AmountIDR: mustDec("997500000")}, // 1050M × 0.95
+	}
+
+	result, err := svc.Compute(context.Background(), ComputeRequest{
+		InstrumenID:        instrID,
+		CashflowProjection: pdCFs,
+		PersistResult:      false,
+		POCIMode:           true,
+	}, uuid.New(), "ROLE-RISK")
+	if err != nil {
+		t.Fatalf("Compute POCI: unexpected error: %v", err)
+	}
+
+	// EIRType must be "CREDIT_ADJUSTED" — CA-EIR per PSAK 71 §5.5.13.
+	if result.EIRType != EIRTypeCreditAdjusted {
+		t.Errorf("EIRType: want %s, got %s", EIRTypeCreditAdjusted, result.EIRType)
+	}
+
+	// Algorithm must be "NEWTON_RAPHSON_CREDIT_ADJUSTED" (DEC-POCI-003).
+	if result.Algorithm != AlgorithmNewtonRaphsonCreditAdjusted {
+		t.Errorf("Algorithm: want %s, got %s", AlgorithmNewtonRaphsonCreditAdjusted, result.Algorithm)
+	}
+
+	// FlagPOCI must be true.
+	if !result.FlagPOCI {
+		t.Error("FlagPOCI must be true for POCI instrument")
+	}
+
+	// EIRPerPeriod must be positive and 8-decimal-precise (DEC-013, DEC-016).
+	if result.EIRPerPeriod.LessThanOrEqual(decimal.Zero) {
+		t.Errorf("EIRPerPeriod must be positive, got %s", result.EIRPerPeriod.StringFixed(8))
+	}
+	if !result.EIRPerPeriod.Equal(result.EIRPerPeriod.RoundBank(8)) {
+		t.Errorf("EIRPerPeriod must be RoundBank(8), got %s", result.EIRPerPeriod.String())
+	}
+
+	// Warning "POCI_CA_EIR_COMPUTED" must be present (DEC-POCI-001).
+	foundWarn := false
+	for _, w := range result.Warnings {
+		if w == WarnPOCICAEIRComputed {
+			foundWarn = true
+			break
+		}
+	}
+	if !foundWarn {
+		t.Errorf("expected warning %s, got %v", WarnPOCICAEIRComputed, result.Warnings)
+	}
+
+	t.Logf("CA-EIR: %s, algorithm: %s, iterations: %d",
+		result.EIRPerPeriod.StringFixed(8), result.Algorithm, result.IterationsUsed)
+}
+
+// TestEIRCompute_POCIMismatch_Error verifies that poci_mode=true + FlagPOCI=false
+// returns EIR_POCI_REQUIRES_PD_ADJUSTED_CF (and vice versa), per service.go §4.
+func TestEIRCompute_POCIMismatch_Error(t *testing.T) {
+	t.Parallel()
+
+	instrID := uuid.New()
+	repo := newStubInstrumenRepo()
+	// FlagPOCI=false (standard instrument)
+	repo.put(InstrumenForEIR{
+		ID:                instrID,
+		KlasifikasiPsak71: "AC",
+		EIRMethodFlag:     true,
+		FlagPOCI:          false,
+		Nominal:           mustDec("1000000000"),
+		TenantID:          "TUGURE",
+	})
+
+	db, _, _ := sqlmock.New()
+	defer db.Close()
+	svc := NewService(db, repo, &stubAuditWriter{}, nil)
+
+	_, err := svc.Compute(context.Background(), ComputeRequest{
+		InstrumenID:        instrID,
+		CashflowProjection: pdAdjustedCashflowsForServiceTest(),
+		PersistResult:      false,
+		POCIMode:           true, // mismatch: poci_mode=true but FlagPOCI=false
+	}, uuid.New(), "ROLE-RISK")
+
+	if err == nil {
+		t.Fatal("expected EIR_POCI_REQUIRES_PD_ADJUSTED_CF error, got nil")
+	}
+	assertDomainErr(t, err, CodeEIRPOCIRequiresPDAdjustedCF)
+}
+
+// pdAdjustedCashflowsForServiceTest is a service_test local alias to avoid
+// dependency on solver_test.go's pdAdjustedCashflows (different package sub-test file).
+func pdAdjustedCashflowsForServiceTest() []CashflowItem {
+	return []CashflowItem{
+		{Date: date(2026, 1, 1), AmountIDR: mustDec("-1000000000")},
+		{Date: date(2027, 1, 1), AmountIDR: mustDec("47500000")},
+		{Date: date(2028, 1, 1), AmountIDR: mustDec("47500000")},
+		{Date: date(2029, 1, 1), AmountIDR: mustDec("997500000")},
+	}
+}
+
 // ─── Assert helpers ───────────────────────────────────────────────────────────
 
 func assertDomainErr(t *testing.T, err error, expectedCode string) {

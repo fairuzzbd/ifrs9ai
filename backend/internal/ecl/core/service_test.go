@@ -27,6 +27,10 @@ import (
 type mockInstrumenReader struct {
 	byID        map[uuid.UUID]*InstrumenSnapshot
 	activeScope []InstrumenSnapshot
+	// hasPOCISchedule controls the HasPOCISchedule stub response.
+	// When nil, defaults to returning false (POCI_DEFERRED for POCI instruments).
+	// Set per-test to override. Tests that need POCI_COMPUTED set this to a map with true.
+	hasPOCISchedule map[uuid.UUID]bool
 }
 
 func (m *mockInstrumenReader) GetByID(_ context.Context, id uuid.UUID) (*InstrumenSnapshot, error) {
@@ -38,6 +42,13 @@ func (m *mockInstrumenReader) GetByID(_ context.Context, id uuid.UUID) (*Instrum
 
 func (m *mockInstrumenReader) ListActiveByScope(_ context.Context, _ *BulkScope) ([]InstrumenSnapshot, error) {
 	return m.activeScope, nil
+}
+
+func (m *mockInstrumenReader) HasPOCISchedule(_ context.Context, instrumenID uuid.UUID) (bool, error) {
+	if m.hasPOCISchedule != nil {
+		return m.hasPOCISchedule[instrumenID], nil
+	}
+	return false, nil
 }
 
 type mockBobotRepo struct {
@@ -54,7 +65,7 @@ type mockPDService struct {
 	flMult decimal.Decimal
 }
 
-func (m *mockPDService) GetPD(_ context.Context, _ uuid.UUID, stage helpers.EclStage, scenario helpers.EclScenario, _ string, _ time.Time) (decimal.Decimal, helpers.PDDetail, error) {
+func (m *mockPDService) GetPD(_ context.Context, _ uuid.UUID, stage helpers.EclStage, scenario helpers.EclScenario, _ string, _ time.Time, _ ...bool) (decimal.Decimal, helpers.PDDetail, error) {
 	pd := m.pdBase
 	mevMult := m.flMult
 	// ImpactPDMultiplier defaults to 1.0 (neutral) so combined = 1.0 × mevMult = mevMult.
@@ -234,7 +245,7 @@ func TestComputeSingle_FVTPL_SkipNoRow(t *testing.T) {
 }
 
 // TestComputeSingle_POCI_ComputesViaStandardPath_WithWarning verifies F2 fix:
-// POCI instruments now compute via STANDARD path and return ECL > 0 with warning.
+// POCI instruments with CA-EIR schedule compute via STANDARD path and return ECL > 0 with warning.
 // Prior behavior (ECLWeightedIDR = nil, no compute) was non-compliant with scope spec.
 func TestComputeSingle_POCI_ComputesViaStandardPath_WithWarning(t *testing.T) {
 	t.Parallel()
@@ -247,6 +258,7 @@ func TestComputeSingle_POCI_ComputesViaStandardPath_WithWarning(t *testing.T) {
 				KlasifikasiPsak71: "AC",
 				TipeInstrumen:     "OBLIGASI",
 				FlagPOCI:          true,
+				HasCAEIRSchedule:  true, // CA-EIR present → POCI_COMPUTED routing
 			},
 		},
 	}
@@ -266,27 +278,30 @@ func TestComputeSingle_POCI_ComputesViaStandardPath_WithWarning(t *testing.T) {
 		t.Fatalf("POCI compute: unexpected error: %v", err)
 	}
 
-	// F2 fix: routing_path = POCI_DEFERRED (audit column), but computed via STANDARD.
-	if result.RoutingPath != RoutingPOCIDeferred {
-		t.Errorf("routing: want %s, got %s", RoutingPOCIDeferred, result.RoutingPath)
+	// Phase 4.5 (DEC-POCI-001): routing_path = POCI_COMPUTED (CA-EIR computed, baseline ECL persisted).
+	if result.RoutingPath != RoutingPOCIComputed {
+		t.Errorf("routing: want %s, got %s", RoutingPOCIComputed, result.RoutingPath)
 	}
-	// F2 fix: ECLWeightedIDR must be non-nil (computed via STANDARD; credit-adjusted EIR deferred).
+	// ECLWeightedIDR must be non-nil (computed via STANDARD with CA-EIR adjusted EAD).
 	if result.ECLWeightedIDR == nil {
-		t.Error("POCI F2 fix: ECLWeightedIDR must be non-nil (ECL is computed)")
+		t.Error("POCI Phase 4.5: ECLWeightedIDR must be non-nil (initial baseline ECL computed)")
 	}
 	if !result.FlagPOCI {
 		t.Error("POCI: FlagPOCI must be true")
 	}
-	// Verify POCI warning code is present.
-	found := false
-	for _, w := range result.Warnings {
-		if w == WarnPOCIRequiresFullCAEIR {
-			found = true
-			break
+	// Verify both POCI warning codes are present.
+	wantWarnings := []string{WarnPOCIRequiresFullCAEIR, WarnPOCIECLRepresentsInitialBaseline}
+	for _, want := range wantWarnings {
+		found := false
+		for _, w := range result.Warnings {
+			if w == want {
+				found = true
+				break
+			}
 		}
-	}
-	if !found {
-		t.Errorf("POCI: expected warning %s, got %v", WarnPOCIRequiresFullCAEIR, result.Warnings)
+		if !found {
+			t.Errorf("POCI: expected warning %s, got %v", want, result.Warnings)
+		}
 	}
 }
 
@@ -433,4 +448,107 @@ func buildOrchestratorForTest(reader InstrumenReaderIface, lpsAgg LPSAggregatorI
 
 func buildOrchestratorForTestLT(reader InstrumenReaderIface, ltSvc LookthroughServiceIface) *ECLOrchestrator {
 	return buildOrchestratorForTest(reader, nil, ltSvc)
+}
+
+// ─── F3: POCI Stage 1 guard test (DEC-POCI-004) ──────────────────────────────
+
+// mockStagingServicePOCI is a stub StagingServiceIface for POCI Stage 1 guard tests.
+// Separate from mockStagingService in compliance_fix_test.go (same package, avoid redecl).
+type mockStagingServicePOCI struct {
+	stage Stage
+	err   error
+}
+
+func (m *mockStagingServicePOCI) GetCurrentStage(_ context.Context, _ uuid.UUID) (Stage, error) {
+	return m.stage, m.err
+}
+
+// TestHandlePOCI_Stage1_ForcedToStage2 verifies F3 fix (PSAK 71 §5.5.13, DEC-POCI-004):
+// when resolveStage returns Stage 1 for a POCI instrument, handlePOCI forces it to Stage 2
+// (Lifetime PD) and appends WarnPOCIStageForcedToLifetime to result.Warnings.
+// POCI instruments must always use Lifetime PD — Stage 1 (12-month PD) is prohibited by PSAK 71.
+func TestHandlePOCI_Stage1_ForcedToStage2(t *testing.T) {
+	t.Parallel()
+
+	instrID := uuid.New()
+	reader := &mockInstrumenReader{
+		byID: map[uuid.UUID]*InstrumenSnapshot{
+			instrID: {
+				ID:                instrID,
+				KlasifikasiPsak71: "AC",
+				TipeInstrumen:     "OBLIGASI",
+				FlagPOCI:          true,
+				HasCAEIRSchedule:  true, // CA-EIR present → POCI_COMPUTED routing
+			},
+		},
+	}
+
+	// Inject M1 staging service that returns Stage 1 — simulates a new POCI instrument
+	// with no staging history. handlePOCI must force this to Stage 2.
+	stagingSvc := &mockStagingServicePOCI{stage: Stage1}
+
+	aw := audit.NewWriter(nil)
+	svc := buildMockHelpers(decimal.NewFromFloat(0.02), decimal.NewFromFloat(1.0), decimal.NewFromFloat(0.4), decimal.NewFromInt(1e9))
+	orch := &ECLOrchestrator{
+		db:          nil,
+		auditWriter: aw,
+		helpers:     svc,
+		instrReader: reader,
+		bobotRepo:   &mockBobotRepo{bobot: defaultBobot()},
+		resultRepo:  nil,
+		logger:      nil,
+		stagingSvc:  stagingSvc,
+	}
+
+	req := ComputeRequest{
+		InstrumenID:    instrID,
+		EvaluationDate: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+		PeriodeID:      "JUNI-2026",
+		Persist:        false,
+		ActorID:        uuid.New(),
+	}
+
+	result, err := orch.ComputeSingle(context.Background(), req)
+	if err != nil {
+		t.Fatalf("POCI Stage1→Stage2 compute: unexpected error: %v", err)
+	}
+
+	// Routing must be POCI_COMPUTED (CA-EIR present).
+	if result.RoutingPath != RoutingPOCIComputed {
+		t.Errorf("routing: want %s, got %s", RoutingPOCIComputed, result.RoutingPath)
+	}
+
+	// Stage must be 2 (forced from 1) — Lifetime PD per PSAK 71 §5.5.13.
+	if result.Stage != Stage2 {
+		t.Errorf("stage: POCI must be forced to Stage 2, got %d", result.Stage)
+	}
+
+	// ECL must be computed (non-nil).
+	if result.ECLWeightedIDR == nil {
+		t.Error("ECLWeightedIDR must not be nil for POCI_COMPUTED")
+	}
+
+	// Warning WarnPOCIStageForcedToLifetime must be present.
+	foundStageWarn := false
+	for _, w := range result.Warnings {
+		if w == WarnPOCIStageForcedToLifetime {
+			foundStageWarn = true
+			break
+		}
+	}
+	if !foundStageWarn {
+		t.Errorf("expected warning %s in result.Warnings, got %v", WarnPOCIStageForcedToLifetime, result.Warnings)
+	}
+
+	// Warning WarnPOCIRequiresFullCAEIR must also be present.
+	foundCAEIRWarn := false
+	for _, w := range result.Warnings {
+		if w == WarnPOCIRequiresFullCAEIR {
+			foundCAEIRWarn = true
+			break
+		}
+	}
+	if !foundCAEIRWarn {
+		t.Errorf("expected warning %s in result.Warnings, got %v", WarnPOCIRequiresFullCAEIR, result.Warnings)
+	}
 }

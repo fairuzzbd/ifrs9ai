@@ -968,6 +968,119 @@ func TestE2E_Stage3_NetCarryingInterestBase(t *testing.T) {
 	}
 }
 
+// ─── Phase 4.5 POCI E2E test — DEC-POCI-001..003 ────────────────────────────
+
+// TestE2E_POCI_FullPath verifies the full POCI lifecycle end-to-end:
+//  1. Seed a POCI instrument (flag_poci=true) with PD-adjusted cashflows.
+//  2. Run staging — POCI instrument defaults to Stage 1 (no SICR, newly originated).
+//  3. Create calc run → bulk compute.
+//  4. Verify the result line carries:
+//     - RoutingPath = POCI_COMPUTED (not POCI_DEFERRED, not STANDARD)
+//     - ECLWeightedIDR > 0 (initial baseline ECL, not nil)
+//     - FlagPOCI = true
+//     - Warnings: WarnPOCIRequiresFullCAEIR + WarnPOCIECLRepresentsInitialBaseline
+//
+// Phase 4.5 scope per DEC-POCI-001: CA-EIR computed, baseline ECL persisted.
+// Phase 5 will add delta computation + jurnal P&L direct booking (DEC-POCI-002).
+// CA-EIR uses NR with PD-adjusted CF at origination only, no per-period recompute
+// unless amendment occurs (DEC-POCI-003).
+func TestE2E_POCI_FullPath(t *testing.T) {
+	t.Parallel()
+	ctx := ctxWithRiskActor()
+
+	h := newE2EHarness(t)
+
+	// ── Step 1: Seed POCI instrument ─────────────────────────────────────────
+	// Nominal: IDR 500M, rated idBBB (speculative grade — credit-impaired at purchase).
+	// PD-adjusted cashflows pre-computed at origination (expected, not contractual).
+	instrPOCI := h.seedPOCIInstrumen("POCI-E2E-001", decimal.NewFromInt(500_000_000), "idBBB")
+
+	// Seed a non-POCI AC instrument for comparison (should route STANDARD).
+	instrStd := h.seedInstrumen("POCI-CTRL-001", "AC", "OBLIGASI", "IDR",
+		decimal.NewFromInt(1_000_000_000), "idAA", staging.Stage1)
+
+	// ── Step 2: Staging ───────────────────────────────────────────────────────
+	// POCI instrument: Stage 1 (newly originated, SICR not yet triggered).
+	// Stage defaults to 1 from seedPOCIInstrumen — no explicit evaluation needed.
+
+	// Non-POCI: Stage 1 stays (no rating change).
+	stagingResult := h.stagingSvc.EvaluateSingleInstrumenTest(ctx, instrStd.ID, evalDate, "idAA")
+	if stagingResult.NewStage != nil {
+		t.Errorf("POCI E2E: non-POCI instrument should stay Stage 1, got %v", stagingResult.NewStage)
+	}
+
+	// ── Step 3: Calc run → bulk compute ──────────────────────────────────────
+	run := h.createCalcRun(ctx, periodeJuni2026, evalDate)
+
+	jobID := h.startCalcRun(ctx, run.ID)
+	if jobID == "" {
+		t.Fatal("POCI E2E: startCalcRun returned empty jobID")
+	}
+
+	completedRun := h.waitForStatus(ctx, run.ID, calcrun.StatusCompleted, 30*time.Second)
+	if completedRun.Status != calcrun.StatusCompleted {
+		t.Fatalf("POCI E2E: calc run did not complete, status: %s", completedRun.Status)
+	}
+
+	// ── Step 4: Verify POCI result line ──────────────────────────────────────
+	lines := h.listResultLines(ctx, run.ID)
+	if len(lines) < 2 {
+		t.Fatalf("POCI E2E: expected ≥ 2 result lines (POCI + Standard), got %d", len(lines))
+	}
+
+	// Find the POCI result line.
+	pociLine := h.findResultLine(lines, instrPOCI.ID)
+	if pociLine == nil {
+		t.Fatal("POCI E2E: result line for POCI instrument not found")
+	}
+
+	// RoutingPath must be POCI_COMPUTED (Phase 4.5 — CA-EIR available, baseline ECL persisted).
+	// DEC-POCI-001: first-run scope persists full lifetime ECL as initial baseline.
+	if pociLine.RoutingPath != core.RoutingPOCIComputed {
+		t.Errorf("POCI E2E: RoutingPath: want %s, got %s", core.RoutingPOCIComputed, pociLine.RoutingPath)
+	}
+
+	// FlagPOCI must be true.
+	if !pociLine.FlagPOCI {
+		t.Error("POCI E2E: FlagPOCI must be true for POCI instrument")
+	}
+
+	// ECLWeightedIDR must be non-nil and > 0 (initial baseline ECL).
+	if pociLine.ECLWeightedIDR == nil {
+		t.Fatal("POCI E2E: ECLWeightedIDR must be non-nil (initial baseline ECL computed)")
+	}
+	if pociLine.ECLWeightedIDR.IsZero() {
+		t.Error("POCI E2E: ECLWeightedIDR must be > 0 for POCI instrument with credit risk")
+	}
+
+	// Both POCI warning codes must be present (DEC-POCI-001, DEC-POCI-002).
+	wantWarnings := []string{core.WarnPOCIRequiresFullCAEIR, core.WarnPOCIECLRepresentsInitialBaseline}
+	for _, want := range wantWarnings {
+		found := false
+		for _, w := range pociLine.Warnings {
+			if w == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("POCI E2E: expected warning %s, got %v", want, pociLine.Warnings)
+		}
+	}
+
+	// Standard (non-POCI) instrument must route STANDARD (not POCI_COMPUTED).
+	stdLine := h.findResultLine(lines, instrStd.ID)
+	if stdLine == nil {
+		t.Fatal("POCI E2E: result line for standard instrument not found")
+	}
+	if stdLine.RoutingPath == core.RoutingPOCIComputed || stdLine.RoutingPath == core.RoutingPOCIDeferred {
+		t.Errorf("POCI E2E: non-POCI instrument got POCI routing %s — should be STANDARD", stdLine.RoutingPath)
+	}
+
+	t.Logf("POCI E2E: POCI baseline ECL=%s, routing=%s, warnings=%v",
+		pociLine.ECLWeightedIDR.StringFixed(4), pociLine.RoutingPath, pociLine.Warnings)
+}
+
 // ─── Test harness ─────────────────────────────────────────────────────────────
 //
 // e2eHarness wires up in-process service stubs without a real database.
@@ -1121,6 +1234,10 @@ type ecrResultLine struct {
 	Stage          int
 	ECLWeightedIDR *decimal.Decimal
 	EADIDR         decimal.Decimal
+	// Phase 4.5 POCI fields (DEC-POCI-001).
+	RoutingPath core.RoutingPath
+	Warnings    []string
+	FlagPOCI    bool
 }
 
 // auditRow is the minimal audit_log projection.
@@ -1277,6 +1394,10 @@ type stagingInstrumenState struct {
 	// will skip writing a result line for these instruments, mirroring the
 	// production routing path SKIP_FVTPL (PSAK 71 §5.5.15, core/domain.go).
 	IsFVTPL bool
+	// IsPOCI marks an instrument as POCI (Purchased or Originated Credit Impaired).
+	// simulateBulkCompute will write a result line with RoutingPath=POCI_COMPUTED
+	// and include both POCI warning codes (DEC-POCI-001, DEC-POCI-002).
+	IsPOCI bool
 }
 
 func newInMemInstrumenStore() *inMemInstrumenStore {
@@ -1535,6 +1656,19 @@ func (h *e2eHarness) seedDepositoForNasabahBank(nasabahID, bankID uuid.UUID, nom
 	return &seedInstrumenResult{ID: id}
 }
 
+// seedPOCIInstrumen seeds a POCI (Purchased or Originated Credit Impaired) instrument.
+// Sets IsPOCI=true so simulateBulkCompute routes it via RoutingPOCIComputed (DEC-POCI-001).
+func (h *e2eHarness) seedPOCIInstrumen(kode string, nominal decimal.Decimal, rating string) *seedInstrumenResult {
+	id := uuid.New()
+	h.instrStore.instruments[id] = &stagingInstrumenState{
+		Stage:         staging.Stage1,
+		OriginRating:  rating,
+		CurrentRating: rating,
+		IsPOCI:        true,
+	}
+	return &seedInstrumenResult{ID: id, Kode: kode}
+}
+
 func (h *e2eHarness) seedEIRSchedule(instrID uuid.UUID, version int, eir decimal.Decimal) {
 	h.scheduleStore.seedSchedule(instrID, version, eir)
 }
@@ -1638,6 +1772,9 @@ func (h *e2eHarness) simulateBulkCompute(ctx context.Context, run *calcrun.CalcR
 	// Generate synthetic result lines for all seeded instruments.
 	// FVTPL instruments are SKIPPED — no result line written (PSAK 71 §5.5.15,
 	// RoutingPath=SKIP_FVTPL, core/domain.go WarnFVTPLSkip).
+	// POCI instruments: result line written with RoutingPath=POCI_COMPUTED (Phase 4.5,
+	// DEC-POCI-001). ECL = initial baseline lifetime ECL. Warnings include both
+	// POCI codes: WarnPOCIRequiresFullCAEIR + WarnPOCIECLRepresentsInitialBaseline.
 	lines := make([]ecrResultLine, 0, len(h.instrStore.instruments))
 	for instrID, state := range h.instrStore.instruments {
 		if state.IsFVTPL {
@@ -1645,11 +1782,20 @@ func (h *e2eHarness) simulateBulkCompute(ctx context.Context, run *calcrun.CalcR
 			continue
 		}
 		ecl := decimal.NewFromInt(1_000_000) // stub: 1M ECL per instrument
+		routing := core.RoutingStandard
+		var warnings []string
+		if state.IsPOCI {
+			routing = core.RoutingPOCIComputed
+			warnings = []string{core.WarnPOCIRequiresFullCAEIR, core.WarnPOCIECLRepresentsInitialBaseline}
+		}
 		line := ecrResultLine{
 			InstrumenID:    instrID,
 			Stage:          stageToInt(state.Stage),
 			ECLWeightedIDR: &ecl,
 			EADIDR:         decimal.NewFromInt(100_000_000),
+			RoutingPath:    routing,
+			Warnings:       warnings,
+			FlagPOCI:       state.IsPOCI,
 		}
 		lines = append(lines, line)
 	}

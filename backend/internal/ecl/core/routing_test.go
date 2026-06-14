@@ -7,11 +7,12 @@ import (
 // routing_test.go — exhaustive routing decision tree tests.
 //
 // Decision order (DetermineRouting):
-//  1. FVTPL / FVOCI_ELECTION → SKIP_FVTPL
-//  2. flag_poci = true       → POCI_DEFERRED
-//  3. REKSADANA              → LOOKTHROUGH
-//  4. CASH / DEPOSITO        → LPS
-//  5. default                → STANDARD
+//  1. FVTPL / FVOCI_ELECTION  → SKIP_FVTPL
+//  2a. flag_poci + CA-EIR     → POCI_COMPUTED  (F2 fix, DEC-POCI-001)
+//  2b. flag_poci + no CA-EIR  → POCI_DEFERRED
+//  3. REKSADANA               → LOOKTHROUGH
+//  4. CASH / DEPOSITO         → LPS
+//  5. default                 → STANDARD
 
 func TestDetermineRouting_FVTPL(t *testing.T) {
 	t.Parallel()
@@ -190,5 +191,41 @@ func TestInstrumenSnapshot_IsLPS(t *testing.T) {
 				t.Errorf("IsLPS(%q): want %v, got %v", tc.tipe, tc.want, got)
 			}
 		})
+	}
+}
+
+// ─── F2 fix: POCI routing tests (DEC-POCI-001) ───────────────────────────────
+
+// TestDetermineRouting_POCIWithCAEIR_ReturnsComputed verifies F2 fix:
+// when FlagPOCI=true AND HasCAEIRSchedule=true → RoutingPOCIComputed.
+// CA-EIR present means baseline ECL can be computed (Phase 4.5, DEC-POCI-001).
+func TestDetermineRouting_POCIWithCAEIR_ReturnsComputed(t *testing.T) {
+	t.Parallel()
+	inst := &InstrumenSnapshot{
+		KlasifikasiPsak71: "AC",
+		TipeInstrumen:     "OBLIGASI",
+		FlagPOCI:          true,
+		HasCAEIRSchedule:  true, // CA-EIR schedule exists
+	}
+	got := DetermineRouting(inst)
+	if got != RoutingPOCIComputed {
+		t.Errorf("POCI with CA-EIR: want %s, got %s", RoutingPOCIComputed, got)
+	}
+}
+
+// TestDetermineRouting_POCIWithoutCAEIR_ReturnsDeferred verifies F2 fix:
+// when FlagPOCI=true AND HasCAEIRSchedule=false → RoutingPOCIDeferred.
+// No CA-EIR schedule means computation deferred to Phase 5 (DEC-POCI-001).
+func TestDetermineRouting_POCIWithoutCAEIR_ReturnsDeferred(t *testing.T) {
+	t.Parallel()
+	inst := &InstrumenSnapshot{
+		KlasifikasiPsak71: "AC",
+		TipeInstrumen:     "OBLIGASI",
+		FlagPOCI:          true,
+		HasCAEIRSchedule:  false, // no CA-EIR schedule yet
+	}
+	got := DetermineRouting(inst)
+	if got != RoutingPOCIDeferred {
+		t.Errorf("POCI without CA-EIR: want %s, got %s", RoutingPOCIDeferred, got)
 	}
 }
