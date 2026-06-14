@@ -68,6 +68,36 @@ Sealed EIR schedule rows cannot be updated (existing immutability constraint on 
 
 ---
 
+---
+
+## DEC-POCI-004 — POCI Stage assignment: Stage 1 prohibited by PSAK 71 §5.5.13
+
+**Date**: 2026-06-14
+**Author**: ecl-eir-engineer
+**Status**: LOCKED
+**Refs**: PSAK 71 §5.5.13, IFRS 9 §5.4.1(c), FSD-APP-C-ECL-EIR-v1.0 §3.5
+
+**Decision**: POCI instruments must never be assigned to Stage 1 (12-month PD). PSAK 71 §5.5.13
+requires POCI instruments to use Lifetime ECL from origination — the 12-month horizon of Stage 1
+is categorically inapplicable.
+
+**Enforcement** (F3 fix, `backend/internal/ecl/core/service.go` `handlePOCI`):
+- After `resolveStage(ctx, instrumenID)` returns Stage 1 for a POCI instrument, `handlePOCI`
+  forces `stage = Stage2` (Lifetime PD) unconditionally.
+- Warning `POCI_STAGE_FORCED_TO_LIFETIME` is appended to `ComputeResult.Warnings` whenever
+  the override occurs, providing full audit trail visibility.
+- Stage 2 and Stage 3 transitions for POCI instruments follow normal SICR/cure rules
+  (DEC-011, DEC-012). Only Stage 1 is prohibited.
+
+**Rationale**: Stage 1 would use PD_12M (12-month horizon), producing an ECL that understates
+credit risk for instruments that are credit-impaired at origination. PSAK 71 §5.5.13 mandates
+Lifetime ECL as the correct measurement basis for POCI from day zero.
+
+**Cannot reopen without**: superseding DEC-POCI-004 via RFC with ALCO + ifrs9-compliance-reviewer
+sign-off and a reconciliation plan for any historical ECL computed under Stage 1.
+
+---
+
 ## Summary table
 
 | ID | Scope | Status | Phase |
@@ -75,3 +105,4 @@ Sealed EIR schedule rows cannot be updated (existing immutability constraint on 
 | DEC-POCI-001 | CA-EIR solver + baseline ECL | LOCKED | 4.5 (done) |
 | DEC-POCI-002 | Delta ECL + jurnal P&L | DEFERRED | 5 |
 | DEC-POCI-003 | CA-EIR at origination, amendment versioning | LOCKED | 4.5 (done) |
+| DEC-POCI-004 | POCI Stage 1 prohibited; force Stage 2 | LOCKED | 4.5 (done) |
