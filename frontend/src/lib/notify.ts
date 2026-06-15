@@ -48,6 +48,40 @@ const ERROR_MESSAGE_MAP: Record<string, string> = {
   CALC_RUN_NOT_FOUND: "Calc run tidak ditemukan.",
   CALC_RUN_INVALID_STATUS:
     "Aksi tidak valid untuk status calc run saat ini.",
+
+  // --- Jurnal Engine (P5-M2) ---
+  JURNAL_EVENT_NOT_MAPPED:
+    "Tidak ada mapping jurnal aktif untuk kode event ini. Hubungi Akuntansi untuk membuat mapping.",
+  JURNAL_KLASIFIKASI_NOT_ELIGIBLE:
+    "Klasifikasi instrumen tidak eligible untuk event ini. Periksa KLASIFIKASI_COMPATIBILITY.",
+  JURNAL_BALANCE_INVARIANT:
+    "Jurnal tidak seimbang — total DEBIT ≠ total KREDIT. Periksa template mapping.",
+  JURNAL_PERIODE_HARD_CLOSED:
+    "Periode buku sudah hard-closed, jurnal tidak bisa diposting ke periode ini.",
+  JURNAL_DUPLICATE_POST:
+    "Jurnal duplikat — posting dengan idempotency key yang sama sudah ada. Tidak ada aksi diperlukan.",
+  JURNAL_INVALID_TRANSITION:
+    "Transisi status jurnal tidak valid dari status saat ini.",
+  JURNAL_SOD_VIOLATION:
+    "Anda tidak bisa mereview/approve mapping jurnal yang Anda buat sendiri (SoD).",
+  JURNAL_STEP_UP_REQUIRED:
+    "Langkah ini memerlukan verifikasi MFA step-up. Silakan verifikasi MFA terlebih dahulu.",
+  JURNAL_AMOUNT_INVALID:
+    "Nominal jurnal tidak valid. Pastikan nominal lebih dari 0 dan format benar.",
+  JURNAL_INSTRUMEN_NOT_FOUND:
+    "Instrumen tidak ditemukan. Pastikan ID instrumen benar.",
+  JURNAL_HEADER_NOT_FOUND:
+    "Header jurnal tidak ditemukan.",
+  JURNAL_DLQ_NOT_FOUND:
+    "Entri DLQ tidak ditemukan.",
+  JURNAL_DLQ_ALREADY_REPLAYED:
+    "Entri DLQ ini sudah berhasil di-replay sebelumnya.",
+  JURNAL_DLQ_DISCARD_REASON_TOO_SHORT:
+    "Alasan discard terlalu pendek — minimal 30 karakter diperlukan.",
+  JURNAL_DLQ_REPLAY_PERIODE_HARD_CLOSED:
+    "Tidak bisa replay jurnal ke periode yang sudah hard-closed.",
+  JURNAL_MAPPING_WORKFLOW_GATE:
+    "Mapping jurnal belum disetujui atau tidak aktif. Tidak bisa digunakan untuk posting.",
 };
 
 function formatError(err: ApiError | { code: string; message: string; traceId: string }): string {
