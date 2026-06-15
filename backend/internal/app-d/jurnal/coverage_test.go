@@ -771,6 +771,7 @@ func TestCov_PostingService_RejectManual_HappyPath(t *testing.T) {
 }
 
 // ─── service: DLQService.Discard happy path ──────────────────────────────────
+// F3 fix (DEC-018): status update + audit must be in same tx.
 
 func TestCov_DLQService_Discard_HappyPath(t *testing.T) {
 	mappingRepo, jurnalRepo, dlqRepo, aw, mock := newMockDB(t)
@@ -780,12 +781,81 @@ func TestCov_DLQService_Discard_HappyPath(t *testing.T) {
 
 	dlqID := uuid.New()
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT`)).WillReturnRows(buildDLQRow(dlqID, DLQStatusFailed))
+	// F3: DLQ status update + audit are now inside one tx (DEC-018 fix).
+	mock.ExpectBegin()
 	mock.ExpectExec(`UPDATE sys.dlq_jurnal_post`).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(`INSERT INTO aud.audit_log`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
 
 	reason := "Discarding because event mapping no longer exists and cannot be re-created. Min 30 chars."
-	err := dlqSvc.Discard(context.Background(), dlqID, DLQDiscardRequest{DiscardReason: reason}, uuid.New())
+	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{
+		Sub: uuid.New().String(), TenantID: "TUGURE",
+	})
+	err := dlqSvc.Discard(ctx, dlqID, DLQDiscardRequest{DiscardReason: reason}, uuid.New())
 	require.NoError(t, err)
+}
+
+// TestDLQService_Discard_BeginTxFails verifies that a BeginTx failure returns an error.
+func TestDLQService_Discard_BeginTxFails(t *testing.T) {
+	mappingRepo, jurnalRepo, dlqRepo, aw, mock := newMockDB(t)
+	resolverSvc := NewResolverService(mappingRepo, jurnalRepo.db, nil)
+	postingSvc := NewPostingService(jurnalRepo, dlqRepo, resolverSvc, aw, nil)
+	dlqSvc := NewDLQService(dlqRepo, postingSvc, aw, nil)
+
+	dlqID := uuid.New()
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT`)).WillReturnRows(buildDLQRow(dlqID, DLQStatusFailed))
+	mock.ExpectBegin().WillReturnError(fmt.Errorf("discard_begin_fail"))
+
+	reason := "Discarding because event mapping no longer exists and cannot be re-created."
+	err := dlqSvc.Discard(context.Background(), dlqID, DLQDiscardRequest{DiscardReason: reason}, uuid.New())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "discard_begin_fail")
+}
+
+// TestDLQService_Discard_UpdateStatusFails verifies that an UpdateStatus failure
+// causes rollback and returns an error.
+func TestDLQService_Discard_UpdateStatusFails(t *testing.T) {
+	mappingRepo, jurnalRepo, dlqRepo, aw, mock := newMockDB(t)
+	resolverSvc := NewResolverService(mappingRepo, jurnalRepo.db, nil)
+	postingSvc := NewPostingService(jurnalRepo, dlqRepo, resolverSvc, aw, nil)
+	dlqSvc := NewDLQService(dlqRepo, postingSvc, aw, nil)
+
+	dlqID := uuid.New()
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT`)).WillReturnRows(buildDLQRow(dlqID, DLQStatusFailed))
+	mock.ExpectBegin()
+	mock.ExpectExec(`UPDATE sys.dlq_jurnal_post`).WillReturnError(fmt.Errorf("discard_update_fail"))
+	mock.ExpectRollback()
+
+	reason := "Discarding because event mapping no longer exists and cannot be re-created."
+	err := dlqSvc.Discard(context.Background(), dlqID, DLQDiscardRequest{DiscardReason: reason}, uuid.New())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "discard_update_fail")
+}
+
+// TestDLQService_Discard_AuditInTx verifies that a failure to write the audit row
+// causes rollback — i.e. UpdateStatus and audit.Write are inside the same tx (F3 DEC-018).
+func TestDLQService_Discard_AuditInTx_OnDiscardSuccess(t *testing.T) {
+	mappingRepo, jurnalRepo, dlqRepo, aw, mock := newMockDB(t)
+	resolverSvc := NewResolverService(mappingRepo, jurnalRepo.db, nil)
+	postingSvc := NewPostingService(jurnalRepo, dlqRepo, resolverSvc, aw, nil)
+	dlqSvc := NewDLQService(dlqRepo, postingSvc, aw, nil)
+
+	dlqID := uuid.New()
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT`)).WillReturnRows(buildDLQRow(dlqID, DLQStatusFailed))
+	// Tx opens but audit INSERT fails → rollback must fire (not commit).
+	mock.ExpectBegin()
+	mock.ExpectExec(`UPDATE sys.dlq_jurnal_post`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO aud.audit_log`).WillReturnError(fmt.Errorf("audit_db_down"))
+	mock.ExpectRollback()
+
+	reason := "Discarding because event mapping no longer exists and cannot be re-created. Min 30 chars."
+	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{
+		Sub: uuid.New().String(), TenantID: "TUGURE",
+	})
+	err := dlqSvc.Discard(ctx, dlqID, DLQDiscardRequest{DiscardReason: reason}, uuid.New())
+	// Must return error (audit write failed → tx rolled back → DLQ status NOT persisted).
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "audit_db_down")
 }
 
 // ─── handler: parseListQuery (list endpoints with sort+filter params) ─────────
@@ -1371,10 +1441,12 @@ func TestCov_DLQService_Replay_Success(t *testing.T) {
 	mock.ExpectExec(`INSERT INTO aud.audit_log`).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
-	// Mark REPLAYED_OK
+	// F2 fix: mark REPLAYED_OK + audit JURNAL.DLQ_REPLAYED in one atomic tx (DEC-018).
+	mock.ExpectBegin()
 	mock.ExpectExec(`UPDATE sys.dlq_jurnal_post`).WillReturnResult(sqlmock.NewResult(1, 1))
 	// Audit replay
 	mock.ExpectExec(`INSERT INTO aud.audit_log`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
 
 	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{
 		Sub: callerID.String(), TenantID: "TUGURE",
@@ -3699,10 +3771,12 @@ func TestCov_DLQService_Replay_MalformedPayloadUUID(t *testing.T) {
 	mock.ExpectExec(`INSERT INTO aud.audit_log`).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
-	// UpdateStatus → mark REPLAYED_OK
+	// F2 fix: UpdateStatus + audit JURNAL.DLQ_REPLAYED are now inside one tx (DEC-018).
+	mock.ExpectBegin()
 	mock.ExpectExec(`UPDATE sys.dlq_jurnal_post`).WillReturnResult(sqlmock.NewResult(1, 1))
-	// Audit for discard/replay
+	// Audit for replay
 	mock.ExpectExec(`INSERT INTO aud.audit_log`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
 
 	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{Sub: callerID.String(), TenantID: "TUGURE"})
 	result, err := dlqSvc.Replay(ctx, dlqID, callerID)

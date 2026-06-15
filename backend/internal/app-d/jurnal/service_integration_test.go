@@ -9,6 +9,7 @@ package jurnal
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"testing"
 	"time"
@@ -453,6 +454,194 @@ func TestDLQService_Discard_AlreadyReplayedOK(t *testing.T) {
 	de, ok := domainerrors.IsDomainError(err)
 	require.True(t, ok)
 	assert.Equal(t, domainerrors.CodeJurnalDlqAlreadyReplayed, de.Code())
+}
+
+// ─── DLQService.Replay — audit-in-tx contract (F2 DEC-018) ──────────────────
+
+// TestDLQService_Replay_AuditInTx_OnPostingSuccess verifies that after PostResolved
+// succeeds, the status update (REPLAYED_OK) and audit row (JURNAL.DLQ_REPLAYED) are
+// committed atomically in a single new transaction.  An audit write failure must cause
+// rollback of the status update as well (no orphaned REPLAYED_OK without audit trail).
+func TestDLQService_Replay_AuditInTx_OnPostingSuccess(t *testing.T) {
+	_, jurnalRepo, dlqRepo, aw, mock := newMockDB(t)
+
+	mappingDB, mappingMock, merr := sqlmock.New()
+	require.NoError(t, merr)
+	t.Cleanup(func() { _ = mappingDB.Close() })
+
+	mappingRepo := NewMappingRepo(mappingDB)
+	resolverSvc := NewResolverService(mappingRepo, mappingDB, nil)
+	postingSvc := NewPostingService(jurnalRepo, dlqRepo, resolverSvc, aw, nil)
+	dlqSvc := NewDLQService(dlqRepo, postingSvc, aw, nil)
+
+	dlqID := uuid.New()
+	callerID := uuid.New()
+	periodeID := uuid.New()
+
+	// Build DLQ entry in FAILED state with a valid payload.
+	goodPayload := map[string]any{
+		"eventCode":         EventCodePenempatan,
+		"klasifikasiPSAK71": "AC",
+		"periodeId":         periodeID.String(),
+		"sourceEventId":     uuid.New().String(),
+		"amountIDR":         "1000000.0000",
+		"currency":          "IDR",
+		"fxRate":            "1",
+		"sourceEventType":   "penempatan:approved",
+	}
+	payloadJSON, mErr := json.Marshal(goodPayload)
+	require.NoError(t, mErr)
+
+	now := time.Now()
+	dlqRows := sqlmock.NewRows([]string{
+		"id", "source_event_id", "source_event_type", "event_code",
+		"instrumen_id", "periode_id", "payload_jsonb",
+		"error_code", "error_message", "error_category",
+		"retry_count", "last_retry_at", "status",
+		"replayed_by", "replayed_at", "final_jurnal_header_id",
+		"discarded_reason", "discarded_by", "discarded_at",
+		"created_at", "updated_at", "row_version",
+	}).AddRow(
+		dlqID, uuid.New(), "penempatan:approved", EventCodePenempatan,
+		nil, periodeID, payloadJSON,
+		"INFRA_DB_TIMEOUT", "db timeout", "INFRA",
+		1, nil, string(DLQStatusFailed),
+		nil, nil, nil,
+		nil, nil, nil,
+		now, now, int64(1),
+	)
+
+	// GetByID
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, source_event_id`)).WillReturnRows(dlqRows)
+	// IsPeriodeHardClosed (DLQ Replay pre-flight)
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT status`)).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("OPEN"))
+	// Mark REPLAYING
+	mock.ExpectExec(`UPDATE sys.dlq_jurnal_post`).WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// PostResolved internals: idempotency check, periode check, resolver, insert.
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM jrnl.header WHERE idempotency_key`)).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT status`)).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("OPEN"))
+	// Resolver: GetByEventCode + detail rows.
+	mappingMock.ExpectQuery(regexp.QuoteMeta(`SELECT id`)).
+		WillReturnRows(buildEventCodeRow(uuid.New()))
+	mappingMock.ExpectQuery(regexp.QuoteMeta(`SELECT`)).
+		WillReturnRows(detailWithDKRows(uuid.New()))
+	// PostResolved tx: Begin, NextNoJurnal, Insert header, Insert detail, Audit, Commit.
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT nextval`).
+		WillReturnRows(sqlmock.NewRows([]string{"nextval"}).AddRow(int64(42)))
+	mock.ExpectExec(`INSERT INTO jrnl.header`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO jrnl.detail`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO jrnl.detail`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO aud.audit_log`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	// F2 fix: status update REPLAYED_OK + audit JURNAL.DLQ_REPLAYED in ONE new tx.
+	mock.ExpectBegin()
+	mock.ExpectExec(`UPDATE sys.dlq_jurnal_post`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO aud.audit_log`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{
+		Sub: callerID.String(), TenantID: "TUGURE",
+	})
+	result, err := dlqSvc.Replay(ctx, dlqID, callerID)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, dlqID, result.DLQId)
+}
+
+// TestDLQService_Replay_AuditFailRollsBackStatusUpdate verifies that if the
+// audit write fails after PostResolved succeeds, the REPLAYED_OK status update is
+// also rolled back (atomicity guarantee of the F2 fix).
+func TestDLQService_Replay_AuditFailRollsBackStatusUpdate(t *testing.T) {
+	_, jurnalRepo, dlqRepo, aw, mock := newMockDB(t)
+
+	mappingDB, mappingMock, merr := sqlmock.New()
+	require.NoError(t, merr)
+	t.Cleanup(func() { _ = mappingDB.Close() })
+
+	mappingRepo := NewMappingRepo(mappingDB)
+	resolverSvc := NewResolverService(mappingRepo, mappingDB, nil)
+	postingSvc := NewPostingService(jurnalRepo, dlqRepo, resolverSvc, aw, nil)
+	dlqSvc := NewDLQService(dlqRepo, postingSvc, aw, nil)
+
+	dlqID := uuid.New()
+	callerID := uuid.New()
+	periodeID := uuid.New()
+
+	goodPayload := map[string]any{
+		"eventCode":         EventCodePenempatan,
+		"klasifikasiPSAK71": "AC",
+		"periodeId":         periodeID.String(),
+		"sourceEventId":     uuid.New().String(),
+		"amountIDR":         "1000000.0000",
+		"currency":          "IDR",
+		"fxRate":            "1",
+		"sourceEventType":   "penempatan:approved",
+	}
+	payloadJSON, mErr := json.Marshal(goodPayload)
+	require.NoError(t, mErr)
+
+	now := time.Now()
+	dlqRows := sqlmock.NewRows([]string{
+		"id", "source_event_id", "source_event_type", "event_code",
+		"instrumen_id", "periode_id", "payload_jsonb",
+		"error_code", "error_message", "error_category",
+		"retry_count", "last_retry_at", "status",
+		"replayed_by", "replayed_at", "final_jurnal_header_id",
+		"discarded_reason", "discarded_by", "discarded_at",
+		"created_at", "updated_at", "row_version",
+	}).AddRow(
+		dlqID, uuid.New(), "penempatan:approved", EventCodePenempatan,
+		nil, periodeID, payloadJSON,
+		"INFRA_DB_TIMEOUT", "db timeout", "INFRA",
+		1, nil, string(DLQStatusFailed),
+		nil, nil, nil,
+		nil, nil, nil,
+		now, now, int64(1),
+	)
+
+	// GetByID + period check + mark REPLAYING.
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, source_event_id`)).WillReturnRows(dlqRows)
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT status`)).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("OPEN"))
+	mock.ExpectExec(`UPDATE sys.dlq_jurnal_post`).WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// PostResolved internals.
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM jrnl.header WHERE idempotency_key`)).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT status`)).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("OPEN"))
+	mappingMock.ExpectQuery(regexp.QuoteMeta(`SELECT id`)).
+		WillReturnRows(buildEventCodeRow(uuid.New()))
+	mappingMock.ExpectQuery(regexp.QuoteMeta(`SELECT`)).
+		WillReturnRows(detailWithDKRows(uuid.New()))
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT nextval`).
+		WillReturnRows(sqlmock.NewRows([]string{"nextval"}).AddRow(int64(43)))
+	mock.ExpectExec(`INSERT INTO jrnl.header`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO jrnl.detail`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO jrnl.detail`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO aud.audit_log`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	// F2 fix: new tx for REPLAYED_OK — audit write fails → rollback.
+	mock.ExpectBegin()
+	mock.ExpectExec(`UPDATE sys.dlq_jurnal_post`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(`INSERT INTO aud.audit_log`).WillReturnError(fmt.Errorf("audit_node_down"))
+	mock.ExpectRollback()
+
+	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{
+		Sub: callerID.String(), TenantID: "TUGURE",
+	})
+	_, err := dlqSvc.Replay(ctx, dlqID, callerID)
+	// Must return error because audit write failed.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "audit_node_down")
 }
 
 // ─── MappingService.Create ─────────────────────────────────────────────────────

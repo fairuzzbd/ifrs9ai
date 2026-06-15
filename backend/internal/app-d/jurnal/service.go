@@ -939,24 +939,65 @@ func (s *DLQService) Replay(ctx context.Context, id uuid.UUID, callerID uuid.UUI
 		return nil, postErr
 	}
 
-	// Success: mark REPLAYED_OK.
+	// Success: mark REPLAYED_OK + audit JURNAL.DLQ_REPLAYED in one atomic tx (DEC-018).
+	// PostResolved already committed its own tx (PostingService is self-contained).
+	// We open a NEW tx here so that the DLQ status update and the audit row are
+	// either both persisted or both rolled back — no orphaned audit / no silent loss.
 	entry.Status = DLQStatusReplayedOK
 	entry.ReplayedBy = &callerID
 	entry.ReplayedAt = nowPtr()
 	entry.FinalJurnalHeaderID = &jurnalHeaderID
-	if err := s.dlqRepo.UpdateStatus(ctx, nil, entry); err != nil {
+
+	replayTx, txErr := s.dlqRepo.BeginTx(ctx)
+	if txErr != nil {
+		// Journal is already posted; log and return a non-fatal error so the
+		// caller can surface the inconsistency without hiding the success.
+		s.logger.ErrorContext(ctx, "jurnal.DLQService.Replay begin tx for status update failed",
+			"dlq_id", id, "jurnal_header_id", jurnalHeaderID, "error", txErr)
+		return &DLQReplayResponse{
+			DLQId:     entry.ID,
+			JobID:     "inline-replay-" + entry.ID.String(),
+			StatusURL: "/api/v1/jurnal/dlq/" + entry.ID.String(),
+		}, fmt.Errorf("jurnal.DLQService.Replay begin tx: %w", txErr)
+	}
+	rollbackReplayTx := func() {
+		if rbErr := replayTx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			s.logger.ErrorContext(ctx, "jurnal.DLQService.Replay rollback failed", "error", rbErr)
+		}
+	}
+
+	if err := s.dlqRepo.UpdateStatus(ctx, replayTx, entry); err != nil {
+		rollbackReplayTx()
 		s.logger.ErrorContext(ctx, "jurnal.DLQService.Replay mark replayed_ok failed",
 			"dlq_id", id, "error", err)
-		// Non-fatal: journal was already posted; don't fail the replay.
+		return &DLQReplayResponse{
+			DLQId:     entry.ID,
+			JobID:     "inline-replay-" + entry.ID.String(),
+			StatusURL: "/api/v1/jurnal/dlq/" + entry.ID.String(),
+		}, fmt.Errorf("jurnal.DLQService.Replay update status: %w", err)
 	}
-	// Audit the replay.
-	_ = s.auditWriter.Write(ctx, audit.EventFromContext(ctx, audit.Event{ //nolint:errcheck
-		Action:     "JURNAL.DLQ_REPLAY",
+	if err := s.auditWriter.WithTx(replayTx).Write(ctx, audit.EventFromContext(ctx, audit.Event{
+		Action:     "JURNAL.DLQ_REPLAYED",
 		EntityType: "sys.dlq_jurnal_post",
 		EntityID:   entry.ID,
 		Before:     map[string]any{"status": string(DLQStatusFailed)},
 		After:      map[string]any{"status": string(DLQStatusReplayedOK), "finalJurnalHeaderId": jurnalHeaderID},
-	}))
+	})); err != nil {
+		rollbackReplayTx()
+		return &DLQReplayResponse{
+			DLQId:     entry.ID,
+			JobID:     "inline-replay-" + entry.ID.String(),
+			StatusURL: "/api/v1/jurnal/dlq/" + entry.ID.String(),
+		}, fmt.Errorf("jurnal.DLQService.Replay write audit: %w", err)
+	}
+	if err := replayTx.Commit(); err != nil {
+		rollbackReplayTx()
+		return &DLQReplayResponse{
+			DLQId:     entry.ID,
+			JobID:     "inline-replay-" + entry.ID.String(),
+			StatusURL: "/api/v1/jurnal/dlq/" + entry.ID.String(),
+		}, fmt.Errorf("jurnal.DLQService.Replay commit: %w", err)
+	}
 
 	return &DLQReplayResponse{
 		DLQId:     entry.ID,
@@ -987,17 +1028,37 @@ func (s *DLQService) Discard(ctx context.Context, id uuid.UUID, req DLQDiscardRe
 	entry.DiscardedReason = &req.DiscardReason
 	entry.DiscardedBy = &callerID
 	entry.DiscardedAt = nowPtr()
-	if err := s.dlqRepo.UpdateStatus(ctx, nil, entry); err != nil {
+
+	// DEC-018: DLQ status update + audit JURNAL.DLQ_DISCARD must be atomic.
+	// Opening a new tx ensures both rows land together or neither does.
+	discardTx, txErr := s.dlqRepo.BeginTx(ctx)
+	if txErr != nil {
+		return fmt.Errorf("jurnal.DLQService.Discard begin tx: %w", txErr)
+	}
+	rollbackDiscardTx := func() {
+		if rbErr := discardTx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			s.logger.ErrorContext(ctx, "jurnal.DLQService.Discard rollback failed", "error", rbErr)
+		}
+	}
+
+	if err := s.dlqRepo.UpdateStatus(ctx, discardTx, entry); err != nil {
+		rollbackDiscardTx()
 		return fmt.Errorf("jurnal.DLQService.Discard update: %w", err)
 	}
-	// Audit discard.
-	_ = s.auditWriter.Write(ctx, audit.EventFromContext(ctx, audit.Event{ //nolint:errcheck
+	if err := s.auditWriter.WithTx(discardTx).Write(ctx, audit.EventFromContext(ctx, audit.Event{
 		Action:     "JURNAL.DLQ_DISCARD",
 		EntityType: "sys.dlq_jurnal_post",
 		EntityID:   entry.ID,
 		Before:     before,
 		After:      entry,
-	}))
+	})); err != nil {
+		rollbackDiscardTx()
+		return fmt.Errorf("jurnal.DLQService.Discard write audit: %w", err)
+	}
+	if err := discardTx.Commit(); err != nil {
+		rollbackDiscardTx()
+		return fmt.Errorf("jurnal.DLQService.Discard commit: %w", err)
+	}
 	return nil
 }
 
