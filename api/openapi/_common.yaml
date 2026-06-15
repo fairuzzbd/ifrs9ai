@@ -370,6 +370,23 @@ components:
         - JURNAL_DLQ_DISCARD_REASON_TOO_SHORT # 422 — discard/reject reason < 30 karakter
         - JURNAL_DLQ_REPLAY_PERIODE_HARD_CLOSED # 423 — replay tidak bisa karena periode masih HARD_CLOSED
         - JURNAL_MAPPING_WORKFLOW_GATE       # 422 — regulated code tanpa 6-eyes path (misconfiguration)
+        # APP-D P5-M3 — GL Host Delivery
+        - GL_DELIVERY_HOST_UNREACHABLE       # 502 — GL Host tidak bisa di-reach (5xx, timeout, network)
+        - GL_DELIVERY_INVALID_RESPONSE       # 502 — response GL Host tidak sesuai kontrak
+        - GL_DELIVERY_HOST_4XX               # 422 — GL Host menolak payload (domain 4xx error)
+        - GL_DELIVERY_AUTH_FAILED            # 401 — API key GL Host tidak valid atau expired
+        - GL_DELIVERY_TIMEOUT                # 504 — HTTP request ke GL Host timeout
+        - GL_DELIVERY_JURNAL_NOT_FOUND       # 404 — jurnal_header_id atau DLQ entry tidak ditemukan
+        - GL_DELIVERY_INVALID_TRANSITION     # 422 — retry dari status selain FAILED (mis. DEAD_LETTER)
+        - GL_DELIVERY_REASON_TOO_SHORT       # 422 — reason field < 30 karakter (retry atau discard)
+        - GL_DELIVERY_PERMISSION_DENIED      # 403 — permission jurnal.gl_delivery.* tidak terpenuhi
+        - GL_DELIVERY_PAYLOAD_BUILD_FAILED   # 500 — gagal membangun payload (balance, empty detail, PII error)
+        - GL_DELIVERY_MAX_ATTEMPTS_EXCEEDED  # 422 — total attempts (auto+manual) >= GL_DELIVERY_MAX_TOTAL_ATTEMPTS
+        - GL_RECONCILIATION_REPORT_NOT_FOUND # 404 — belum ada laporan rekonsiliasi untuk tanggal tersebut
+        - GL_RECONCILIATION_DATE_INVALID     # 422 — tanggal bukan hari kerja, format salah, atau future date
+        - GL_RECONCILIATION_HOST_FETCH_FAILED # 502 — GL Host tidak bisa di-reach saat fetch daily-summary
+        - GL_RECONCILIATION_IN_PROGRESS      # 409 — rekonsiliasi untuk tanggal ini sedang berjalan
+        - GL_DLQ_REPLAY_INVALID_STATE        # 422 — DLQ entry status bukan FAILED (replay dari ABANDONED, dll)
         # APP-B P5-M1 — Penempatan Deposito
         - PENEMPATAN_INSTRUMEN_NOT_FOUND           # 404 — instrumen_id tidak ada atau soft-deleted
         - PENEMPATAN_INSTRUMEN_INVALID_KLASIFIKASI # 422 — klasifikasi instrumen belum APPROVED di mst.instrumen

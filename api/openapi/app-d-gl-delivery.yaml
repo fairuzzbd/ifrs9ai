@@ -1,0 +1,1606 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-D GL Host Delivery (P5-M3)
+  version: "1.0.0"
+  description: |
+    Modul APP-D — GL Host REST Delivery (Phase 5, Module 3).
+
+    Cakupan:
+      - GL delivery status enrichment per jurnal_header (S2)
+      - Manual retry GL delivery dari state FAILED (S3)
+      - Daily reconciliation report BLIPS vs GL Host (S4)
+      - GL Delivery DLQ console — inspect / replay / discard (S5)
+
+    Dependensi:
+      - P5-M2 (merged PR #113) — jrnl.header + jrnl.detail + JURNAL.POSTED event source
+      - DEC-005: GL Integration Phase 2 REST real-time (aktif P5-M3)
+      - DEC-007: Asynq job queue
+      - DEC-018: Audit trail append-only 10+10 tahun
+      - DEC-021: Idempotency-Key wajib di setiap mutating endpoint
+      - DEC-022: Cursor-only pagination
+      - DEC-030 RESOLVED: GL delivery mode = Async REST via Asynq
+      - DEC-031 PENDING: GL Host vendor (adapter interface pattern — swap-safe)
+
+    Retry policy:
+      - 4xx domain error → DLQ immediate (SkipRetry), no auto-retry
+      - 5xx / timeout infra error → 3x exponential backoff (1m / 5m / 15m) → DLQ
+      - DEAD_LETTER hanya via explicit discard oleh ROLE-IT-ADMIN
+
+    Reconciliation tolerance: IDR 1.0000 (konfigurabel via sys.config GL_RECON_TOLERANCE_IDR)
+
+    Performance SLA:
+      - POST retry-gl-delivery:                    ≤ 200 ms (enqueue only)
+      - GET jurnal/{id} (with delivery_status):     ≤ 500 ms
+      - GET reconciliation/daily:                   ≤ 500 ms
+      - GET gl-delivery-dlq list:                   ≤ 500 ms
+      - Asynq gl_delivery:deliver worker per event: ≤ 5 s
+      - Daily reconciliation cron full run:         ≤ 60 s (10k jurnal entries)
+
+    Audit events (all in-transaction):
+      - GL_DELIVERY.SUCCESS            — worker: DELIVERED
+      - GL_DELIVERY.FAILED             — worker: FAILED (domain 4xx or infra 3x exhausted)
+      - GL_DELIVERY.RETRY              — worker: advisory per infra retry attempt
+      - GL_DELIVERY.MANUAL_RETRY_INITIATED — manual retry endpoint
+      - GL_DELIVERY.DLQ_REPLAY_INITIATED  — DLQ replay
+      - GL_DELIVERY.DLQ_DISCARDED         — DLQ discard → DEAD_LETTER
+      - GL_DELIVERY.DLQ_EXPORT            — export DLQ list
+      - GL_RECONCILIATION.STARTED
+      - GL_RECONCILIATION.COMPLETED
+      - GL_RECONCILIATION.FAILED
+
+    PII sanitization:
+      - customer_name, account_no, NPWP masked sebelum payload dikirim ke GL Host
+      - gl_response_payload_jsonb dan payload_snapshot_jsonb tersimpan tanpa PII
+      - GL_HOST_API_KEY tidak pernah di-log, di-return via API, atau masuk payload JSONB
+
+    Invariant:
+      - jrnl.gl_status: hanya kolom delivery-status yang di-UPDATE; data jurnal tidak boleh diubah
+      - sys.gl_reconciliation_report + sys.gl_recon_mismatch: append-only (no hard delete)
+      - Audit GL_DELIVERY.MANUAL_RETRY_INITIATED ditulis SEBELUM Asynq task di-enqueue
+
+    Schema changes (handoff → data-modeler, migration 000037):
+      - ALTER jrnl.gl_status ADD COLUMNS (gl_host_status enum extension, failure_category,
+        gl_response_payload_jsonb, manual_retry_by/at/reason, discarded_by/at/reason,
+        payload_sent_at, delivery_response_id)
+      - CREATE TABLE sys.dlq_gl_delivery
+      - CREATE TABLE sys.gl_reconciliation_report
+      - CREATE TABLE sys.gl_recon_mismatch
+      - sys.config seed: GL_HOST_URL, GL_HOST_AUTH_TYPE, GL_HOST_API_KEY (encrypted),
+        GL_DELIVERY_RETRY_MAX (3), GL_RECON_TOLERANCE_IDR (1.0000),
+        GL_DELIVERY_RETRY_DELAYS_SECONDS ("60,300,900"),
+        GL_DELIVERY_MAX_TOTAL_ATTEMPTS (5)
+
+servers:
+  - url: /api/v1
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: gl-delivery-status
+    description: "GL delivery status per jurnal header (enrichment dari P5-M2)"
+  - name: gl-delivery-retry
+    description: "Manual retry GL delivery — ROLE-AKUN-CTL / ROLE-IT-ADMIN"
+  - name: gl-reconciliation
+    description: "Daily reconciliation BLIPS vs GL Host — read + manual trigger"
+  - name: gl-delivery-dlq
+    description: "GL Delivery DLQ console — list / replay / discard"
+
+paths:
+
+  # ===========================================================================
+  # S2 — GL DELIVERY STATUS (enrichment pada endpoint M2 jurnal header detail)
+  # ===========================================================================
+
+  /jurnal/header/{id}/gl-delivery-status:
+    get:
+      operationId: getJurnalGlDeliveryStatus
+      summary: Status pengiriman jurnal ke GL Host
+      description: |
+        Mengembalikan sub-object delivery_status untuk jurnal_header tertentu.
+        Endpoint terpisah dari GET /jurnal/header/{id} untuk memudahkan polling status
+        tanpa re-fetch seluruh detail jurnal.
+
+        `gl_response_payload_jsonb` (raw response GL Host) hanya dikembalikan untuk
+        ROLE-IT-ADMIN (permission jurnal.gl_delivery.read_raw). Role lain mendapat
+        field tersebut sebagai null.
+
+        `can_retry` = true hanya jika gl_host_status = 'FAILED' DAN actor memiliki
+        permission jurnal.gl_delivery.retry.
+
+        Permission: jurnal.read
+        Audit event: tidak ada (read-only)
+      tags: [gl-delivery-status]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID jurnal_header.id (bisa juga no_jurnal string di versi path alternatif)
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      responses:
+        "200":
+          description: Status delivery GL Host untuk jurnal_header ini
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/GlDeliveryStatus"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  glStatusId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  glHostStatus: "DELIVERED"
+                  glHostJournalId: "GLHOST-JRN-20260615-00001"
+                  deliveredAt: "2026-06-15T10:32:44+07:00"
+                  retryCount: 0
+                  lastRetryAt: null
+                  lastError: null
+                  failureCategory: null
+                  deliveryMode: "API"
+                  payloadSentAt: "2026-06-15T10:32:40+07:00"
+                  canRetry: false
+                  glResponsePayloadJsonb: null
+                meta:
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          description: jurnal_header tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: GL_DELIVERY_JURNAL_NOT_FOUND
+                  message: "Jurnal header tidak ditemukan."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S3 — MANUAL RETRY GL DELIVERY
+  # ===========================================================================
+
+  /jurnal/header/{id}/retry-gl-delivery:
+    post:
+      operationId: retryGlDelivery
+      summary: Manual retry pengiriman jurnal ke GL Host
+      description: |
+        Reset gl_host_status dari FAILED → PENDING_DELIVERY dan enqueue Asynq task
+        baru gl_delivery:deliver. Hanya valid dari state FAILED.
+        Status DEAD_LETTER tidak bisa di-retry (gunakan DLQ console untuk discard).
+
+        Pre-conditions:
+          - jrnl.gl_status.gl_host_status = 'FAILED'
+          - jrnl.header.status_internal = 'POSTED'
+          - reason.length ≥ 30 karakter
+          - Idempotency-Key header UUID v4
+
+        State transition: FAILED → PENDING_DELIVERY
+
+        Audit event: GL_DELIVERY.MANUAL_RETRY_INITIATED ditulis SEBELUM enqueue
+        (jika enqueue gagal, audit tetap ada sebagai evidence).
+
+        Total attempts check: jika (retry_count_auto + manual_retry_count) ≥ GL_DELIVERY_MAX_TOTAL_ATTEMPTS,
+        endpoint menolak dengan GL_DELIVERY_MAX_ATTEMPTS_EXCEEDED.
+
+        Permission: jurnal.gl_delivery.retry
+        MFA: tidak diperlukan (DEC-027 scope)
+        Rate limit: 10 req/min per user (sensitif)
+      tags: [gl-delivery-retry]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID jurnal_header.id
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetryGlDeliveryRequest"
+            example:
+              reason: "Kode akun 1110-DEP sudah diperbaiki di GL Host Chart of Accounts. Retry delivery."
+      responses:
+        "202":
+          description: Retry berhasil dijadwalkan — Asynq task di-enqueue
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/RetryGlDeliveryResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  jobId: "job_GL_RETRY_01HXYZ"
+                  statusUrl: "/api/v1/jobs/job_GL_RETRY_01HXYZ"
+                  glStatusId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  previousStatus: "FAILED"
+                  newStatus: "PENDING_DELIVERY"
+                  retryAttemptNumber: 1
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: Validasi request gagal (reason terlalu pendek, dll)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: GL_DELIVERY_REASON_TOO_SHORT
+                  message: "Alasan retry wajib minimal 30 karakter."
+                  details:
+                    - field: "body.reason"
+                      rule: "min_length:30"
+                      message: "Alasan retry wajib minimal 30 karakter"
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          description: jurnal_header tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: GL_DELIVERY_JURNAL_NOT_FOUND
+                  message: "Jurnal header tidak ditemukan."
+                  details: []
+                  traceId: "01HXY..."
+        "422":
+          description: Transisi tidak valid (status bukan FAILED, atau DEAD_LETTER)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                invalid_transition:
+                  summary: Status DEAD_LETTER tidak bisa di-retry
+                  value:
+                    error:
+                      code: GL_DELIVERY_INVALID_TRANSITION
+                      message: "Jurnal memiliki status DEAD_LETTER dan tidak dapat di-retry. Hubungi ROLE-IT-ADMIN."
+                      details: []
+                      traceId: "01HXY..."
+                max_attempts:
+                  summary: Batas maksimum total attempt tercapai
+                  value:
+                    error:
+                      code: GL_DELIVERY_MAX_ATTEMPTS_EXCEEDED
+                      message: "Jumlah total percobaan pengiriman telah mencapai batas maksimum (5). Lakukan discard via DLQ console."
+                      details: []
+                      traceId: "01HXY..."
+        "422 (idempotency)":
+          $ref: "./_common.yaml#/components/responses/IdempotencyMismatch"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S4 — RECONCILIATION ENDPOINTS
+  # ===========================================================================
+
+  /jurnal/reconciliation/daily:
+    get:
+      operationId: getGlReconciliationDaily
+      summary: Laporan rekonsiliasi harian BLIPS vs GL Host
+      description: |
+        Mengembalikan laporan rekonsiliasi untuk tanggal tertentu.
+        Laporan ini di-generate oleh cron Asynq gl_recon:daily pukul 08:00 WIB
+        atau via manual trigger POST /jurnal/reconciliation/run.
+
+        mismatch_lines diurutkan by |delta_idr| DESC.
+        GL Host fetched summary per-akun, dibandingkan dengan SUM(debit - kredit)
+        per kode_akun di jrnl.detail JOIN jrnl.header (tanggal_posting = date, status POSTED).
+        Tolerance default 1.0000 IDR dari sys.config GL_RECON_TOLERANCE_IDR.
+
+        Permission: jurnal.reconciliation.read
+        Roles: ROLE-AKUN-CTL, ROLE-CFO, ROLE-AUDIT
+      tags: [gl-reconciliation]
+      parameters:
+        - name: date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          description: "Tanggal rekonsiliasi. Format YYYY-MM-DD. Harus hari kerja (sys.calendar_holiday)."
+          example: "2026-06-14"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      responses:
+        "200":
+          description: Laporan rekonsiliasi ditemukan
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/GlReconciliationReport"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  reportId: "r1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  tanggalRekonsiliasi: "2026-06-14"
+                  status: "COMPLETED_WITH_MISMATCH"
+                  totalAkunChecked: 28
+                  totalMismatchCount: 2
+                  totalMismatchAmountIdr: 15000.0000
+                  blipsTotalIdr: 12500000000.0000
+                  glHostTotalIdr: 12499985000.0000
+                  deltaIdr: 15000.0000
+                  toleranceIdr: 1.0000
+                  generatedAt: "2026-06-15T08:05:12+07:00"
+                  jobId: "job_RECON_01HXYZ"
+                  mismatchLines:
+                    - kodeAkun: "3010-OCI-AST"
+                      namaAkun: "Aset OCI"
+                      blipsAmountIdr: 1000000.0000
+                      glHostAmountIdr: 0.0000
+                      deltaIdr: 1000000.0000
+                      mismatchType: "BLIPS_ONLY"
+                      jurnalHeaderIds:
+                        - "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                    - kodeAkun: "1210-OBLIGASI"
+                      namaAkun: "Obligasi"
+                      blipsAmountIdr: 2000014000.0000
+                      glHostAmountIdr: 2000000000.0000
+                      deltaIdr: 14000.0000
+                      mismatchType: "AMOUNT_DIFF"
+                      jurnalHeaderIds:
+                        - "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+                meta:
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          description: Laporan tidak ditemukan untuk tanggal ini
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: GL_RECONCILIATION_REPORT_NOT_FOUND
+                  message: "Belum ada laporan rekonsiliasi untuk 2026-06-14. Jalankan rekonsiliasi manual atau tunggu cron 08:00 WIB."
+                  details: []
+                  traceId: "01HXY..."
+        "422":
+          description: Tanggal tidak valid atau bukan hari kerja
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: GL_RECONCILIATION_DATE_INVALID
+                  message: "Tanggal 2026-06-13 adalah hari libur (Sabtu). Rekonsiliasi hanya untuk hari kerja."
+                  details:
+                    - field: "query.date"
+                      rule: "business_day"
+                      message: "Tanggal harus hari kerja"
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/reconciliation/run:
+    post:
+      operationId: runGlReconciliation
+      summary: Manual trigger rekonsiliasi ad-hoc
+      description: |
+        ROLE-AKUN-CTL dapat memicu rekonsiliasi manual untuk tanggal tertentu di luar
+        jadwal cron harian (08:00 WIB). Jika laporan untuk tanggal tersebut sudah ada
+        (COMPLETED/COMPLETED_WITH_MISMATCH), laporan lama akan di-overwrite (UPSERT):
+        mismatch rows lama di-soft-delete, laporan baru di-INSERT.
+
+        Jika sudah ada rekonsiliasi yang sedang berjalan (RUNNING) untuk tanggal yang sama,
+        mengembalikan 409 GL_RECONCILIATION_IN_PROGRESS.
+
+        Returns 202 + jobId. Monitor progress via GET /api/v1/jobs/{jobId}.
+        Setelah selesai, laporan tersedia via GET /jurnal/reconciliation/daily?date=...
+
+        Permission: jurnal.reconciliation.run
+        Roles: ROLE-AKUN-CTL
+        Idempotency-Key: wajib
+        Rate limit: 10 req/min per user
+      tags: [gl-reconciliation]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunReconciliationRequest"
+            example:
+              date: "2026-06-14"
+              reason: "GL Host kembali online setelah maintenance 22:00-02:00 WIB. Rerun rekonsiliasi."
+      responses:
+        "202":
+          description: Rekonsiliasi dijadwalkan — Asynq task di-enqueue
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/RunReconciliationResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  jobId: "job_RECON_01HXYZ"
+                  statusUrl: "/api/v1/jobs/job_RECON_01HXYZ"
+                  streamUrl: "/api/v1/jobs/job_RECON_01HXYZ/stream"
+                  tanggalRekonsiliasi: "2026-06-14"
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "./_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "409":
+          description: Rekonsiliasi untuk tanggal ini sedang berjalan
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: GL_RECONCILIATION_IN_PROGRESS
+                  message: "Rekonsiliasi untuk 2026-06-14 sedang berjalan (job_RECON_01HABC). Tunggu hingga selesai sebelum rerun."
+                  details: []
+                  traceId: "01HXY..."
+        "422":
+          description: Tanggal tidak valid
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: GL_RECONCILIATION_DATE_INVALID
+                  message: "Tanggal 2026-06-13 adalah hari libur. Rekonsiliasi hanya untuk hari kerja."
+                  details: []
+                  traceId: "01HXY..."
+        "422 (idempotency)":
+          $ref: "./_common.yaml#/components/responses/IdempotencyMismatch"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/reconciliation/history:
+    get:
+      operationId: listGlReconciliationHistory
+      summary: Riwayat laporan rekonsiliasi (DataTable)
+      description: |
+        Cursor-paginated list laporan rekonsiliasi dengan sort + filter + export.
+        Default sort: tanggal_rekonsiliasi DESC.
+
+        Allowed filter cols: tanggal_rekonsiliasi, status, total_mismatch_count.
+        Allowed sort cols: tanggal_rekonsiliasi, generated_at, total_mismatch_count, status.
+        Export: CSV + XLSX. Dataset > 10k → async export ke MinIO.
+        Audit: GL_DELIVERY.DLQ_EXPORT per export.
+
+        Permission: jurnal.reconciliation.read
+      tags: [gl-reconciliation]
+      parameters:
+        - $ref: "#/components/parameters/cursor"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/sortParam"
+        - $ref: "#/components/parameters/searchParam"
+        - name: "filter[status]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [COMPLETED, COMPLETED_WITH_MISMATCH, FAILED, RUNNING, PENDING]
+          description: Filter berdasarkan status laporan
+        - name: "filter[tanggal_from]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+          description: "Filter tanggal_rekonsiliasi >= nilai ini. Format YYYY-MM-DD."
+        - name: "filter[tanggal_to]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+          description: "Filter tanggal_rekonsiliasi <= nilai ini. Format YYYY-MM-DD."
+        - name: export
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [csv, xlsx]
+          description: "Export format. Jika ada, trigger export (inline atau async)."
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      responses:
+        "200":
+          description: List riwayat rekonsiliasi
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/GlReconciliationSummaryItem"
+                  pagination:
+                    $ref: "./_common.yaml#/components/schemas/PaginationResponse"
+                  appliedSort:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        col:
+                          type: string
+                        dir:
+                          type: string
+                          enum: [asc, desc]
+                  appliedFilter:
+                    type: object
+                    additionalProperties: true
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S5 — GL DELIVERY DLQ CONSOLE
+  # ===========================================================================
+
+  /jurnal/gl-delivery-dlq:
+    get:
+      operationId: listGlDeliveryDlq
+      summary: List GL Delivery DLQ (DataTable)
+      description: |
+        Cursor-paginated list entry GL delivery yang gagal (gl_host_status = FAILED)
+        atau terminal (DEAD_LETTER). Terpisah dari P5-M2 DLQ jurnal posting
+        (sys.dlq_jurnal_post).
+
+        Default filter: gl_host_status = 'FAILED' (DEAD_LETTER tidak tampil kecuali
+        eksplisit filter[gl_host_status]=DEAD_LETTER atau ALL).
+        Default sort: last_retry_at DESC.
+
+        Allowed filter cols: gl_host_status, failure_category, no_jurnal,
+        error_code, last_retry_at, retry_count.
+        Allowed sort cols: last_retry_at, retry_count, created_at, no_jurnal.
+
+        Export: CSV + XLSX. Audit: GL_DELIVERY.DLQ_EXPORT per export.
+
+        Permission: jurnal.gl_delivery.read
+        Roles: ROLE-AKUN-CTL, ROLE-IT-ADMIN, ROLE-AUDIT
+      tags: [gl-delivery-dlq]
+      parameters:
+        - $ref: "#/components/parameters/cursor"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/sortParam"
+        - $ref: "#/components/parameters/searchParam"
+        - name: "filter[gl_host_status]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [FAILED, DEAD_LETTER, ALL]
+            default: FAILED
+          description: "Filter status. Default FAILED. DEAD_LETTER = discard terminal. ALL = keduanya."
+        - name: "filter[failure_category]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [DOMAIN, INFRA]
+          description: "Filter berdasarkan kategori kegagalan (DOMAIN=4xx, INFRA=5xx/timeout)."
+        - name: "filter[error_code]"
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Filter berdasarkan error_code spesifik."
+        - name: export
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [csv, xlsx]
+          description: "Export format."
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      responses:
+        "200":
+          description: List GL Delivery DLQ entries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/GlDeliveryDlqListItem"
+                  pagination:
+                    $ref: "./_common.yaml#/components/schemas/PaginationResponse"
+                  appliedSort:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        col:
+                          type: string
+                        dir:
+                          type: string
+                          enum: [asc, desc]
+                  appliedFilter:
+                    type: object
+                    additionalProperties: true
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "400":
+          description: Filter/sort parameter tidak valid
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: INVALID_SORT_COL
+                  message: "Sort kolom 'nama' tidak diizinkan. Kolom yang valid: last_retry_at, retry_count, created_at, no_jurnal."
+                  details: []
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/gl-delivery-dlq/{id}:
+    get:
+      operationId: getGlDeliveryDlqDetail
+      summary: Detail entry GL Delivery DLQ dengan payload + error history
+      description: |
+        Detail lengkap satu entry DLQ termasuk:
+        - payload_snapshot_jsonb (payload yang dikirim ke GL Host, tanpa PII)
+        - gl_response_payload_jsonb (raw response GL Host) — hanya ROLE-IT-ADMIN
+        - error history dari aud.audit_log (action IN ('GL_DELIVERY.FAILED', 'GL_DELIVERY.RETRY'))
+        - manual_retry_history (from jrnl.gl_status fields)
+
+        Permission: jurnal.gl_delivery.read
+      tags: [gl-delivery-dlq]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID sys.dlq_gl_delivery.id atau jrnl.gl_status.id
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      responses:
+        "200":
+          description: Detail DLQ entry
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/GlDeliveryDlqDetail"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          description: DLQ entry tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: GL_DLQ_REPLAY_INVALID_STATE
+                  message: "DLQ entry tidak ditemukan."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/gl-delivery-dlq/{id}/replay:
+    post:
+      operationId: replayGlDeliveryDlq
+      summary: Re-enqueue delivery dari DLQ (replay ke GL Host)
+      description: |
+        Re-attempt pengiriman jurnal ke GL Host dari DLQ console.
+        Code path identik dengan POST /jurnal/header/{id}/retry-gl-delivery —
+        keduanya memanggil GLDeliveryService.Retry(headerID, reason, actorID).
+
+        DLQ replay menggunakan idempotency_key baru (UUID baru) untuk Asynq task —
+        bukan idempotency_key lama (yang sudah diketahui GL Host gagal/bermasalah).
+
+        Pre-conditions:
+          - DLQ entry status = 'FAILED' (bukan REPLAYING, REPLAYED_OK, atau ABANDONED)
+          - reason.length ≥ 30 karakter
+          - Idempotency-Key header UUID v4
+
+        State transition DLQ entry: FAILED → REPLAYING
+        State transition jrnl.gl_status: FAILED → PENDING_DELIVERY
+
+        Audit event: GL_DELIVERY.DLQ_REPLAY_INITIATED (in-tx, sebelum enqueue)
+
+        Permission: jurnal.gl_delivery.replay
+        Roles: ROLE-AKUN-CTL, ROLE-IT-ADMIN
+        Rate limit: 10 req/min per user
+      tags: [gl-delivery-dlq]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID sys.dlq_gl_delivery.id
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DlqActionRequest"
+            example:
+              reason: "GL Host sudah pulih setelah maintenance window 2026-06-14 22:00-02:00 WIB. Replay delivery."
+      responses:
+        "202":
+          description: Replay berhasil dijadwalkan
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/DlqReplayResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  jobId: "job_GL_RETRY_DLQ_002"
+                  statusUrl: "/api/v1/jobs/job_GL_RETRY_DLQ_002"
+                  dlqEntryId: "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+                  jurnalHeaderId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  noJurnal: "JRN-2026-000088"
+                  previousStatus: "FAILED"
+                  newStatus: "PENDING_DELIVERY"
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: Validasi gagal (reason terlalu pendek)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: GL_DELIVERY_REASON_TOO_SHORT
+                  message: "Alasan replay wajib minimal 30 karakter."
+                  details:
+                    - field: "body.reason"
+                      rule: "min_length:30"
+                      message: "Alasan wajib minimal 30 karakter"
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          description: DLQ entry tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: GL_DELIVERY_JURNAL_NOT_FOUND
+                  message: "DLQ entry tidak ditemukan."
+                  details: []
+                  traceId: "01HXY..."
+        "422":
+          description: Transisi tidak valid (DLQ entry bukan status FAILED)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: GL_DLQ_REPLAY_INVALID_STATE
+                  message: "DLQ entry berstatus ABANDONED dan tidak bisa di-replay. Status yang valid untuk replay: FAILED."
+                  details: []
+                  traceId: "01HXY..."
+        "422 (idempotency)":
+          $ref: "./_common.yaml#/components/responses/IdempotencyMismatch"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /jurnal/gl-delivery-dlq/{id}/discard:
+    post:
+      operationId: discardGlDeliveryDlq
+      summary: Discard entry DLQ — jadikan DEAD_LETTER (terminal)
+      description: |
+        ROLE-IT-ADMIN dapat mendiscard entry DLQ yang tidak memerlukan delivery ulang
+        (mis. jurnal sudah diinput manual di GL Host). Transisi ini adalah terminal —
+        setelah DEAD_LETTER, entry tidak bisa di-replay kembali.
+
+        ROLE-AKUN-CTL tidak memiliki permission ini (403 FORBIDDEN).
+
+        Pre-conditions:
+          - DLQ entry status = 'FAILED' (DEAD_LETTER atau status lain → 422)
+          - reason.length ≥ 30 karakter
+          - Idempotency-Key header UUID v4
+
+        State transition DLQ entry: FAILED → ABANDONED
+        State transition jrnl.gl_status: FAILED → DEAD_LETTER
+
+        Audit event: GL_DELIVERY.DLQ_DISCARDED (in-tx)
+        Audit after_jsonb WAJIB menyertakan discard_reason sebagai evidence.
+
+        Entry tidak hilang dari DB (soft-delete NOT used) — status ABANDONED/DEAD_LETTER
+        tetap tersimpan. ROLE-AUDIT bisa query via filter[gl_host_status]=DEAD_LETTER.
+
+        Permission: jurnal.gl_delivery.discard
+        Roles: ROLE-IT-ADMIN only
+        Rate limit: 10 req/min per user
+      tags: [gl-delivery-dlq]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID sys.dlq_gl_delivery.id
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DlqActionRequest"
+            example:
+              reason: "Jurnal JRN-2026-000077 sudah diinput manual di GL Host pada 2026-06-14 oleh tim Akuntansi. Delivery otomatis tidak diperlukan."
+      responses:
+        "200":
+          description: DLQ entry berhasil di-discard (DEAD_LETTER)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/DlqDiscardResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  dlqEntryId: "c3d4e5f6-a7b8-9012-cdef-123456789012"
+                  jurnalHeaderId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  noJurnal: "JRN-2026-000077"
+                  previousStatus: "FAILED"
+                  newStatus: "DEAD_LETTER"
+                  discardedAt: "2026-06-15T11:00:00+07:00"
+                  discardedBy: "d4e5f6a7-b8c9-0123-defg-234567890123"
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: Validasi gagal (reason terlalu pendek)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: GL_DELIVERY_REASON_TOO_SHORT
+                  message: "Alasan discard wajib minimal 30 karakter."
+                  details:
+                    - field: "body.reason"
+                      rule: "min_length:30"
+                      message: "Alasan wajib minimal 30 karakter"
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          description: Permission denied — hanya ROLE-IT-ADMIN
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: GL_DELIVERY_PERMISSION_DENIED
+                  message: "Tidak memiliki permission jurnal.gl_delivery.discard. Hanya ROLE-IT-ADMIN yang dapat mendiscard entry GL Delivery DLQ."
+                  details: []
+                  traceId: "01HXY..."
+        "404":
+          description: DLQ entry tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: GL_DELIVERY_JURNAL_NOT_FOUND
+                  message: "DLQ entry tidak ditemukan."
+                  details: []
+                  traceId: "01HXY..."
+        "422":
+          description: Transisi tidak valid (DLQ entry bukan status FAILED)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: GL_DLQ_REPLAY_INVALID_STATE
+                  message: "DLQ entry berstatus ABANDONED (sudah DEAD_LETTER). Tidak bisa di-discard ulang."
+                  details: []
+                  traceId: "01HXY..."
+        "422 (idempotency)":
+          $ref: "./_common.yaml#/components/responses/IdempotencyMismatch"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT RSA-2048 signed oleh Keycloak (DEC-025). Access token TTL 15 menit.
+        Claims wajib: sub, preferred_username, roles[], permissions[], tenant_id,
+        mfa_verified, exp, iat, nbf.
+        Permission check di service layer pakai {entity}.{action}, bukan role string.
+
+  parameters:
+    XTraceIdHeader:
+      name: X-Trace-Id
+      in: header
+      required: false
+      schema:
+        type: string
+      description: Trace ID untuk distributed tracing. Gateway inject otomatis.
+
+    cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+      description: Opaque base64 cursor dari pagination.nextCursor response sebelumnya (DEC-022).
+
+    limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+      description: Jumlah item per halaman. Default 50, max 200.
+
+    sortParam:
+      name: sort
+      in: query
+      required: false
+      schema:
+        type: string
+        pattern: "^[a-z_]+(:(asc|desc))?(,[a-z_]+(:(asc|desc))?)*$"
+      description: "Multi-column sort. Format: col1:asc,col2:desc. Max 3 kolom."
+      example: "created_at:desc"
+
+    searchParam:
+      name: q
+      in: query
+      required: false
+      schema:
+        type: string
+        maxLength: 200
+      description: "Text search global. Server menentukan kolom yang di-scan."
+
+    IdempotencyKeyHeader:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+        pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      description: |
+        UUID v4 unik per request. Wajib di semua mutating endpoints (DEC-021).
+        Format: UUID v4 lowercase hyphenated.
+        TTL replay window: 24 jam.
+        Same key + same payload → IDEMPOTENCY_REPLAY 200.
+        Same key + beda payload → IDEMPOTENCY_MISMATCH 422.
+      example: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+
+  schemas:
+
+    # ---- GL Delivery Status (S2) -------------------------------------------
+    GlDeliveryStatus:
+      type: object
+      required:
+        - glStatusId
+        - glHostStatus
+        - retryCount
+        - deliveryMode
+        - canRetry
+      properties:
+        glStatusId:
+          type: string
+          format: uuid
+          description: UUID jrnl.gl_status.id
+        glHostStatus:
+          $ref: "#/components/schemas/GlHostStatus"
+        glHostJournalId:
+          type: string
+          nullable: true
+          description: Journal ID dari GL Host (dari response body saat DELIVERED). null jika belum DELIVERED.
+          example: "GLHOST-JRN-20260615-00001"
+        deliveredAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Waktu GL Host konfirmasi delivery. null jika belum DELIVERED.
+        retryCount:
+          type: integer
+          minimum: 0
+          description: Jumlah percobaan auto-retry infra (5xx/timeout). Tidak termasuk manual retry.
+        lastRetryAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Timestamp auto-retry terakhir. null jika tidak ada retry.
+        lastError:
+          type: string
+          nullable: true
+          description: "Error terakhir dari GL Host atau infra. Format: '{ERROR_CODE}: {message}'. null jika tidak ada error."
+          example: "GL_HOST_REJECTED: INVALID_ACCOUNT_CODE — Account 1110-DEP not found in GL chart"
+        failureCategory:
+          type: string
+          enum: [DOMAIN, INFRA]
+          nullable: true
+          description: "DOMAIN = 4xx error (GL Host reject). INFRA = 5xx/timeout. null jika tidak ada failure."
+        deliveryMode:
+          type: string
+          enum: [API, BATCH_FILE]
+          description: "API = P5-M3 REST mode. BATCH_FILE = legacy Phase 1 (deprecated)."
+        payloadSentAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Waktu payload terakhir dikirim ke GL Host.
+        canRetry:
+          type: boolean
+          description: |
+            true hanya jika gl_host_status = 'FAILED' DAN actor memiliki
+            permission jurnal.gl_delivery.retry. Server compute per-actor.
+        glResponsePayloadJsonb:
+          type: object
+          nullable: true
+          description: |
+            Raw response dari GL Host (sanitized — tanpa PII).
+            Hanya dikembalikan untuk ROLE-IT-ADMIN (jurnal.gl_delivery.read_raw).
+            null untuk role lain.
+          additionalProperties: true
+        manualRetryHistory:
+          type: array
+          nullable: true
+          items:
+            $ref: "#/components/schemas/ManualRetryHistoryItem"
+          description: Riwayat manual retry. null jika belum pernah di-retry manual.
+
+    ManualRetryHistoryItem:
+      type: object
+      properties:
+        retriedBy:
+          type: string
+          format: uuid
+          description: user_id yang melakukan manual retry
+        retriedAt:
+          type: string
+          format: date-time
+        reason:
+          type: string
+          description: Alasan manual retry (sanitized — credential/secret di-strip)
+
+    GlHostStatus:
+      type: string
+      enum:
+        - PENDING_DELIVERY
+        - DELIVERY_IN_FLIGHT
+        - DELIVERED
+        - RETRYING
+        - FAILED
+        - DEAD_LETTER
+      description: |
+        Status pengiriman jurnal ke GL Host.
+        - PENDING_DELIVERY: set oleh P5-M2 saat INSERT jrnl.header (in-tx)
+        - DELIVERY_IN_FLIGHT: Asynq worker sedang memproses (transient, update saat worker pick up)
+        - DELIVERED: GL Host 2xx, terminal sukses
+        - RETRYING: 5xx/timeout, dalam antrean retry eksponensial (≤ 3x)
+        - FAILED: domain 4xx atau retry exhausted; DLQ entry created
+        - DEAD_LETTER: discard eksplisit oleh ROLE-IT-ADMIN, terminal gagal
+
+    # ---- Retry GL Delivery (S3) -------------------------------------------
+    RetryGlDeliveryRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 30
+          maxLength: 1000
+          description: |
+            Alasan retry manual. Wajib minimal 30 karakter (DEC-021 audit evidence).
+            Tidak boleh mengandung credential atau secret (server-side sanitization).
+          example: "Kode akun 1110-DEP sudah diperbaiki di GL Host Chart of Accounts. Retry delivery."
+
+    RetryGlDeliveryResponse:
+      type: object
+      required: [jobId, statusUrl, glStatusId, previousStatus, newStatus, retryAttemptNumber]
+      properties:
+        jobId:
+          type: string
+          description: Asynq job ID untuk tracking via GET /api/v1/jobs/{jobId}
+          example: "job_GL_RETRY_01HXYZ"
+        statusUrl:
+          type: string
+          description: URL untuk polling status job
+          example: "/api/v1/jobs/job_GL_RETRY_01HXYZ"
+        glStatusId:
+          type: string
+          format: uuid
+          description: UUID jrnl.gl_status.id yang di-update
+        previousStatus:
+          $ref: "#/components/schemas/GlHostStatus"
+        newStatus:
+          $ref: "#/components/schemas/GlHostStatus"
+        retryAttemptNumber:
+          type: integer
+          minimum: 1
+          description: Nomor urut attempt ini (auto + manual kumulatif)
+
+    # ---- Reconciliation (S4) -----------------------------------------------
+    RunReconciliationRequest:
+      type: object
+      required: [date]
+      properties:
+        date:
+          type: string
+          format: date
+          description: "Tanggal rekonsiliasi. Format YYYY-MM-DD. Harus hari kerja."
+          example: "2026-06-14"
+        reason:
+          type: string
+          maxLength: 500
+          description: "Alasan manual rerun (opsional, untuk audit context)."
+          example: "GL Host kembali online setelah maintenance. Rerun rekonsiliasi."
+
+    RunReconciliationResponse:
+      type: object
+      required: [jobId, statusUrl, tanggalRekonsiliasi]
+      properties:
+        jobId:
+          type: string
+          example: "job_RECON_01HXYZ"
+        statusUrl:
+          type: string
+          example: "/api/v1/jobs/job_RECON_01HXYZ"
+        streamUrl:
+          type: string
+          description: SSE stream URL untuk live progress (§3 UX pattern)
+          example: "/api/v1/jobs/job_RECON_01HXYZ/stream"
+        tanggalRekonsiliasi:
+          type: string
+          format: date
+          example: "2026-06-14"
+
+    GlReconciliationReport:
+      type: object
+      required:
+        - reportId
+        - tanggalRekonsiliasi
+        - status
+        - totalAkunChecked
+        - totalMismatchCount
+        - blipsTotalIdr
+        - glHostTotalIdr
+        - deltaIdr
+        - toleranceIdr
+        - generatedAt
+      properties:
+        reportId:
+          type: string
+          format: uuid
+        tanggalRekonsiliasi:
+          type: string
+          format: date
+        status:
+          type: string
+          enum: [PENDING, RUNNING, COMPLETED, COMPLETED_WITH_MISMATCH, FAILED]
+          description: |
+            PENDING: dijadwalkan belum mulai.
+            RUNNING: sedang berjalan (sys.job running).
+            COMPLETED: selesai tanpa mismatch.
+            COMPLETED_WITH_MISMATCH: selesai tapi ada selisih > tolerance.
+            FAILED: GL Host tidak bisa di-reach atau query error.
+        totalAkunChecked:
+          type: integer
+          minimum: 0
+        totalMismatchCount:
+          type: integer
+          minimum: 0
+        totalMismatchAmountIdr:
+          type: number
+          format: double
+          description: "Total nilai selisih semua mismatch. NUMERIC(20,4)."
+          example: 15000.0000
+        blipsTotalIdr:
+          type: number
+          format: double
+          description: "Total BLIPS jrnl.detail per tanggal (debit - kredit net). NUMERIC(20,4)."
+          example: 12500000000.0000
+        glHostTotalIdr:
+          type: number
+          format: double
+          description: "Total GL Host ledger per tanggal. NUMERIC(20,4)."
+          example: 12499985000.0000
+        deltaIdr:
+          type: number
+          format: double
+          description: "blipsTotalIdr - glHostTotalIdr. NUMERIC(20,4)."
+          example: 15000.0000
+        toleranceIdr:
+          type: number
+          format: double
+          description: "Threshold mismatch yang dipakai. Dari sys.config GL_RECON_TOLERANCE_IDR."
+          example: 1.0000
+        generatedAt:
+          type: string
+          format: date-time
+          description: Waktu laporan selesai di-generate.
+        jobId:
+          type: string
+          nullable: true
+          description: Asynq job ID yang menghasilkan laporan ini.
+        mismatchLines:
+          type: array
+          items:
+            $ref: "#/components/schemas/GlReconMismatchLine"
+          description: Detail per akun yang mismatch. Diurutkan by |delta_idr| DESC. Kosong jika tidak ada mismatch.
+
+    GlReconMismatchLine:
+      type: object
+      required: [kodeAkun, blipsAmountIdr, glHostAmountIdr, deltaIdr, mismatchType]
+      properties:
+        kodeAkun:
+          type: string
+          example: "3010-OCI-AST"
+        namaAkun:
+          type: string
+          nullable: true
+          description: Nama akun dari mst.chart_of_accounts. null jika tidak ditemukan (BLIPS_ONLY dengan kode asing).
+          example: "Aset OCI"
+        blipsAmountIdr:
+          type: number
+          format: double
+          description: "Net amount (debit - kredit) di BLIPS untuk akun ini. NUMERIC(20,4)."
+          example: 1000000.0000
+        glHostAmountIdr:
+          type: number
+          format: double
+          description: "Net amount di GL Host untuk akun ini. 0.0000 jika BLIPS_ONLY."
+          example: 0.0000
+        deltaIdr:
+          type: number
+          format: double
+          description: "blipsAmountIdr - glHostAmountIdr. NUMERIC(20,4)."
+          example: 1000000.0000
+        mismatchType:
+          type: string
+          enum: [BLIPS_ONLY, GL_ONLY, AMOUNT_DIFF]
+          description: |
+            BLIPS_ONLY: akun ada di BLIPS, tidak ada di GL Host.
+            GL_ONLY: akun ada di GL Host, tidak ada di BLIPS.
+            AMOUNT_DIFF: keduanya ada tapi jumlah berbeda > tolerance.
+        jurnalHeaderIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: UUID jrnl.header.id untuk akun ini pada tanggal tersebut (untuk drill-down).
+
+    GlReconciliationSummaryItem:
+      type: object
+      required: [reportId, tanggalRekonsiliasi, status, totalMismatchCount, generatedAt]
+      properties:
+        reportId:
+          type: string
+          format: uuid
+        tanggalRekonsiliasi:
+          type: string
+          format: date
+        status:
+          type: string
+          enum: [PENDING, RUNNING, COMPLETED, COMPLETED_WITH_MISMATCH, FAILED]
+        totalAkunChecked:
+          type: integer
+        totalMismatchCount:
+          type: integer
+        totalMismatchAmountIdr:
+          type: number
+          format: double
+          nullable: true
+        deltaIdr:
+          type: number
+          format: double
+          nullable: true
+        generatedAt:
+          type: string
+          format: date-time
+          nullable: true
+        jobId:
+          type: string
+          nullable: true
+
+    # ---- GL Delivery DLQ (S5) ----------------------------------------------
+    GlDeliveryDlqListItem:
+      type: object
+      required:
+        - dlqEntryId
+        - jurnalHeaderId
+        - noJurnal
+        - glHostStatus
+        - failureCategory
+        - errorCode
+        - retryCount
+        - canReplay
+        - canDiscard
+      properties:
+        dlqEntryId:
+          type: string
+          format: uuid
+          description: UUID sys.dlq_gl_delivery.id
+        jurnalHeaderId:
+          type: string
+          format: uuid
+        noJurnal:
+          type: string
+          example: "JRN-2026-000077"
+        eventCode:
+          type: string
+          example: "PENEMPATAN"
+        tanggalPosting:
+          type: string
+          format: date
+          example: "2026-06-15"
+        glHostStatus:
+          $ref: "#/components/schemas/GlHostStatus"
+        failureCategory:
+          type: string
+          enum: [DOMAIN, INFRA]
+          description: "DOMAIN = 4xx. INFRA = 5xx/timeout."
+        errorCode:
+          type: string
+          description: Error code dari BLIPS error catalog
+          example: "GL_DELIVERY_HOST_4XX"
+        errorMessage:
+          type: string
+          nullable: true
+          example: "INVALID_ACCOUNT_CODE — Account 1110-DEP not found in GL chart"
+        retryCount:
+          type: integer
+          minimum: 0
+          description: Total auto-retry count
+        lastRetryAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        canReplay:
+          type: boolean
+          description: "true jika actor memiliki permission jurnal.gl_delivery.replay DAN status = FAILED"
+        canDiscard:
+          type: boolean
+          description: "true jika actor memiliki permission jurnal.gl_delivery.discard DAN status = FAILED"
+
+    GlDeliveryDlqDetail:
+      allOf:
+        - $ref: "#/components/schemas/GlDeliveryDlqListItem"
+        - type: object
+          properties:
+            payloadSnapshotJsonb:
+              type: object
+              nullable: true
+              description: |
+                Payload yang dikirim ke GL Host (tanpa PII). Tersedia untuk semua
+                role dengan jurnal.gl_delivery.read.
+              additionalProperties: true
+            glResponsePayloadJsonb:
+              type: object
+              nullable: true
+              description: |
+                Raw response dari GL Host. Hanya ROLE-IT-ADMIN (jurnal.gl_delivery.read_raw).
+                null untuk role lain.
+              additionalProperties: true
+            errorHistory:
+              type: array
+              items:
+                $ref: "#/components/schemas/DlqErrorHistoryItem"
+              description: Riwayat semua failure event dari aud.audit_log
+            manualRetryHistory:
+              type: array
+              items:
+                $ref: "#/components/schemas/ManualRetryHistoryItem"
+              description: Riwayat manual retry dari jrnl.gl_status fields
+            discardInfo:
+              $ref: "#/components/schemas/DlqDiscardInfo"
+              nullable: true
+              description: Informasi discard. null jika belum di-discard.
+
+    DlqErrorHistoryItem:
+      type: object
+      properties:
+        eventTime:
+          type: string
+          format: date-time
+        action:
+          type: string
+          enum: [GL_DELIVERY.FAILED, GL_DELIVERY.RETRY]
+        attempt:
+          type: integer
+        errorCode:
+          type: string
+        errorMessage:
+          type: string
+
+    DlqDiscardInfo:
+      type: object
+      properties:
+        discardedBy:
+          type: string
+          format: uuid
+        discardedAt:
+          type: string
+          format: date-time
+        discardReason:
+          type: string
+          description: Alasan discard (≥ 30 chars)
+
+    # ---- DLQ Action Request & Responses ------------------------------------
+    DlqActionRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 30
+          maxLength: 1000
+          description: |
+            Alasan tindakan DLQ (replay atau discard). Wajib minimal 30 karakter.
+            Disimpan di aud.audit_log.after_jsonb sebagai evidence audit.
+            Tidak boleh mengandung credential/secret (server-side sanitization).
+          example: "GL Host sudah pulih setelah maintenance window 2026-06-14 22:00-02:00 WIB. Replay delivery."
+
+    DlqReplayResponse:
+      type: object
+      required: [jobId, statusUrl, dlqEntryId, jurnalHeaderId, noJurnal, previousStatus, newStatus]
+      properties:
+        jobId:
+          type: string
+          example: "job_GL_RETRY_DLQ_002"
+        statusUrl:
+          type: string
+          example: "/api/v1/jobs/job_GL_RETRY_DLQ_002"
+        dlqEntryId:
+          type: string
+          format: uuid
+        jurnalHeaderId:
+          type: string
+          format: uuid
+        noJurnal:
+          type: string
+          example: "JRN-2026-000088"
+        previousStatus:
+          $ref: "#/components/schemas/GlHostStatus"
+        newStatus:
+          $ref: "#/components/schemas/GlHostStatus"
+
+    DlqDiscardResponse:
+      type: object
+      required: [dlqEntryId, jurnalHeaderId, noJurnal, previousStatus, newStatus, discardedAt, discardedBy]
+      properties:
+        dlqEntryId:
+          type: string
+          format: uuid
+        jurnalHeaderId:
+          type: string
+          format: uuid
+        noJurnal:
+          type: string
+          example: "JRN-2026-000077"
+        previousStatus:
+          $ref: "#/components/schemas/GlHostStatus"
+        newStatus:
+          $ref: "#/components/schemas/GlHostStatus"
+        discardedAt:
+          type: string
+          format: date-time
+        discardedBy:
+          type: string
+          format: uuid
