@@ -65,6 +65,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/app-b/penempatan"
 	jurnal "blips-ifrs9.tugu-re.com/internal/app-d/jurnal"
 	"blips-ifrs9.tugu-re.com/internal/jrnl/gldelivery"
+	"blips-ifrs9.tugu-re.com/internal/periode/closeflow"
 )
 
 // version adalah versi service yang dilaporkan probe liveness.
@@ -472,6 +473,45 @@ func main() {
 	periodeBukuSvc := periodebuku.NewService(periodeBukuRepo, auditWriter, logger)
 	periodeBukuHandler := periodebuku.NewHandler(periodeBukuSvc, wfHandler)
 	periodebuku.RegisterRoutes(v1, periodeBukuHandler)
+
+	// -----------------------------------------------------------------------
+	// P5-M4: Periode Buku Close Workflow (APP-D-CLOSE-001..007)
+	// Routes (all under /api/v1/periode-buku/:id/):
+	//   POST   /soft-close-request          — ROLE-AKUN-CTL submit soft-close (M4-001)
+	//   POST   /soft-close-approve          — ROLE-CFO approve soft-close (M4-002)
+	//   POST   /hard-close-request          — ROLE-CFO request hard-close (M4-003)
+	//   POST   /hard-close-approve          — ROLE-CFO approve (step-up MFA) (M4-004)
+	//   POST   /hard-close-reject           — ROLE-CFO reject hard-close (M4-005)
+	//   POST   /reopen-request              — ROLE-CFO request reopen (M4-006)
+	//   POST   /reopen-approve              — ROLE-CFO approve reopen (M4-006)
+	//   GET    /checklist                   — closing checklist status (M4-007)
+	//   GET    /reports/status-periode      — list all periods status (M4-007)
+	//
+	// State machine: OPEN → SOFT_CLOSED → HARD_CLOSE_PENDING → CLOSED
+	// Reopen paths: SOFT_CLOSED → OPEN (grace window), CLOSED → SOFT_CLOSED (grace window + step-up).
+	// DEC-017 SoD: approver ≠ requester. DEC-027 step-up MFA for hard-close-approve + CLOSED reopen.
+	// DEC-018 audit in-tx. DEC-021 Idempotency-Key wajib.
+	// PeriodeLockMiddleware: blocks all mutations on SOFT_CLOSED/HARD_CLOSE_PENDING/CLOSED routes.
+	// Asynq: ApproveHardClose enqueues "reporting:mv_refresh" task (non-fatal if Redis unavailable).
+	// -----------------------------------------------------------------------
+	var closeflowEnqueuer closeflow.AsynqEnqueuer
+	if cfg.RedisURL != "" {
+		closeflowEnqueuer = asynq.NewClient(asynq.RedisClientOpt{Addr: cfg.RedisURL})
+	}
+	closeflowRepo := closeflow.NewRepo(db)
+	closeflowChecklist := closeflow.NewChecklistService(db)
+	closeflowSvc := closeflow.NewService(
+		closeflowRepo,
+		closeflowChecklist,
+		auditWriter,
+		closeflowEnqueuer, // nil when Redis not set → MV refresh skipped (non-fatal)
+		closeflow.DefaultConfig(),
+		logger,
+	)
+	closeflowHandler := closeflow.NewHandler(closeflowSvc)
+	closeflowLockMW := closeflow.NewPeriodeLockMiddleware(closeflowRepo, closeflow.DefaultConfig())
+	closeflow.RegisterRoutes(router, closeflowHandler, closeflowLockMW)
+	closeflow.RegisterLockMiddlewareRoutes(v1, closeflowLockMW)
 
 	// -----------------------------------------------------------------------
 	// Master Data — Portofolio (APP-A-MSTR-010)

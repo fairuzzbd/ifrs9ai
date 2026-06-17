@@ -233,6 +233,16 @@ const (
 	CodeGLReconciliationHostFailed       Code = "GL_RECONCILIATION_HOST_FAILED"         // 500 — GL Host unreachable during recon
 	CodeGLStatusTerminalImmutable        Code = "GL_STATUS_TERMINAL_IMMUTABLE"          // 423 — DELIVERED/DEAD_LETTER is immutable
 
+	// P5-M4 Periode Buku Close Workflow codes (APP-D-CLOSE-001..007).
+	// State machine: docs/state-machines/p5-m4-periode-close.md §6.
+	CodeClosingChecklistFailed Code = "CLOSING_CHECKLIST_FAILED"  // 422 — pre-condition failed
+	CodeClosingChecklistStale  Code = "CLOSING_CHECKLIST_STALE"   // 422 — stale + re-run needed
+	CodePeriodeSoftClosed      Code = "PERIODE_SOFT_CLOSED"       // 423 — mutations blocked (SOFT_CLOSED)
+	CodeMFAStepUpRequired      Code = "MFA_STEP_UP_REQUIRED"      // 401 — step-up token missing
+	CodeMFAStepUpExpired       Code = "MFA_STEP_UP_EXPIRED"       // 401 — step-up token > 5 min
+	CodePeriodeGraceExpired    Code = "PERIODE_GRACE_EXPIRED"     // 423 — grace window expired
+	CodeSoftClosePendingExists Code = "SOFT_CLOSE_PENDING_EXISTS" // 409 — duplicate pending request
+
 	// P5-M2 Jurnal Engine codes (APP-D-JRNL-001..016).
 	// State machine: docs/state-machines/p5-m2-jurnal-engine.md §6.
 	CodeJurnalEventNotMapped             Code = "JURNAL_EVENT_NOT_MAPPED"               // 422 — no APPROVED_ACTIVE mapping for eventCode
@@ -408,6 +418,16 @@ func (c Code) HTTPStatus() int {
 		return http.StatusUnprocessableEntity
 	case CodeGLDeliveryReasonTooShort:
 		return http.StatusBadRequest
+
+	// P5-M4 Periode Close Workflow codes.
+	case CodeMFAStepUpRequired, CodeMFAStepUpExpired:
+		return http.StatusUnauthorized // 401
+	case CodeClosingChecklistFailed, CodeClosingChecklistStale:
+		return http.StatusUnprocessableEntity // 422
+	case CodePeriodeSoftClosed, CodePeriodeGraceExpired:
+		return 423 // Locked
+	case CodeSoftClosePendingExists:
+		return http.StatusConflict // 409
 
 	// P5-M2 Jurnal Engine codes.
 	case CodeJurnalInstrumenNotFound, CodeJurnalHeaderNotFound, CodeJurnalDlqNotFound:
