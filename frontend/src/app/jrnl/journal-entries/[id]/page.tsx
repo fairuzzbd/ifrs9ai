@@ -16,6 +16,7 @@ import { JurnalLinesTable } from "@/components/blips/jurnal/JurnalLinesTable";
 import { GlDeliveryStatusPanel } from "@/components/blips/gl-delivery/GlDeliveryStatusPanel";
 import { jurnalQueryApi } from "@/lib/api/jurnal.api";
 import type { JurnalLine } from "@/lib/schemas/jurnal.schema";
+import { PeriodeLockBanner } from "@/components/blips/periode-close/PeriodeLockBanner";
 
 const IDR = new Intl.NumberFormat("id-ID", {
   style: "currency",
@@ -76,6 +77,10 @@ export default function JurnalEntryDetailPage() {
 
   return (
     <div className="mx-auto max-w-4xl px-6 py-6 space-y-6">
+      {/* Periode lock banner — shows when associated periode is SOFT_CLOSED/HARD_CLOSE_PENDING/CLOSED */}
+      {jurnal.periodeId && (
+        <PeriodeLockBanner periodeId={jurnal.periodeId} />
+      )}
       {/* Top nav */}
       <div className="flex items-center gap-4">
         <Button

@@ -83,6 +83,22 @@ const ERROR_MESSAGE_MAP: Record<string, string> = {
   JURNAL_MAPPING_WORKFLOW_GATE:
     "Mapping jurnal belum disetujui atau tidak aktif. Tidak bisa digunakan untuk posting.",
 
+  // --- Periode Close (P5-M4) ---
+  CLOSING_CHECKLIST_FAILED:
+    "Closing checklist belum semua lulus. Selesaikan item yang gagal sebelum melanjutkan.",
+  CLOSING_CHECKLIST_STALE:
+    "Data checklist sudah lebih dari 24 jam. Sistem akan mengevaluasi ulang secara otomatis.",
+  PERIODE_SOFT_CLOSED:
+    "Periode buku sudah soft-closed. Mutasi transaksi dan jurnal tidak diizinkan. GL delivery retry masih diperbolehkan.",
+  MFA_STEP_UP_REQUIRED:
+    "Aksi ini memerlukan verifikasi step-up MFA. Silakan verifikasi TOTP terlebih dahulu.",
+  MFA_STEP_UP_EXPIRED:
+    "Token step-up MFA sudah expired (> 5 menit). Harap ulangi verifikasi dari awal.",
+  PERIODE_GRACE_EXPIRED:
+    "Grace window 48 jam sudah berakhir. Periode yang sudah CLOSED tidak dapat di-reopen lagi.",
+  SOFT_CLOSE_PENDING_EXISTS:
+    "Sudah ada request soft-close yang menunggu approval. Tidak bisa mengajukan request baru.",
+
   // --- GL Delivery (P5-M3) ---
   GL_DELIVERY_JURNAL_NOT_FOUND:
     "Jurnal header tidak ditemukan.",
