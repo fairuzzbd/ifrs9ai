@@ -82,6 +82,32 @@ const ERROR_MESSAGE_MAP: Record<string, string> = {
     "Tidak bisa replay jurnal ke periode yang sudah hard-closed.",
   JURNAL_MAPPING_WORKFLOW_GATE:
     "Mapping jurnal belum disetujui atau tidak aktif. Tidak bisa digunakan untuk posting.",
+
+  // --- GL Delivery (P5-M3) ---
+  GL_DELIVERY_JURNAL_NOT_FOUND:
+    "Jurnal header tidak ditemukan.",
+  GL_DELIVERY_REASON_TOO_SHORT:
+    "Alasan retry / discard wajib minimal 30 karakter.",
+  GL_DELIVERY_INVALID_TRANSITION:
+    "Jurnal memiliki status DEAD_LETTER dan tidak dapat di-retry. Hubungi ROLE-IT-ADMIN.",
+  GL_DELIVERY_MAX_ATTEMPTS_EXCEEDED:
+    "Batas maksimum percobaan delivery tercapai (5/5). Hubungi ROLE-IT-ADMIN untuk tindak lanjut.",
+  GL_DELIVERY_PERMISSION_DENIED:
+    "Anda tidak memiliki izin untuk tindakan ini. Hanya ROLE-IT-ADMIN yang dapat mendiscard entry GL Delivery DLQ.",
+  GL_DELIVERY_HOST_4XX:
+    "GL Host menolak payload (domain error). Perbaiki penyebab kegagalan sebelum retry.",
+  GL_DELIVERY_HOST_UNREACHABLE:
+    "GL Host tidak dapat dijangkau (infra error). Coba retry setelah GL Host pulih.",
+  GL_DLQ_REPLAY_INVALID_STATE:
+    "DLQ entry tidak bisa di-replay dari status saat ini. Pastikan entry berstatus FAILED.",
+  GL_RECONCILIATION_REPORT_NOT_FOUND:
+    "Belum ada laporan rekonsiliasi untuk tanggal ini. Jalankan rekonsiliasi manual.",
+  GL_RECONCILIATION_DATE_INVALID:
+    "Tanggal tidak valid atau merupakan hari libur. Rekonsiliasi hanya untuk hari kerja.",
+  GL_RECONCILIATION_IN_PROGRESS:
+    "Rekonsiliasi untuk tanggal ini sedang berjalan. Tunggu proses selesai sebelum menjalankan ulang.",
+  GL_RECONCILIATION_HOST_FETCH_FAILED:
+    "Gagal mengambil data dari GL Host saat rekonsiliasi. Periksa koneksi GL Host.",
 };
 
 function formatError(err: ApiError | { code: string; message: string; traceId: string }): string {

@@ -13,6 +13,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { JurnalLinesTable } from "@/components/blips/jurnal/JurnalLinesTable";
+import { GlDeliveryStatusPanel } from "@/components/blips/gl-delivery/GlDeliveryStatusPanel";
 import { jurnalQueryApi } from "@/lib/api/jurnal.api";
 import type { JurnalLine } from "@/lib/schemas/jurnal.schema";
 
@@ -166,6 +167,12 @@ export default function JurnalEntryDetailPage() {
           <JurnalLinesTable lines={lines} showSubtotal showBalanceBadge />
         </CardContent>
       </Card>
+
+      {/* GL Delivery Status — P5-M3 (S2-AC1/2/3) */}
+      <GlDeliveryStatusPanel
+        jurnalHeaderId={id}
+        jurnalNumber={jurnal.noJurnal}
+      />
 
       {/* Audit trail */}
       <div className="text-xs text-muted-foreground flex flex-wrap gap-4">
