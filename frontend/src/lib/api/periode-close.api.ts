@@ -107,6 +107,10 @@ async function apiPostWithStepUp<T>(
     headers["X-Step-Up-Token"] = stepUpToken;
   }
 
+  // TODO(P5-followup-jwt-cookie): see compliance review of M4 — F-09.
+  // JWT is currently read from localStorage which is vulnerable to XSS.
+  // Migrate to HttpOnly cookie storage (set by BFF/server-action) once the
+  // auth architecture decision is finalized. Track: security-engineer follow-up.
   const token =
     typeof window !== "undefined" ? localStorage.getItem("blips_token") : null;
   if (token) {

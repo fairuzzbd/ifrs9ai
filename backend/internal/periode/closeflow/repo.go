@@ -619,6 +619,36 @@ func (r *Repo) ListStatusPeriode(ctx context.Context, q listquery.Query, cursor 
 	return items, pagination, sortApplied, appliedFilters, nil
 }
 
+// ─── sys.job ─────────────────────────────────────────────────────────────────
+
+// JobRow is a minimal record for sys.job (ux-patterns.md §3.3, migration 000004).
+// Only the fields needed for MV refresh job durability are populated here.
+type JobRow struct {
+	ID          string
+	Type        string
+	Status      string
+	PayloadJSON []byte
+	CreatedBy   uuid.UUID
+}
+
+// InsertJobRow inserts a sys.job row within an existing transaction.
+// C4: called inside the hard-close approve tx so the job row is durable
+// even if Asynq enqueue fails after commit.
+// Uses the system tenant_id and sets updated_by = created_by.
+func (r *Repo) InsertJobRow(ctx context.Context, tx *sql.Tx, job JobRow) error {
+	const q = `
+		INSERT INTO sys.job
+			(id, type, status, payload_jsonb, created_by, updated_by, tenant_id)
+		VALUES
+			($1, $2, $3, $4, $5, $5, $6)
+		ON CONFLICT (id) DO NOTHING
+	`
+	_, err := tx.ExecContext(ctx, q,
+		job.ID, job.Type, job.Status, job.PayloadJSON, job.CreatedBy, tenantIDFromCtx(ctx),
+	)
+	return wrapExec(err, "InsertJobRow")
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 // tenantIDFromCtx extracts tenant_id from context (defaults to TUGURE in Phase 1).

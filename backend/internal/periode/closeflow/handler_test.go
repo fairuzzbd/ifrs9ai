@@ -26,6 +26,7 @@ func init() {
 }
 
 // setupRouter creates a test router with JWT claims pre-set.
+// F-02: RegisterRoutes now accepts *gin.RouterGroup; we create the v1 group here.
 func setupRouter(t *testing.T, h *closeflow.Handler, claims *auth.Claims) *gin.Engine {
 	t.Helper()
 	r := gin.New()
@@ -39,7 +40,8 @@ func setupRouter(t *testing.T, h *closeflow.Handler, claims *auth.Claims) *gin.E
 		c.Next()
 	})
 
-	closeflow.RegisterRoutes(r, h, nil)
+	v1 := r.Group("/api/v1")
+	closeflow.RegisterRoutes(v1, h, nil)
 	return r
 }
 

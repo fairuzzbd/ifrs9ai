@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"time"
 
 	"github.com/google/uuid"
@@ -33,6 +34,7 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/audit"
 	domainerrors "blips-ifrs9.tugu-re.com/internal/common/errors"
 	"blips-ifrs9.tugu-re.com/internal/common/listquery"
+	"blips-ifrs9.tugu-re.com/internal/common/middleware"
 )
 
 // AsynqEnqueuer is the minimal interface for dispatching Asynq tasks.
@@ -362,10 +364,54 @@ func (s *Service) RequestHardClose(
 		return nil, ErrInvalidTransition(transErr.Error())
 	}
 
-	// Fresh checklist evaluation required before hard-close request.
+	// F-04/C1: Evaluate checklist BEFORE beginning any tx.
+	// If checklist fails, return 422 immediately — mst.periode_buku.status_periode
+	// MUST NOT be mutated to HARD_CLOSE_PENDING on a failed checklist.
 	evalResult, err := s.checklist.Evaluate(ctx, periodeID)
 	if err != nil {
 		return nil, fmt.Errorf("closeflow.RequestHardClose: checklist eval: %w", err)
+	}
+
+	if !evalResult.AllPassed {
+		// Persist REJECTED snapshot in a best-effort separate tx (for audit trail)
+		// WITHOUT touching status_periode.
+		go func() {
+			bgCtx := context.Background()
+			bgTx, txErr := s.repo.db.BeginTx(bgCtx, nil)
+			if txErr != nil {
+				s.logger.Warn("closeflow.RequestHardClose: rejected snapshot begin tx", "error", txErr)
+				return
+			}
+			defer func() { _ = bgTx.Rollback() }() //nolint:errcheck
+			rejSnap := ChecklistSnapshot{
+				ID:               uuid.New(),
+				PeriodeBukuID:    periodeID,
+				Transition:       SnapshotTransitionHardCloseRequest,
+				TriggerAction:    SnapshotTransitionHardCloseRequest,
+				EvaluatedAt:      evalResult.EvaluatedAt,
+				EvaluatedBy:      actor.UserID,
+				ActorRole:        actor.Role,
+				AllPassed:        false,
+				TransitionStatus: SnapshotTransitionStatusRejected,
+				ChecklistItems:   evalResult.Items,
+				CreatedAt:        time.Now(),
+				CreatedBy:        actor.UserID,
+				TenantID:         periode.TenantID,
+			}
+			if insErr := s.repo.InsertChecklistSnapshot(bgCtx, bgTx, rejSnap); insErr != nil {
+				s.logger.Warn("closeflow.RequestHardClose: rejected snapshot insert", "error", insErr)
+				return
+			}
+			if commitErr := bgTx.Commit(); commitErr != nil {
+				s.logger.Warn("closeflow.RequestHardClose: rejected snapshot commit", "error", commitErr)
+			}
+		}()
+
+		details := BuildChecklistDetails(evalResult)
+		return nil, ErrChecklistFailed(
+			fmt.Sprintf("%d checklist item(s) tidak lulus. Hard-close request ditolak. Perbaiki semua item sebelum mencoba lagi.", len(details)),
+			details...,
+		)
 	}
 
 	tx, err := s.repo.db.BeginTx(ctx, nil)
@@ -386,11 +432,6 @@ func (s *Service) RequestHardClose(
 	snapshotID := uuid.New()
 	now := time.Now()
 
-	transStatus := SnapshotTransitionStatusApproved
-	if !evalResult.AllPassed {
-		transStatus = SnapshotTransitionStatusRejected
-	}
-
 	snap := ChecklistSnapshot{
 		ID:               snapshotID,
 		PeriodeBukuID:    periodeID,
@@ -399,8 +440,8 @@ func (s *Service) RequestHardClose(
 		EvaluatedAt:      evalResult.EvaluatedAt,
 		EvaluatedBy:      actor.UserID,
 		ActorRole:        actor.Role,
-		AllPassed:        evalResult.AllPassed,
-		TransitionStatus: transStatus,
+		AllPassed:        true,
+		TransitionStatus: SnapshotTransitionStatusApproved,
 		ChecklistItems:   evalResult.Items,
 		CreatedAt:        now,
 		CreatedBy:        actor.UserID,
@@ -420,7 +461,7 @@ func (s *Service) RequestHardClose(
 		Before:      map[string]any{"status_periode": string(PeriodeStatusSoftClosed)},
 		After: map[string]any{
 			"status_periode":        string(PeriodeStatusHardClosePending),
-			"checklist_all_passed":  evalResult.AllPassed,
+			"checklist_all_passed":  true,
 			"checklist_snapshot_id": snapshotID,
 		},
 	})); err != nil {
@@ -429,29 +470,6 @@ func (s *Service) RequestHardClose(
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("closeflow.RequestHardClose: commit: %w", err)
-	}
-
-	// If checklist failed: still return 422 (transition rolled back above is incorrect
-	// — we DO commit the HARD_CLOSE_PENDING state but also record the failed snapshot;
-	// the spec says hard-close-request must pass the checklist).
-	// Per state machine: requestor must pass checklist. If not, revert via error.
-	// NOTE: Since we already committed HARD_CLOSE_PENDING, we need to reject at request time.
-	// Re-design: check checklist BEFORE beginning tx and reject early.
-	//
-	// Per spec S2-AC3: checklist must be PASSED for hard-close-request.
-	// Our tx above already committed the PENDING state — this is a problem.
-	// Fix: we return the error post-commit, and the caller must handle the HARD_CLOSE_PENDING
-	// state by having the CFO reject it. However, the canonical approach is to guard BEFORE tx.
-	//
-	// Since the snapshot is already persisted and the state is HARD_CLOSE_PENDING, and the
-	// spec allows the CFO to reject, return the failure info with the snapshot ID so the
-	// requester can ask CFO to reject and fix the checklist items.
-	if !evalResult.AllPassed {
-		details := BuildChecklistDetails(evalResult)
-		return nil, ErrChecklistFailed(
-			fmt.Sprintf("%d checklist item(s) tidak lulus. Hard-close request dicatat (snapshot %s) namun CFO perlu me-reject. Perbaiki item yang gagal dan coba lagi.", len(details), snapshotID),
-			details...,
-		)
 	}
 
 	return &HardCloseRequestResponse{
@@ -539,9 +557,10 @@ func (s *Service) ApproveHardClose(
 		TransitionStatus: SnapshotTransitionStatusApproved,
 		ChecklistItems:   []ChecklistItem{},
 		OutcomeJSON: map[string]any{
-			"new_status":        string(PeriodeStatusClosed),
-			"grace_expires_at":  graceExpiry.Format(time.RFC3339),
-			"step_up_token_ref": stepUpTokenRef,
+			// F-07: step_up_token_ref removed from outcome_jsonb.
+			// The canonical reference is mst.periode_buku.step_up_token_ref only.
+			"new_status":       string(PeriodeStatusClosed),
+			"grace_expires_at": graceExpiry.Format(time.RFC3339),
 		},
 		CreatedAt: now,
 		CreatedBy: actor.UserID,
@@ -571,28 +590,56 @@ func (s *Service) ApproveHardClose(
 		return nil, fmt.Errorf("closeflow.ApproveHardClose: audit: %w", err)
 	}
 
+	// C4: Insert a durable sys.job row WITHIN the tx so that if Asynq enqueue
+	// fails after commit, the reconciliation worker can pick it up from sys.job.
+	mvJobID := uuid.New().String()
+	mvJobPayload, _ := json.Marshal(map[string]string{ //nolint:errcheck
+		"periode_id": periodeID.String(),
+		"trigger":    "HARD_CLOSE_APPROVE",
+	})
+	if err := s.repo.InsertJobRow(ctx, tx, JobRow{
+		ID:          mvJobID,
+		Type:        taskReportingMVRefresh,
+		Status:      "queued",
+		PayloadJSON: mvJobPayload,
+		CreatedBy:   actor.UserID,
+	}); err != nil {
+		// Non-fatal: log + continue. The tx commits the hard-close state which is primary.
+		s.logger.Warn("closeflow.ApproveHardClose: insert sys.job row failed (non-fatal)",
+			"periodeID", periodeID, "error", err)
+		mvJobID = "" // reset so we don't expose a ghost job ID
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("closeflow.ApproveHardClose: commit: %w", err)
 	}
 
 	// Enqueue MV refresh Asynq job AFTER commit (async, does not block response).
-	var mvJobID *string
+	// C4: The durable sys.job row above ensures a reconciliation worker can pick up
+	// any job that failed to enqueue here.
+	var mvJobIDPtr *string
 	var mvStatusURL *string
-	if s.enqueuer != nil {
+	if s.enqueuer != nil && mvJobID != "" {
 		payload, _ := json.Marshal(map[string]string{ //nolint:errcheck
 			"periode_id": periodeID.String(),
 			"trigger":    "HARD_CLOSE_APPROVE",
+			"job_id":     mvJobID, // Asynq task ID = sys.job.id for dedup
 		})
-		task := asynq.NewTask(taskReportingMVRefresh, payload)
-		if info, enqErr := s.enqueuer.EnqueueContext(ctx, task); enqErr != nil {
-			s.logger.Warn("closeflow.ApproveHardClose: mv_refresh enqueue failed (non-fatal)",
-				"periodeID", periodeID, "error", enqErr)
+		task := asynq.NewTask(taskReportingMVRefresh, payload,
+			asynq.TaskID(mvJobID)) // unique task ID = sys.job.id
+		if _, enqErr := s.enqueuer.EnqueueContext(ctx, task); enqErr != nil {
+			s.logger.Warn("closeflow.ApproveHardClose: mv_refresh enqueue failed — sys.job row persisted for reconciliation",
+				"periodeID", periodeID, "jobID", mvJobID, "error", enqErr)
 		} else {
-			id := info.ID
-			url := fmt.Sprintf("/api/v1/jobs/%s", id)
-			mvJobID = &id
+			url := fmt.Sprintf("/api/v1/jobs/%s", mvJobID)
+			mvJobIDPtr = &mvJobID
 			mvStatusURL = &url
 		}
+	} else if mvJobID != "" {
+		// enqueuer nil (dev mode) but job row was inserted — expose ID anyway.
+		url := fmt.Sprintf("/api/v1/jobs/%s", mvJobID)
+		mvJobIDPtr = &mvJobID
+		mvStatusURL = &url
 	}
 
 	return &HardCloseApproveResponse{
@@ -603,7 +650,7 @@ func (s *Service) ApproveHardClose(
 		GraceExpiresAt:      graceExpiry,
 		ApprovedBy:          actor.UserID,
 		ChecklistSnapshotID: snapshotID,
-		MvRefreshJobID:      mvJobID,
+		MvRefreshJobID:      mvJobIDPtr,
 		MvRefreshStatusURL:  mvStatusURL,
 		Message:             "Periode berhasil hard-closed. Kurs dikunci. MV refresh dijadwalkan.",
 	}, nil
@@ -635,6 +682,21 @@ func (s *Service) RejectHardClose(
 
 	if ok, transErr := CanTransition(periode.StatusPeriode, "hard-close-reject", false, false); !ok {
 		return nil, ErrInvalidTransition(transErr.Error())
+	}
+
+	// C9: SoD — hard-close reject actor must NOT be the same user who requested it.
+	// In normal role usage ROLE-AKUN-CTL requests and ROLE-CFO rejects, but defense
+	// in depth enforces this at user level too.
+	if periode.HardCloseRequestedBy != nil && *periode.HardCloseRequestedBy == actor.UserID {
+		_ = s.audit.Write(ctx, audit.EventFromContext(ctx, audit.Event{ //nolint:errcheck
+			Action:      "PERIODE.HARD_CLOSE_REJECT_SOD_VIOLATION",
+			EntityType:  "mst.periode_buku",
+			EntityID:    periodeID,
+			ActorUserID: actor.UserID.String(),
+			ActorRole:   actor.Role,
+			After:       map[string]any{"violation": "hard-close reject actor == requester"},
+		}))
+		return nil, ErrSoDViolation("hard-close reject actor tidak boleh sama dengan requester (SoD DEC-017)")
 	}
 
 	if err := s.repo.SetHardCloseRejected(ctx, tx, periodeID, actor.UserID); err != nil {
@@ -976,11 +1038,31 @@ func (s *Service) GetChecklist(ctx context.Context, periodeID uuid.UUID, actor A
 	}
 
 	// Record MANUAL_CHECK snapshot (best-effort; use a new tx separate from response).
+	// C8: capture trace + actor from request context BEFORE spawning goroutine.
+	// C8: wrap goroutine in recover to prevent silent crash; write audit in same tx.
+	bgTraceID := traceIDFromCtx(ctx)
+	bgActorID := actor.UserID
+	bgActorRole := actor.Role
+	bgPeriodeID := periodeID
+	bgTenantID := periode.TenantID
+	bgEvalResult := evalResult
+
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Error("closeflow.GetChecklist: manual check goroutine panic",
+					"recover", r,
+					"stack", string(debug.Stack()),
+					"traceId", bgTraceID,
+					"actorUserId", bgActorID,
+				)
+			}
+		}()
+
 		bgCtx := context.Background()
 		bgTx, err := s.repo.db.BeginTx(bgCtx, nil)
 		if err != nil {
-			s.logger.Warn("closeflow.GetChecklist: manual check snapshot begin tx", "error", err)
+			s.logger.Warn("closeflow.GetChecklist: manual check snapshot begin tx", "error", err, "traceId", bgTraceID)
 			return
 		}
 		defer func() { _ = bgTx.Rollback() }() //nolint:errcheck
@@ -989,25 +1071,43 @@ func (s *Service) GetChecklist(ctx context.Context, periodeID uuid.UUID, actor A
 		now := time.Now()
 		snap := ChecklistSnapshot{
 			ID:               snapID,
-			PeriodeBukuID:    periodeID,
+			PeriodeBukuID:    bgPeriodeID,
 			Transition:       SnapshotTransitionManualCheck,
 			TriggerAction:    SnapshotTransitionManualCheck,
-			EvaluatedAt:      evalResult.EvaluatedAt,
-			EvaluatedBy:      actor.UserID,
-			ActorRole:        actor.Role,
-			AllPassed:        evalResult.AllPassed,
+			EvaluatedAt:      bgEvalResult.EvaluatedAt,
+			EvaluatedBy:      bgActorID,
+			ActorRole:        bgActorRole,
+			AllPassed:        bgEvalResult.AllPassed,
 			TransitionStatus: SnapshotTransitionStatusApproved,
-			ChecklistItems:   evalResult.Items,
+			ChecklistItems:   bgEvalResult.Items,
 			CreatedAt:        now,
-			CreatedBy:        actor.UserID,
-			TenantID:         periode.TenantID,
+			CreatedBy:        bgActorID,
+			TenantID:         bgTenantID,
 		}
 		if err := s.repo.InsertChecklistSnapshot(bgCtx, bgTx, snap); err != nil {
-			s.logger.Warn("closeflow.GetChecklist: manual check snapshot insert", "error", err)
+			s.logger.Warn("closeflow.GetChecklist: manual check snapshot insert", "error", err, "traceId", bgTraceID)
 			return
 		}
+
+		// C8: write audit log in the same tx.
+		if err := s.audit.WithTx(bgTx).Write(bgCtx, audit.Event{
+			Action:      "PERIODE.CHECKLIST.MANUAL_CHECK",
+			EntityType:  "mst.periode_buku",
+			EntityID:    bgPeriodeID,
+			ActorUserID: bgActorID.String(),
+			ActorRole:   bgActorRole,
+			After: map[string]any{
+				"checklist_snapshot_id": snapID,
+				"all_passed":            bgEvalResult.AllPassed,
+				"trace_id":              bgTraceID,
+			},
+		}); err != nil {
+			s.logger.Warn("closeflow.GetChecklist: manual check audit write", "error", err, "traceId", bgTraceID)
+			return
+		}
+
 		if err := bgTx.Commit(); err != nil {
-			s.logger.Warn("closeflow.GetChecklist: manual check snapshot commit", "error", err)
+			s.logger.Warn("closeflow.GetChecklist: manual check snapshot commit", "error", err, "traceId", bgTraceID)
 		}
 	}()
 
@@ -1070,4 +1170,9 @@ func toInterfaceSlice[T any](s []T) []interface{} {
 		out[i] = v
 	}
 	return out
+}
+
+// traceIDFromCtx extracts the trace ID from context using the middleware package helper.
+func traceIDFromCtx(ctx context.Context) string {
+	return middleware.TraceIDFromContext(ctx)
 }

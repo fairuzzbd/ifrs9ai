@@ -90,7 +90,8 @@ const (
 
 // JurnalBalancedThreshold is the maximum allowed ABS(total_debit - total_kredit)
 // per jrnl.header row. Uses decimal to avoid float64 (DEC-016).
-var JurnalBalancedThreshold = decimal.NewFromFloat(0.01)
+// C7: Use RequireFromString instead of NewFromFloat to avoid IEEE 754 imprecision.
+var JurnalBalancedThreshold = decimal.RequireFromString("0.01")
 
 // ─── ChecklistItem ────────────────────────────────────────────────────────────
 

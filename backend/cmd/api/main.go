@@ -510,7 +510,8 @@ func main() {
 	)
 	closeflowHandler := closeflow.NewHandler(closeflowSvc)
 	closeflowLockMW := closeflow.NewPeriodeLockMiddleware(closeflowRepo, closeflow.DefaultConfig())
-	closeflow.RegisterRoutes(router, closeflowHandler, closeflowLockMW)
+	// F-02: pass v1 (not router) so closeflow routes inherit Idempotency + Auth middleware.
+	closeflow.RegisterRoutes(v1, closeflowHandler, closeflowLockMW)
 	closeflow.RegisterLockMiddlewareRoutes(v1, closeflowLockMW)
 
 	// -----------------------------------------------------------------------

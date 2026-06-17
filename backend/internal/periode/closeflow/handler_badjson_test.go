@@ -87,7 +87,9 @@ func TestHardCloseApprove_BadJSON_Returns400(t *testing.T) {
 		bytes.NewReader([]byte(`{invalid json}`)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", uuid.New().String())
-	req.Header.Set("X-Step-Up-Token", "some-valid-step-up-token")
+	// F-01: must be a structurally valid JWT with correct scope; otherwise step-up check
+	// fires BEFORE body parse and we'd get 401 instead of 400.
+	req.Header.Set("X-Step-Up-Token", makeFreshStepUpToken(closeflow.StepUpScopeHardClose))
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 

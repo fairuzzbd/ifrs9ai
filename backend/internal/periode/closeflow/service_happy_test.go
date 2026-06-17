@@ -6,6 +6,9 @@ package closeflow_test
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -17,6 +20,22 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/audit"
 	"blips-ifrs9.tugu-re.com/internal/periode/closeflow"
 )
+
+// makeFreshStepUpToken builds a minimal JWT string with the given scope and a fresh iat.
+// The token is NOT cryptographically signed — it uses "fakesig" as the signature.
+// verifyStepUpScope only checks structure + scope + iat, not the RSA signature,
+// so this is sufficient for unit tests (F-01 spec §5.1).
+func makeFreshStepUpToken(scope string) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
+	payload, _ := json.Marshal(map[string]any{
+		"jti":   fmt.Sprintf("test-jti-%s", scope),
+		"scope": scope,
+		"iat":   time.Now().Unix(),
+		"exp":   time.Now().Add(5 * time.Minute).Unix(),
+		"sub":   "test-user",
+	})
+	return header + "." + base64.RawURLEncoding.EncodeToString(payload) + ".fakesig"
+}
 
 // buildTestSvc creates a Service backed by sqlmock db.
 func buildTestSvc(t *testing.T, db *sql.DB) *closeflow.Service {

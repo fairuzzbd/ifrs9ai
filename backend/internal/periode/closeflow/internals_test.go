@@ -314,3 +314,100 @@ func TestPeriodeLockMiddleware_StaleCache_TriggersRefresh(t *testing.T) {
 	// Give the background goroutine a short window to finish (best-effort).
 	time.Sleep(10 * time.Millisecond)
 }
+
+// ─── RequestHardClose: additional uncovered paths ─────────────────────────────
+
+// TestRequestHardClose_PeriodeNotFound: GetByID returns nil → ErrPeriodeNotFound.
+func TestRequestHardClose_PeriodeNotFound_ReturnsNotFound(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	periodeID := uuid.New()
+	mock.ExpectQuery(`FROM mst.periode_buku`).
+		WillReturnRows(sqlmock.NewRows(periodeRowCols())) // empty → nil
+
+	svc := buildTestSvc(t, db)
+	actor := closeflow.Actor{UserID: uuid.New(), Role: "ROLE-AKUN-CTL"}
+	_, err = svc.RequestHardClose(context.Background(), periodeID, nil, 1, actor)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), periodeID.String())
+}
+
+// TestRequestHardClose_WrongStatus_ReturnsInvalidTransition: OPEN → hard-close-request denied.
+func TestRequestHardClose_WrongStatus_ReturnsInvalidTransition(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	periodeID := uuid.New()
+	mock.ExpectQuery(`FROM mst.periode_buku`).
+		WillReturnRows(periodeRowForStatus(periodeID, "OPEN"))
+
+	svc := buildTestSvc(t, db)
+	actor := closeflow.Actor{UserID: uuid.New(), Role: "ROLE-AKUN-CTL"}
+	_, err = svc.RequestHardClose(context.Background(), periodeID, nil, 1, actor)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SOFT_CLOSED")
+}
+
+// TestRequestHardClose_ChecklistEvalError: DB error in checklist eval propagates.
+func TestRequestHardClose_ChecklistEvalError_ReturnsError(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	periodeID := uuid.New()
+	// GetByID: SOFT_CLOSED
+	mock.ExpectQuery(`FROM mst.periode_buku`).
+		WillReturnRows(periodeRowForStatus(periodeID, "SOFT_CLOSED"))
+	// Checklist: first query returns DB error
+	mock.ExpectQuery(`FROM trx.penempatan`).
+		WillReturnError(sql.ErrConnDone)
+
+	svc := buildTestSvc(t, db)
+	actor := closeflow.Actor{UserID: uuid.New(), Role: "ROLE-AKUN-CTL"}
+	_, err = svc.RequestHardClose(context.Background(), periodeID, nil, 1, actor)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "checklist eval")
+}
+
+// ─── ApproveSoftClose: error paths ───────────────────────────────────────────
+
+// TestApproveSoftClose_PeriodeNotFound: SELECT FOR SHARE returns nil.
+func TestApproveSoftClose_PeriodeNotFound_ReturnsNotFound(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	periodeID := uuid.New()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`FROM mst.periode_buku`).
+		WillReturnRows(sqlmock.NewRows(periodeRowCols()))
+	mock.ExpectRollback()
+
+	svc := buildTestSvc(t, db)
+	actor := closeflow.Actor{UserID: uuid.New(), Role: "ROLE-AKUN-CTL"}
+	_, err = svc.ApproveSoftClose(context.Background(), periodeID, nil, actor)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), periodeID.String())
+}
+
+// TestApproveSoftClose_WrongStatus_InvalidTransition: period OPEN → approve fails.
+func TestApproveSoftClose_WrongStatus_InvalidTransition(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	periodeID := uuid.New()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`FROM mst.periode_buku`).
+		WillReturnRows(periodeRowForStatus(periodeID, "OPEN"))
+	mock.ExpectRollback()
+
+	svc := buildTestSvc(t, db)
+	actor := closeflow.Actor{UserID: uuid.New(), Role: "ROLE-AKUN-CTL"}
+	_, err = svc.ApproveSoftClose(context.Background(), periodeID, nil, actor)
+	require.Error(t, err)
+	// OPEN → soft-close-approve transition is invalid per CanTransition.
+}

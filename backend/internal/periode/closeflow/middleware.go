@@ -121,8 +121,10 @@ func (m *PeriodeLockMiddleware) refreshAllowlistIfStale(ctx context.Context) {
 }
 
 // Handler returns the Gin middleware function.
-// Route groups that use this middleware MUST have a :periode_id parameter OR
-// provide X-Periode-ID header.
+// Route groups that use this middleware MUST have a :periode_id route parameter.
+// F-05: The X-Periode-ID client header fallback has been removed to prevent
+// bypass via a random UUID (which would return nil periode and allow through).
+// Only the server-supplied :periode_id route parameter is honored.
 func (m *PeriodeLockMiddleware) Handler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Refresh allowlist in background if stale.
@@ -135,11 +137,8 @@ func (m *PeriodeLockMiddleware) Handler() gin.HandlerFunc {
 			return
 		}
 
-		// Resolve periode ID from route param or header.
+		// F-05: Only honor route param :periode_id — never the client X-Periode-ID header.
 		periodeIDStr := c.Param("periode_id")
-		if periodeIDStr == "" {
-			periodeIDStr = c.GetHeader("X-Periode-ID")
-		}
 		if periodeIDStr == "" {
 			// No periode context on this route — allow through (e.g. system routes).
 			c.Next()
@@ -183,13 +182,12 @@ func (m *PeriodeLockMiddleware) Handler() gin.HandlerFunc {
 
 		case PeriodeStatusSoftClosed, PeriodeStatusHardClosePending:
 			// SOFT_CLOSED / HARD_CLOSE_PENDING: block unless action is in allowlist.
-			// The X-Close-Workflow-Action header signals allowlisted actions.
-			action := c.GetHeader("X-Close-Workflow-Action")
-			if action == "" {
-				// Check the route's tagged action (set by route handler via context).
-				if v, ok := c.Get("close_workflow_action"); ok {
-					action, _ = v.(string) //nolint:errcheck
-				}
+			// F-06: Only honor the server-set context key "close_workflow_action".
+			// The client X-Close-Workflow-Action header is REMOVED to prevent bypass —
+			// any client could send JURNAL_RETRY_GL_DELIVERY to skip this guard.
+			action := ""
+			if v, ok := c.Get("close_workflow_action"); ok {
+				action, _ = v.(string) //nolint:errcheck
 			}
 
 			if !m.allowlistCache.isAllowed(action) {

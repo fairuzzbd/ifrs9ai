@@ -163,18 +163,14 @@ func (h *Handler) HardCloseApprove(c *gin.Context) {
 	}
 
 	// Step-up MFA validation (DEC-027): required for hard-close-approve.
-	if claims.NeedsStepUp() {
-		response.Error(c, ErrMFAStepUpRequired("hard-close-approve"))
-		return
-	}
-
-	// Parse X-Step-Up-Token header for storage (SHA-256 stored in DB, token itself never logged).
+	// F-01: verify both freshness AND scope. A reopen_closed token must not be
+	// accepted here (and vice versa) — scope mismatch → 401.
 	stepUpToken := c.GetHeader("X-Step-Up-Token")
-	if stepUpToken == "" {
-		response.Error(c, ErrMFAStepUpRequired("hard-close-approve: X-Step-Up-Token header wajib"))
+	stepUpTokenRef, stepUpErr := verifyStepUpScope(stepUpToken, StepUpScopeHardClose)
+	if stepUpErr != nil {
+		response.Error(c, stepUpErr)
 		return
 	}
-	stepUpTokenRef := HashStepUpToken(stepUpToken)
 
 	var body WorkflowApproveBody
 	if err := c.ShouldBindJSON(&body); err != nil {
@@ -283,14 +279,20 @@ func (h *Handler) ReopenApprove(c *gin.Context) {
 		return
 	}
 
-	// Determine if we need step-up MFA (required for CLOSED→SOFT_CLOSED reopen).
-	// We need to know the current period status. The service enforces this but the handler
-	// should collect step-up token if provided.
+	// F-01: For reopen-approve, step-up is only required when transitioning CLOSED→SOFT_CLOSED.
+	// We collect the token here if provided, verify scope=reopen_closed; if absent, service
+	// will reject if the current state requires it.
 	stepUpToken := c.GetHeader("X-Step-Up-Token")
-	hasStepUp := !claims.NeedsStepUp() && stepUpToken != ""
+	hasStepUp := false
 	stepUpTokenRef := ""
-	if hasStepUp {
-		stepUpTokenRef = HashStepUpToken(stepUpToken)
+	if stepUpToken != "" {
+		ref, scopeErr := verifyStepUpScope(stepUpToken, StepUpScopeReopenClosed)
+		if scopeErr != nil {
+			response.Error(c, scopeErr)
+			return
+		}
+		hasStepUp = true
+		stepUpTokenRef = ref
 	}
 
 	var body WorkflowApproveBody

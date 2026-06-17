@@ -20,7 +20,12 @@ package closeflow_test
 //  15. ErrMFAStepUpRequired formatted message.
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -29,6 +34,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"blips-ifrs9.tugu-re.com/internal/auth"
 	domainerrors "blips-ifrs9.tugu-re.com/internal/common/errors"
 	"blips-ifrs9.tugu-re.com/internal/periode/closeflow"
 )
@@ -666,8 +672,10 @@ func TestChecklistEvaluate_ReconNotCompleted_FailsItem(t *testing.T) {
 			AddRow(now.AddDate(0, -1, 0), now))
 	mock.ExpectQuery(`gl_reconciliation_report`).
 		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg()).
+		// C11: recon date must equal tanggal_akhir (=now) for the status check to be reached.
+		// If reconDay != lastDayOfPeriod the detail would show a date-mismatch message, not the status.
 		WillReturnRows(sqlmock.NewRows([]string{"status", "tanggal_rekonsiliasi"}).
-			AddRow("COMPLETED_WITH_MISMATCH", now.AddDate(0, 0, -1)))
+			AddRow("COMPLETED_WITH_MISMATCH", now))
 
 	chk := closeflow.NewChecklistService(db)
 	result, err := chk.Evaluate(t.Context(), periodeID)
@@ -935,5 +943,276 @@ func gapOpenPeriodeRows(idStr string, now time.Time) *sqlmock.Rows {
 		nil, nil, nil,
 		nil, nil, nil,
 	)
+}
+
+// ─── F-01: verifyStepUpScope coverage ─────────────────────────────────────────
+
+// TestVerifyStepUpScope_EmptyToken_ReturnsError covers the empty-token branch.
+func TestVerifyStepUpScope_EmptyToken_ReturnsError(t *testing.T) {
+	_, err := closeflow.VerifyStepUpScope("", closeflow.StepUpScopeHardClose)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "wajib ada")
+}
+
+// TestVerifyStepUpScope_WrongScope_ReturnsError covers scope mismatch (F-01 core).
+func TestVerifyStepUpScope_WrongScope_ReturnsError(t *testing.T) {
+	token := makeFreshStepUpToken(closeflow.StepUpScopeReopenClosed)
+	_, err := closeflow.VerifyStepUpScope(token, closeflow.StepUpScopeHardClose)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "scope mismatch", "F-01: wrong scope must be rejected")
+}
+
+// TestVerifyStepUpScope_ExpiredIat_ReturnsError covers the iat freshness check.
+func TestVerifyStepUpScope_ExpiredIat_ReturnsError(t *testing.T) {
+	// Build token with old iat (6 minutes ago = past 5-minute window).
+	oldIat := time.Now().Add(-6 * time.Minute).Unix()
+	header := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9"
+	payloadJSON, _ := marshalB64URL(map[string]any{
+		"jti":   "expired-jti",
+		"scope": closeflow.StepUpScopeHardClose,
+		"iat":   oldIat,
+		"exp":   time.Now().Add(10 * time.Minute).Unix(),
+	})
+	token := header + "." + payloadJSON + ".fakesig"
+	_, err := closeflow.VerifyStepUpScope(token, closeflow.StepUpScopeHardClose)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expired")
+}
+
+// TestVerifyStepUpScope_ZeroIat_ReturnsError covers zero iat.
+func TestVerifyStepUpScope_ZeroIat_ReturnsError(t *testing.T) {
+	header := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9"
+	payloadJSON, _ := marshalB64URL(map[string]any{
+		"scope": closeflow.StepUpScopeHardClose,
+		// no iat → zero value
+	})
+	token := header + "." + payloadJSON + ".fakesig"
+	_, err := closeflow.VerifyStepUpScope(token, closeflow.StepUpScopeHardClose)
+	require.Error(t, err)
+}
+
+// TestVerifyStepUpScope_ExpiredExpClaim_ReturnsError covers exp exceeded.
+func TestVerifyStepUpScope_ExpiredExpClaim_ReturnsError(t *testing.T) {
+	header := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9"
+	payloadJSON, _ := marshalB64URL(map[string]any{
+		"jti":   "exp-jti",
+		"scope": closeflow.StepUpScopeHardClose,
+		"iat":   time.Now().Unix(),
+		"exp":   time.Now().Add(-1 * time.Second).Unix(), // already expired
+	})
+	token := header + "." + payloadJSON + ".fakesig"
+	_, err := closeflow.VerifyStepUpScope(token, closeflow.StepUpScopeHardClose)
+	require.Error(t, err)
+}
+
+// TestVerifyStepUpScope_ValidToken_ReturnsHash covers the happy path.
+func TestVerifyStepUpScope_ValidToken_ReturnsHash(t *testing.T) {
+	token := makeFreshStepUpToken(closeflow.StepUpScopeHardClose)
+	ref, err := closeflow.VerifyStepUpScope(token, closeflow.StepUpScopeHardClose)
+	require.NoError(t, err)
+	assert.NotEmpty(t, ref)
+}
+
+// ─── F-01: parseStepUpClaims coverage ─────────────────────────────────────────
+
+// TestParseStepUpClaims_NotJWT_ReturnsError covers non-JWT format.
+func TestParseStepUpClaims_NotJWT_ReturnsError(t *testing.T) {
+	_, _, _, _, err := closeflow.ParseStepUpClaims("not-a-jwt")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "3 bagian")
+}
+
+// TestParseStepUpClaims_InvalidBase64_ReturnsError covers base64 decode failure.
+func TestParseStepUpClaims_InvalidBase64_ReturnsError(t *testing.T) {
+	_, _, _, _, err := closeflow.ParseStepUpClaims("header.!!!invalid!!!.sig")
+	require.Error(t, err)
+}
+
+// ─── F-06: ReopenApprove handler — stepup scope error ─────────────────────────
+
+// TestReopenApprove_WrongStepUpScope_Returns401 covers F-01 scope check on ReopenApprove.
+func TestReopenApprove_WrongStepUpScope_Returns401(t *testing.T) {
+	db, _, _ := setupSQLMockT(t)
+	svc := newTestService(t, db)
+	h := closeflow.NewHandler(svc)
+	claims := &auth.Claims{
+		Sub:         uuid.New().String(),
+		Roles:       []string{"ROLE-CFO"},
+		Permissions: []string{closeflow.PermPeriodeReopenApprove},
+		TenantID:    "TUGURE",
+		MFAVerified: true,
+	}
+	r := setupRouter(t, h, claims)
+
+	// Use wrong scope (hard_close_approve instead of reopen_closed).
+	body := closeflow.WorkflowApproveBody{Comment: "reopen test"}
+	bodyJSON, _ := encodeJSON(body)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/periode-buku/"+uuid.New().String()+"/reopen-approve",
+		bytes.NewReader(bodyJSON))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", uuid.New().String())
+	req.Header.Set("X-Step-Up-Token", makeFreshStepUpToken(closeflow.StepUpScopeHardClose))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	// Wrong scope → 401.
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+// TestReopenApprove_NoStepUpToken_ProceedsToService covers the no-stepup branch.
+func TestReopenApprove_NoStepUpToken_ProceedsToService(t *testing.T) {
+	db, _, _ := setupSQLMockT(t)
+	svc := newTestService(t, db)
+	h := closeflow.NewHandler(svc)
+	claims := &auth.Claims{
+		Sub:         uuid.New().String(),
+		Roles:       []string{"ROLE-CFO"},
+		Permissions: []string{closeflow.PermPeriodeReopenApprove},
+		TenantID:    "TUGURE",
+		MFAVerified: true,
+	}
+	r := setupRouter(t, h, claims)
+
+	body := closeflow.WorkflowApproveBody{Comment: "reopen without stepup"}
+	bodyJSON, _ := encodeJSON(body)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/periode-buku/"+uuid.New().String()+"/reopen-approve",
+		bytes.NewReader(bodyJSON))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", uuid.New().String())
+	// No X-Step-Up-Token header → hasStepUp=false → proceeds to service (fails with DB error).
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	// Service will return error (DB not set up), but not 401 or 403 — any 4xx/5xx from service is fine.
+	assert.NotEqual(t, http.StatusUnauthorized, w.Code)
+	assert.NotEqual(t, http.StatusForbidden, w.Code)
+}
+
+// ─── F-02: route idempotency inheritance (handler_test already covers this) ───
+// (The TestSoftCloseRequest_MissingIdempotencyKey_Returns400 in handler_test.go
+// already validates that idempotency middleware fires for closeflow routes.)
+
+// ─── C9: RejectHardClose SoD ──────────────────────────────────────────────────
+
+// TestRejectHardClose_SoD_ActorIsRequester: same user can't reject what they requested.
+func TestRejectHardClose_SoD_ActorIsRequester(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	periodeID := uuid.New()
+	actorID := uuid.New() // same as requester
+
+	mock.ExpectBegin()
+	// Return HARD_CLOSE_PENDING with hard_close_requested_by = actorID.
+	rows := sqlmock.NewRows(periodeRowCols()).AddRow(
+		periodeID.String(), "2026-06", 2026, nil, "BULANAN",
+		time.Now().AddDate(0, -1, 0), time.Now(), "HARD_CLOSE_PENDING",
+		&[]time.Time{time.Now()}[0], nil,
+		false, nil, nil, nil, nil,
+		int64(2), "TUGURE", time.Now(), time.Now(),
+		nil, nil, nil, nil, nil, nil,
+		actorID.String(), &[]time.Time{time.Now()}[0], nil, // hard_close_requested_by = actorID
+		nil, nil, nil,
+		nil, nil, nil,
+	)
+	mock.ExpectQuery(`FROM mst.periode_buku`).WillReturnRows(rows)
+	mock.ExpectRollback()
+
+	svc := buildTestSvc(t, db)
+	actor := closeflow.Actor{UserID: actorID, Role: "ROLE-CFO"}
+	_, err = svc.RejectHardClose(t.Context(), periodeID,
+		"reject reason that is at least thirty chars", actor)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SoD")
+}
+
+// ─── C11: ReconPass mid-period only → FAIL ────────────────────────────────────
+
+// TestChecklistEvaluate_ReconMidPeriodOnly_Fails covers C11: recon date != tanggal_akhir.
+func TestChecklistEvaluate_ReconMidPeriodOnly_Fails(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	periodeID := uuid.New()
+	now := time.Now()
+	midPeriod := now.AddDate(0, 0, -15) // 15 days before tanggal_akhir
+
+	mock.ExpectQuery(`COALESCE\(SUM\(cnt\), 0\)`).WithArgs(periodeID).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(int64(0)))
+	mock.ExpectQuery(`COUNT\(\*\) AS total`).WithArgs(periodeID).
+		WillReturnRows(sqlmock.NewRows([]string{"total", "max_delta"}).AddRow(int64(0), "0.0000"))
+	mock.ExpectQuery(`COUNT\(gs.id\)`).WithArgs(periodeID).
+		WillReturnRows(sqlmock.NewRows([]string{"count", "header_ids"}).AddRow(int64(0), nil))
+	mock.ExpectQuery(`tanggal_mulai, tanggal_akhir`).WithArgs(periodeID).
+		WillReturnRows(sqlmock.NewRows([]string{"tanggal_mulai", "tanggal_akhir"}).
+			AddRow(now.AddDate(0, -1, 0), now))
+	// Recon report only covers mid-period, not tanggal_akhir.
+	mock.ExpectQuery(`gl_reconciliation_report`).WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"status", "tanggal_rekonsiliasi"}).
+			AddRow("COMPLETED", midPeriod))
+
+	chk := closeflow.NewChecklistService(db)
+	result, err := chk.Evaluate(t.Context(), periodeID)
+	require.NoError(t, err)
+	assert.False(t, result.Items[3].Passed, "C11: mid-period recon must fail")
+	assert.Contains(t, result.Items[3].Detail, "tanggal akhir periode",
+		"C11: detail explains date mismatch")
+}
+
+// ─── C7: JurnalBalancedThreshold boundary ─────────────────────────────────────
+
+// TestJurnalBalancedThreshold_ExactThreshold: delta == threshold → FAIL (not <).
+func TestJurnalBalancedThreshold_ExactThreshold(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	periodeID := uuid.New()
+	now := time.Now()
+
+	// Item 1: PENDING → pass
+	mock.ExpectQuery(`COALESCE\(SUM\(cnt\), 0\)`).WithArgs(periodeID).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(int64(0)))
+	// Item 2: delta = 0.0100 exactly (== threshold).
+	// Per spec label "delta ≤ IDR 0.01": LessThanOrEqual → 0.01 <= 0.01 is TRUE → PASS.
+	// C7 ensures this uses RequireFromString("0.01") not NewFromFloat(0.01) to avoid IEEE754 drift.
+	mock.ExpectQuery(`COUNT\(\*\) AS total`).WithArgs(periodeID).
+		WillReturnRows(sqlmock.NewRows([]string{"total", "max_delta"}).AddRow(int64(5), "0.0100"))
+	// Item 3: GL_DELIVERED → pass (needed to complete Evaluate)
+	mock.ExpectQuery(`COUNT\(gs.id\)`).WithArgs(periodeID).
+		WillReturnRows(sqlmock.NewRows([]string{"count", "header_ids"}).AddRow(int64(0), nil))
+	// Item 4: RECON_PASS → pass
+	mock.ExpectQuery(`tanggal_mulai, tanggal_akhir`).WithArgs(periodeID).
+		WillReturnRows(sqlmock.NewRows([]string{"tanggal_mulai", "tanggal_akhir"}).
+			AddRow(now.AddDate(0, -1, 0), now))
+	mock.ExpectQuery(`gl_reconciliation_report`).WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"status", "tanggal_rekonsiliasi"}).
+			AddRow("COMPLETED", now))
+
+	chk := closeflow.NewChecklistService(db)
+	item, err := chk.Evaluate(t.Context(), periodeID)
+	require.NoError(t, err)
+	// delta == threshold (0.01 <= 0.01) → PASS. The test verifies the decimal comparison is exact.
+	assert.True(t, item.Items[1].Passed,
+		"C7: delta == 0.01 uses RequireFromString, LessThanOrEqual → should pass")
+}
+
+// ─── Helpers shared across gap tests ──────────────────────────────────────────
+
+// encodeJSON is json.Marshal under a gap-test-local alias to avoid import shadowing.
+func encodeJSON(v any) ([]byte, error) { return json.Marshal(v) }
+
+// marshalB64URL encodes v as a base64url-encoded JSON string (no padding),
+// for building structurally valid but unsigned test JWTs.
+func marshalB64URL(v map[string]any) (string, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 

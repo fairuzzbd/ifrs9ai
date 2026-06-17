@@ -9,6 +9,20 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/common/listquery"
 )
 
+// VerifyStepUpScope exports verifyStepUpScope for unit testing.
+func VerifyStepUpScope(tokenRaw, requiredScope string) (string, error) {
+	return verifyStepUpScope(tokenRaw, requiredScope)
+}
+
+// ParseStepUpClaims exports parseStepUpClaims for unit testing.
+func ParseStepUpClaims(tokenRaw string) (jti, scope string, iat, exp int64, err error) {
+	c, e := parseStepUpClaims(tokenRaw)
+	if e != nil {
+		return "", "", 0, 0, e
+	}
+	return c.JTI, c.Scope, c.Iat, c.Exp, nil
+}
+
 // EmptyListQuery returns a zero-value listquery.Query for use in service tests.
 func EmptyListQuery() listquery.Query {
 	return listquery.Query{}

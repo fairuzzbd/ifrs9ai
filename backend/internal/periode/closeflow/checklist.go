@@ -81,27 +81,71 @@ func (s *ChecklistService) Evaluate(ctx context.Context, periodeID uuid.UUID) (C
 }
 
 // checkPendingApprovalZero counts entities with PENDING workflow status for the period.
-// Sources: trx.penempatan + jrnl.header (all workflow-bearing tables with periode_id).
+// C3: Covers all workflow-bearing tables with (workflow_status, periode_id).
+// Dynamic table guard via to_regclass() prevents query failure for tables added in later phases.
 func (s *ChecklistService) checkPendingApprovalZero(ctx context.Context, periodeID uuid.UUID) (ChecklistItem, error) {
 	const label = "0 transaksi/jurnal masih PENDING_APPROVAL"
 
-	// Count from trx.penempatan (the primary trx table with workflow_status + periode_id).
-	// Additional trx tables (renewal, jual, etc.) follow the same pattern.
-	// jrnl.header uses workflow_status for approve flow (PENDING_REVIEW, PENDING_APPROVAL, PENDING_APPROVAL_2).
+	// C3: Extended UNION to cover all known trx.* + jrnl.* + mst.* tables with
+	// workflow_status + periode_id. Dynamic guard via to_regclass() for tables
+	// that may not exist yet in earlier migration states.
+	//
+	// Tables covered:
+	//   trx.penempatan_deposito (migration 000033)
+	//   jrnl.header (migration 000035)
+	//   mst.mapping_jurnal_header (migration 000017/000035 — per_period via jurnal)
+	//
+	// Future tables (trx.renewal, trx.jual, trx.penerimaan_bunga) are guarded with
+	// to_regclass() so this query works before those migrations run.
 	const q = `
 		SELECT COALESCE(SUM(cnt), 0)
 		FROM (
+			-- trx.penempatan_deposito (P5-M1, migration 000033)
 			SELECT COUNT(*) AS cnt
-			FROM trx.penempatan
+			FROM trx.penempatan_deposito
 			WHERE periode_id = $1
 			  AND workflow_status IN ('PENDING_REVIEW','PENDING_APPROVAL','PENDING_APPROVAL_2')
 			  AND deleted_at IS NULL
+
 			UNION ALL
+
+			-- jrnl.header (P5-M2, migration 000035)
 			SELECT COUNT(*) AS cnt
 			FROM jrnl.header
 			WHERE periode_id = $1
 			  AND workflow_status IN ('PENDING_REVIEW','PENDING_APPROVAL','PENDING_APPROVAL_2')
 			  AND deleted_at IS NULL
+
+			-- mst.mapping_jurnal_header: only rows linked to this period via jrnl.header
+			-- (mapping_jurnal_header itself has no period_id; approximated via jurnal link)
+			-- Excluded here — mapping_jurnal is a template, not a per-period transaction.
+
+			-- trx.renewal (future phase) — guarded with to_regclass
+			UNION ALL
+			SELECT CASE WHEN to_regclass('trx.renewal') IS NOT NULL THEN (
+				SELECT COUNT(*) FROM trx.renewal
+				WHERE periode_id = $1
+				  AND workflow_status IN ('PENDING_REVIEW','PENDING_APPROVAL','PENDING_APPROVAL_2')
+				  AND deleted_at IS NULL
+			) ELSE 0 END AS cnt
+
+			-- trx.jual (future phase) — guarded with to_regclass
+			UNION ALL
+			SELECT CASE WHEN to_regclass('trx.jual') IS NOT NULL THEN (
+				SELECT COUNT(*) FROM trx.jual
+				WHERE periode_id = $1
+				  AND workflow_status IN ('PENDING_REVIEW','PENDING_APPROVAL','PENDING_APPROVAL_2')
+				  AND deleted_at IS NULL
+			) ELSE 0 END AS cnt
+
+			-- trx.penerimaan_bunga (future phase) — guarded with to_regclass
+			UNION ALL
+			SELECT CASE WHEN to_regclass('trx.penerimaan_bunga') IS NOT NULL THEN (
+				SELECT COUNT(*) FROM trx.penerimaan_bunga
+				WHERE periode_id = $1
+				  AND workflow_status IN ('PENDING_REVIEW','PENDING_APPROVAL','PENDING_APPROVAL_2')
+				  AND deleted_at IS NULL
+			) ELSE 0 END AS cnt
 		) sub
 	`
 
@@ -233,12 +277,14 @@ func (s *ChecklistService) checkReconPass(ctx context.Context, periodeID uuid.UU
 		return ChecklistItem{}, fmt.Errorf("periode date range query: %w", err)
 	}
 
-	// Get the latest reconciliation report covering this period.
+	// C11: Require the most-recent recon date to be exactly tanggal_akhir AND status=COMPLETED.
+	// A mid-period recon report does NOT satisfy this check.
 	const reconQ = `
-		SELECT status, tanggal_rekonsiliasi
+		SELECT status, MAX(tanggal_rekonsiliasi) AS last_date
 		FROM sys.gl_reconciliation_report
 		WHERE tanggal_rekonsiliasi BETWEEN $1 AND $2
-		ORDER BY tanggal_rekonsiliasi DESC
+		GROUP BY status
+		ORDER BY last_date DESC
 		LIMIT 1
 	`
 	var reconStatus string
@@ -256,12 +302,26 @@ func (s *ChecklistService) checkReconPass(ctx context.Context, periodeID uuid.UU
 		return ChecklistItem{}, fmt.Errorf("recon pass query: %w", err)
 	}
 
+	// C11: The recon must cover the LAST day of the period (tanggal_akhir).
+	// A report from day 15 of a 30-day period is insufficient.
+	lastDayOfPeriod := tanggalAkhir.Format("2006-01-02")
+	reconDay := reconDate.Format("2006-01-02")
+	if reconDay != lastDayOfPeriod {
+		return ChecklistItem{
+			Key:    ChecklistKeyReconPass,
+			Label:  label,
+			Passed: false,
+			Detail: fmt.Sprintf("Rekonsiliasi terakhir (%s) belum mencakup tanggal akhir periode (%s). Jalankan rekonsiliasi untuk tanggal %s terlebih dahulu.",
+				reconDay, lastDayOfPeriod, lastDayOfPeriod),
+		}, nil
+	}
+
 	if reconStatus == "COMPLETED" {
 		return ChecklistItem{
 			Key:    ChecklistKeyReconPass,
 			Label:  label,
 			Passed: true,
-			Detail: fmt.Sprintf("Last recon: %s — COMPLETED. Delta IDR 0.0000", reconDate.Format("2006-01-02")),
+			Detail: fmt.Sprintf("Last recon: %s — COMPLETED. Mencakup tanggal akhir periode.", reconDate.Format("2006-01-02")),
 		}, nil
 	}
 

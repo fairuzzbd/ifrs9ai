@@ -194,6 +194,8 @@ func TestApproveHardClose_WithEnqueuer_EnqueuesJob(t *testing.T) {
 	// Audit
 	mock.ExpectQuery(`SELECT`).WillReturnRows(sqlmock.NewRows([]string{"previous_hash"}).AddRow(nil))
 	mock.ExpectExec(`INSERT INTO aud.audit_log`).WillReturnResult(sqlmock.NewResult(1, 1))
+	// C4: durable sys.job row in tx.
+	mock.ExpectExec(`INSERT INTO sys\.job`).WillReturnResult(sqlmock.NewResult(1, 1))
 	// COMMIT
 	mock.ExpectCommit()
 
@@ -242,6 +244,8 @@ func TestApproveHardClose_WithEnqueuer_EnqueuesJob_WithResult(t *testing.T) {
 	mock.ExpectExec(`INSERT INTO sys.closing_checklist_snapshot`).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectQuery(`SELECT`).WillReturnRows(sqlmock.NewRows([]string{"previous_hash"}).AddRow(nil))
 	mock.ExpectExec(`INSERT INTO aud.audit_log`).WillReturnResult(sqlmock.NewResult(1, 1))
+	// C4: durable sys.job row inserted in tx before commit.
+	mock.ExpectExec(`INSERT INTO sys\.job`).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
 	// Enqueuer returns a TaskInfo with a job ID.
@@ -257,9 +261,10 @@ func TestApproveHardClose_WithEnqueuer_EnqueuesJob_WithResult(t *testing.T) {
 	result, err := svc.ApproveHardClose(context.Background(), periodeID, nil, "token-hash-ref", actor)
 	require.NoError(t, err)
 	assert.Equal(t, closeflow.PeriodeStatusClosed, result.StatusPeriode)
-	// Enqueuer returned valid info → mvJobID should be set.
+	// C4: Enqueuer succeeded → MvRefreshJobID is the sys.job UUID (not the Asynq TaskInfo.ID).
+	// The service generates mvJobID = uuid.New() for sys.job insertion and uses that as the job ref.
 	require.NotNil(t, result.MvRefreshJobID)
-	assert.Equal(t, "job-123", *result.MvRefreshJobID)
+	assert.NotEmpty(t, *result.MvRefreshJobID)
 }
 
 // TestApproveHardClose_WithEnqueuer_EnqueueError_NonFatal exercises the enqueue failure path.
@@ -291,6 +296,8 @@ func TestApproveHardClose_WithEnqueuer_EnqueueError_NonFatal(t *testing.T) {
 	mock.ExpectExec(`INSERT INTO sys.closing_checklist_snapshot`).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectQuery(`SELECT`).WillReturnRows(sqlmock.NewRows([]string{"previous_hash"}).AddRow(nil))
 	mock.ExpectExec(`INSERT INTO aud.audit_log`).WillReturnResult(sqlmock.NewResult(1, 1))
+	// C4: durable sys.job row inserted in tx before commit (non-fatal on failure).
+	mock.ExpectExec(`INSERT INTO sys\.job`).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
 	// Enqueuer returns an error (non-fatal — hard close already committed)
@@ -401,6 +408,8 @@ func TestHardCloseApprove_ServiceSuccess_Returns200(t *testing.T) {
 	mock.ExpectExec(`INSERT INTO sys.closing_checklist_snapshot`).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectQuery(`SELECT`).WillReturnRows(sqlmock.NewRows([]string{"previous_hash"}).AddRow(nil))
 	mock.ExpectExec(`INSERT INTO aud.audit_log`).WillReturnResult(sqlmock.NewResult(1, 1))
+	// C4: InsertJobRow writes sys.job within tx before commit.
+	mock.ExpectExec(`INSERT INTO sys\.job`).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
 	repo := closeflow.NewRepo(db)
@@ -428,7 +437,8 @@ func TestHardCloseApprove_ServiceSuccess_Returns200(t *testing.T) {
 		bytes.NewReader(bodyJSON))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", uuid.New().String())
-	req.Header.Set("X-Step-Up-Token", "valid-step-up-token-for-cfo-hard-close")
+	// F-01: must be a structurally valid JWT with scope=hard_close_approve and fresh iat.
+	req.Header.Set("X-Step-Up-Token", makeFreshStepUpToken(closeflow.StepUpScopeHardClose))
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 

@@ -154,10 +154,23 @@ func TestPeriodeLockMiddleware_SOFT_CLOSED_WithAllowlistedAction(t *testing.T) {
 	cfg := closeflow.DefaultConfig()
 	mw := closeflow.NewPeriodeLockMiddleware(repo, cfg)
 
-	r, _ := setupMiddlewareRouter(t, mw)
+	// F-06: The client X-Close-Workflow-Action header is rejected; the allowlist
+	// action must be injected via server-side Gin context by a route-specific handler
+	// or upstream middleware (not the client). Simulate that here with a pre-middleware.
+	r := gin.New()
+	periodeGroup := r.Group("/api/v1/transaksi/:periode_id")
+	periodeGroup.Use(func(c *gin.Context) {
+		// Simulates what an upstream route handler sets (e.g. jurnal retry handler).
+		c.Set("close_workflow_action", "JURNAL_RETRY_GL_DELIVERY")
+		c.Next()
+	})
+	periodeGroup.Use(mw.Handler())
+	periodeGroup.POST("/foo", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/transaksi/"+periodeID+"/foo", nil)
-	// Set the allowlisted action header.
-	req.Header.Set("X-Close-Workflow-Action", "JURNAL_RETRY_GL_DELIVERY")
+	// No X-Close-Workflow-Action header — that header is now rejected by F-06.
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
