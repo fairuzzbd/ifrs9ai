@@ -99,6 +99,18 @@ const ERROR_MESSAGE_MAP: Record<string, string> = {
   SOFT_CLOSE_PENDING_EXISTS:
     "Sudah ada request soft-close yang menunggu approval. Tidak bisa mengajukan request baru.",
 
+  // --- FX Rate (P5-M5) ---
+  FX_RATE_LOCKED:
+    "Kurs sudah dikunci karena periode hard-closed. Tidak bisa ditambah atau diubah. Hubungi CFO untuk reopen dalam grace window.",
+  KURS_DUPLICATE_DATE:
+    "Kurs untuk tanggal dan mata uang ini sudah ada (APPROVED atau PENDING_APPROVAL). Tidak bisa di-override via manual upload. Jika perlu koreksi, hubungi Finance Controller.",
+  KURS_UPLOAD_VALIDATION_FAILED:
+    "File upload kurs gagal validasi. Periksa detail per baris — perbaiki file lalu upload ulang.",
+  KLASIFIKASI_NOT_LOCKED:
+    "Instrumen belum memiliki klasifikasi PSAK 71 yang final (locked). FX treatment tidak dapat ditentukan. Selesaikan SPPI Test + BM Assessment + Klasifikasi Approval terlebih dahulu.",
+  KURS_PERIODE_MISMATCH:
+    "Tanggal berlaku kurs tidak berada dalam periode buku manapun yang OPEN. Pastikan tanggal benar atau hubungi Finance Controller untuk membuka periode.",
+
   // --- GL Delivery (P5-M3) ---
   GL_DELIVERY_JURNAL_NOT_FOUND:
     "Jurnal header tidak ditemukan.",
