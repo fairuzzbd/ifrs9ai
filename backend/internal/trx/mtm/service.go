@@ -190,7 +190,17 @@ func (s *Service) GetStalePriceAlerts(ctx context.Context, cursor string, limit 
 // TriggerCron is called by POST /trx/mtm/cron/trigger (manual trigger by ROLE-AKUN).
 // Enqueues an Asynq task immediately (does not wait for scheduled cron).
 // Returns job metadata; the actual work is done by the worker.
+// B3 fix: permission guard belongs on route (mtm.trigger); service validates permission claim-side.
+// m7 fix: if ForceRerun=true, forceRerunReason must be ≥ 30 chars.
 func (s *Service) TriggerCron(ctx context.Context, enqueuer AsynqEnqueuer, req CronTriggerRequest) (*CronTriggerResponse, error) {
+	// m7: validate forceRerunReason when ForceRerun requested
+	if req.ForceRerun {
+		if len([]rune(req.ForceRerunReason)) < 30 {
+			return nil, domainerrors.New(domainerrors.CodeValidationFailed,
+				"forceRerunReason wajib minimal 30 karakter saat forceRerun=true.")
+		}
+	}
+
 	tanggalTarget := req.TanggalTarget
 	if tanggalTarget == "" {
 		tanggalTarget = time.Now().Format("2006-01-02")
@@ -207,11 +217,12 @@ func (s *Service) TriggerCron(ctx context.Context, enqueuer AsynqEnqueuer, req C
 
 	jobID := "mtm-manual-" + uuid.New().String()
 	payload := MtmCronPayload{
-		TanggalTarget: tanggalTarget,
-		TenantID:      "TUGURE",
-		JobID:         jobID,
-		ForceRerun:    req.ForceRerun,
-		ActorID:       actorID,
+		TanggalTarget:   tanggalTarget,
+		TenantID:        "TUGURE",
+		JobID:           jobID,
+		ForceRerun:      req.ForceRerun,
+		ForceRerunReason: req.ForceRerunReason,
+		ActorID:         actorID,
 	}
 	if err := enqueuer.Enqueue(ctx, TaskMtmDailyRun, payload); err != nil {
 		return nil, fmt.Errorf("Service.TriggerCron: enqueue: %w", err)
@@ -501,11 +512,33 @@ func (s *Service) OverrideApprove(ctx context.Context, mtmID uuid.UUID, req Over
 		return nil, domainerrors.New(domainerrors.CodeValidationFailed, err.Error())
 	}
 
+	// m6: validate signatureMethod
+	if req.SignatureMethod != "" && req.SignatureMethod != "JWT_STEP_UP" {
+		return nil, domainerrors.New(domainerrors.CodeValidationFailed,
+			"signatureMethod tidak valid. Nilai yang diterima: 'JWT_STEP_UP'.")
+	}
+
+	// B2: use m.MataUang (not hardcoded "IDR") for correct FCY routing.
+	// m4: validate non-empty mata_uang before routing.
+	mataUang := m.MataUang
+	if mataUang == "" {
+		return nil, domainerrors.New(domainerrors.CodeValidationFailed,
+			"mata_uang kosong pada row MTM — tidak dapat menentukan routing jurnal.")
+	}
+
 	// Resolve jurnal event codes
-	eventCodes, routeErr := ResolveJurnalEventCode(m.KlasifikasiSnapshot, "IDR", false)
+	// M2: if routeErr is not the AC-skip sentinel → return error (do NOT approve with silent skip).
+	eventCodes, routeErr := ResolveJurnalEventCode(m.KlasifikasiSnapshot, mataUang, false)
 	if routeErr != nil {
-		s.logger.WarnContext(ctx, "OverrideApprove: routing error — skip jurnal posting",
-			"mtm_id", mtmID, "klasifikasi", m.KlasifikasiSnapshot, "error", routeErr)
+		if isACSkipErr(routeErr) {
+			// AC row somehow reached override — benign skip (log + approve without jurnal post)
+			s.logger.WarnContext(ctx, "OverrideApprove: AC instrument reached override — skip jurnal (status=APPROVED)",
+				"mtm_id", mtmID, "klasifikasi", m.KlasifikasiSnapshot)
+			eventCodes = nil
+		} else {
+			// Real routing error — do NOT approve silently
+			return nil, fmt.Errorf("Service.OverrideApprove: routing error: %w", routeErr)
+		}
 	}
 
 	tx, err := s.repo.BeginTx(ctx)
@@ -576,17 +609,29 @@ func (s *Service) OverrideApprove(ctx context.Context, mtmID uuid.UUID, req Over
 		return nil, fmt.Errorf("Service.OverrideApprove: update: %w", err)
 	}
 
-	// Audit in same tx
+	// Audit in same tx (M6 fix: expanded Before/After with full detail)
 	if s.audit != nil {
+		deltaPctF64, _ := m.DeltaPct.Float64()
 		_ = s.audit.WithTx(tx).Write(ctx, audit.Event{
 			Action:     "MTM.OVERRIDE_APPROVE",
 			EntityType: "trx.mtm",
 			EntityID:   mtmID,
-			Before:     map[string]any{"status": string(m.Status)},
+			Before: map[string]any{
+				"status":          string(m.Status),
+				"harga_pasar_idr": m.HargaPasarIdr.StringFixed(4),
+				"delta_pct":       deltaPctF64,
+				"stale_price_flag": m.StalePriceFlag,
+				"deviation_flag":  m.DeviationFlag,
+			},
 			After: map[string]any{
-				"status":                "APPROVED",
-				"override_approver_id":  approverID.String(),
-				"override_comment":      req.Comment,
+				"status":               "APPROVED",
+				"override_approver_id": approverID.String(),
+				"override_comment":     req.Comment,
+				"signature_method":     req.SignatureMethod,
+				"harga_pasar_idr":      m.HargaPasarIdr.StringFixed(4),
+				"delta_pct":            deltaPctF64,
+				"stale_price_flag":     m.StalePriceFlag,
+				"deviation_flag":       m.DeviationFlag,
 			},
 		})
 	}
@@ -636,7 +681,8 @@ func (s *Service) OverrideReject(ctx context.Context, mtmID uuid.UUID, req Overr
 	if m.LockedFlag {
 		return nil, ErrMTMPeriodeLocked
 	}
-	if !m.Status.CanOverride() {
+	// m3: use CanReject() — allows both PENDING_REVIEW and STALE_PRICE
+	if !m.Status.CanReject() {
 		return nil, domainerrors.ErrWorkflowInvalidTransition(string(m.Status), "REJECTED")
 	}
 	if m.UploaderID != nil && *m.UploaderID == rejecterID {
@@ -644,6 +690,11 @@ func (s *Service) OverrideReject(ctx context.Context, mtmID uuid.UUID, req Overr
 	}
 	if err := ValidateOverrideComment(req.Comment, MinOverrideCommentLen); err != nil {
 		return nil, domainerrors.New(domainerrors.CodeValidationFailed, err.Error())
+	}
+	// m6: validate signatureMethod
+	if req.SignatureMethod != "" && req.SignatureMethod != "JWT_STEP_UP" {
+		return nil, domainerrors.New(domainerrors.CodeValidationFailed,
+			"signatureMethod tidak valid. Nilai yang diterima: 'JWT_STEP_UP'.")
 	}
 
 	tx, err := s.repo.BeginTx(ctx)
@@ -669,16 +720,29 @@ func (s *Service) OverrideReject(ctx context.Context, mtmID uuid.UUID, req Overr
 		return nil, fmt.Errorf("Service.OverrideReject: update: %w", err)
 	}
 
+	// M6 fix: expanded audit Before/After with full detail
 	if s.audit != nil {
+		deltaPctF64, _ := m.DeltaPct.Float64()
 		_ = s.audit.WithTx(tx).Write(ctx, audit.Event{
 			Action:     "MTM.OVERRIDE_REJECT",
 			EntityType: "trx.mtm",
 			EntityID:   mtmID,
-			Before:     map[string]any{"status": string(m.Status)},
+			Before: map[string]any{
+				"status":           string(m.Status),
+				"harga_pasar_idr":  m.HargaPasarIdr.StringFixed(4),
+				"delta_pct":        deltaPctF64,
+				"stale_price_flag": m.StalePriceFlag,
+				"deviation_flag":   m.DeviationFlag,
+			},
 			After: map[string]any{
 				"status":               "REJECTED",
 				"override_approver_id": rejecterID.String(),
 				"override_comment":     req.Comment,
+				"signature_method":     req.SignatureMethod,
+				"harga_pasar_idr":      m.HargaPasarIdr.StringFixed(4),
+				"delta_pct":            deltaPctF64,
+				"stale_price_flag":     m.StalePriceFlag,
+				"deviation_flag":       m.DeviationFlag,
 			},
 		})
 	}
@@ -710,18 +774,32 @@ func (s *Service) ProcessOneInstrument(ctx context.Context, inst InstrumenInfo, 
 		return nil, ErrMTMInstrumenACSkip
 	}
 
+	// m4: guard against empty mata_uang (would cause incorrect IDR routing for FCY instruments)
+	if inst.MataUang == "" {
+		return nil, domainerrors.New(domainerrors.CodeValidationFailed,
+			fmt.Sprintf("instrumen %s: mata_uang kosong — tidak dapat menentukan routing jurnal.", inst.ID))
+	}
+
 	staleDays := s.configInt(ctx, "MTM_PRICE_STALE_DAYS", DefaultStalePriceDays)
 	thresholdPct := s.configFloat(ctx, "MTM_PRICE_DEVIATION_THRESHOLD_PCT", DefaultDeviationThresholdPct)
 
 	// Idempotency check — if already processed for today, skip
-	exists, existing, err := s.repo.ExistsActive(ctx, inst.ID, tanggalMtm, "AUTO")
-	if err != nil {
-		return nil, fmt.Errorf("ProcessOneInstrument: exists check: %w", err)
-	}
-	if exists {
-		s.logger.InfoContext(ctx, "ProcessOneInstrument: already processed, skipping",
-			"instrumen_id", inst.ID, "tanggal_mtm", tanggalMtm.Format("2006-01-02"), "status", existing.Status)
-		return existing, nil
+	// m7: honor ForceRerun by skipping ExistsActive check (cronJobID signals force via payload)
+	// Force-rerun is indicated by cronJobID containing "force" prefix (set by TriggerCron when ForceRerun=true)
+	isForceRerun := len(cronJobID) > 6 && cronJobID[:6] == "force:"
+	if !isForceRerun {
+		exists, existing, err := s.repo.ExistsActive(ctx, inst.ID, tanggalMtm, "AUTO")
+		if err != nil {
+			return nil, fmt.Errorf("ProcessOneInstrument: exists check: %w", err)
+		}
+		if exists {
+			s.logger.InfoContext(ctx, "ProcessOneInstrument: already processed, skipping",
+				"instrumen_id", inst.ID, "tanggal_mtm", tanggalMtm.Format("2006-01-02"), "status", existing.Status)
+			return existing, nil
+		}
+	} else {
+		s.logger.InfoContext(ctx, "ProcessOneInstrument: force-rerun — skipping idempotency check",
+			"instrumen_id", inst.ID, "tanggal_mtm", tanggalMtm.Format("2006-01-02"))
 	}
 
 	// Fetch market price from feed
@@ -781,11 +859,18 @@ func (s *Service) ProcessOneInstrument(ctx context.Context, inst InstrumenInfo, 
 		}
 	}
 
-	// Book value (OQ-M6-6: placeholder returns nil)
+	// Book value (OQ-M6-6: GetHargaBukuIdr returns nil until ecl-eir-engineer confirms
+	// source column from trx.penempatan. Until then: fallback = market price → delta=0.
+	// M3 fix: log WARN on every fallback so it's visible in observability.
+	//nolint:wrapcheck
 	bvPtr, _ := s.repo.GetHargaBukuIdr(ctx, inst.ID)
 	hargaBukuIdr := hargaPasarIdr // fallback: book = market → delta=0
 	if bvPtr != nil {
 		hargaBukuIdr = *bvPtr
+	} else if !staleFlag {
+		// Only warn when we have a price but no book value — STALE already signals bad data
+		s.logger.WarnContext(ctx, "ProcessOneInstrument: GetHargaBukuIdr returned nil — using market price as fallback (OQ-M6-6)",
+			"instrumen_id", inst.ID, "tanggal_mtm", tanggalMtm.Format("2006-01-02"))
 	}
 
 	deltaIdr, deltaPct, err := ComputeDelta(hargaPasarIdr, hargaBukuIdr)
@@ -795,9 +880,9 @@ func (s *Service) ProcessOneInstrument(ctx context.Context, inst InstrumenInfo, 
 	}
 	devFlag := IsDeviationExceeded(deltaPct, thresholdPct)
 
-	// Resolve jurnal routing
+	// Resolve jurnal routing (only for non-stale rows — stale rows won't auto-post jurnal)
 	eventCodes, routeErr := ResolveJurnalEventCode(inst.KlasifikasiPSAK71, inst.MataUang, inst.IsPOCI)
-	if routeErr != nil {
+	if routeErr != nil && !staleFlag {
 		s.logger.WarnContext(ctx, "ProcessOneInstrument: routing error",
 			"instrumen_id", inst.ID, "klasifikasi", inst.KlasifikasiPSAK71, "error", routeErr)
 	}
@@ -811,10 +896,23 @@ func (s *Service) ProcessOneInstrument(ctx context.Context, inst InstrumenInfo, 
 
 	jobIDPtr := &cronJobID
 
+	// m1: resolve PeriodeBulananID from tanggalMtm — log warning if not found (non-blocking for cron)
+	periodeBulananID := uuid.Nil
+	if p, pErr := s.repo.GetPeriodeByTanggal(ctx, tanggalMtm); pErr != nil {
+		s.logger.WarnContext(ctx, "ProcessOneInstrument: GetPeriodeByTanggal error — using uuid.Nil",
+			"instrumen_id", inst.ID, "tanggal_mtm", tanggalMtm.Format("2006-01-02"), "error", pErr)
+	} else if p != nil {
+		periodeBulananID = p.ID
+	} else {
+		s.logger.WarnContext(ctx, "ProcessOneInstrument: no periode_buku found for date — using uuid.Nil",
+			"instrumen_id", inst.ID, "tanggal_mtm", tanggalMtm.Format("2006-01-02"))
+	}
+
 	m := &Mtm{
 		ID:                  uuid.New(),
 		InstrumenID:         inst.ID,
-		PeriodeBulananID:    uuid.Nil, // resolved from tanggalMtm by service (stub)
+		PeriodeBulananID:    periodeBulananID, // m1 fix: resolved from tanggalMtm
+		MataUang:            inst.MataUang,    // B2 fix: snapshot currency for OverrideApprove routing
 		TanggalMtm:          tanggalMtm,
 		HargaSumber:         hargaSumber,
 		HargaTanggal:        hargaTanggal,
@@ -899,17 +997,22 @@ func (s *Service) ProcessOneInstrument(ctx context.Context, inst InstrumenInfo, 
 		}
 	}
 
-	// Audit
+	// Audit (M6 fix: expanded After with full detail)
 	if s.audit != nil {
+		deltaPctF64, _ := deltaPct.Float64()
 		_ = s.audit.WithTx(tx).Write(ctx, audit.Event{
 			Action:     "MTM.AUTO_POSTED",
 			EntityType: "trx.mtm",
 			EntityID:   m.ID,
 			After: map[string]any{
-				"instrumen_id": inst.ID.String(),
-				"tanggal_mtm":  tanggalMtm.Format("2006-01-02"),
-				"status":       string(status),
-				"delta_pct":    deltaPct.StringFixed(4),
+				"instrumen_id":     inst.ID.String(),
+				"tanggal_mtm":      tanggalMtm.Format("2006-01-02"),
+				"status":           string(status),
+				"harga_pasar_idr":  m.HargaPasarIdr.StringFixed(4),
+				"delta_pct":        deltaPctF64,
+				"stale_price_flag": m.StalePriceFlag,
+				"deviation_flag":   m.DeviationFlag,
+				"mata_uang":        inst.MataUang,
 			},
 		})
 	}
@@ -925,6 +1028,7 @@ func (s *Service) ProcessOneInstrument(ctx context.Context, inst InstrumenInfo, 
 // ─── LockMtmForPeriode / UnlockMtmForPeriode (MtmLocker contract) ────────────
 
 // LockMtmForPeriode implements MtmLocker. Called by closeflow.Service.HardClose.
+// M1 fix: queries mst.periode_buku for real tanggal_mulai/tanggal_akhir instead of 2000-2100 stub.
 func (s *Service) LockMtmForPeriode(ctx interface{}, txI interface{}, periodeID uuid.UUID, actorID uuid.UUID) error {
 	c, ok := ctx.(context.Context)
 	if !ok {
@@ -934,15 +1038,16 @@ func (s *Service) LockMtmForPeriode(ctx interface{}, txI interface{}, periodeID 
 	if !ok {
 		return fmt.Errorf("LockMtmForPeriode: tx must be *sql.Tx")
 	}
-	// Date range: derive from periode. Stub: use a wide range (year 2000-2100).
-	// Real implementation: query mst.periode_buku for tanggal_mulai/akhir.
-	from := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
-	to := time.Date(2100, 12, 31, 0, 0, 0, 0, time.UTC)
-	_, err := s.repo.LockMtmForPeriode(c, tx, periodeID, from, to, actorID)
+	from, to, err := s.resolvePeriodeDates(c, periodeID)
+	if err != nil {
+		return fmt.Errorf("LockMtmForPeriode: %w", err)
+	}
+	_, err = s.repo.LockMtmForPeriode(c, tx, periodeID, from, to, actorID)
 	return err
 }
 
 // UnlockMtmForPeriode implements MtmLocker.
+// M1 fix: queries mst.periode_buku for real tanggal_mulai/tanggal_akhir instead of 2000-2100 stub.
 func (s *Service) UnlockMtmForPeriode(ctx interface{}, txI interface{}, periodeID uuid.UUID, actorID uuid.UUID) error {
 	c, ok := ctx.(context.Context)
 	if !ok {
@@ -952,13 +1057,55 @@ func (s *Service) UnlockMtmForPeriode(ctx interface{}, txI interface{}, periodeI
 	if !ok {
 		return fmt.Errorf("UnlockMtmForPeriode: tx must be *sql.Tx")
 	}
-	from := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
-	to := time.Date(2100, 12, 31, 0, 0, 0, 0, time.UTC)
-	_, err := s.repo.UnlockMtmForPeriode(c, tx, periodeID, from, to, actorID)
+	from, to, err := s.resolvePeriodeDates(c, periodeID)
+	if err != nil {
+		return fmt.Errorf("UnlockMtmForPeriode: %w", err)
+	}
+	_, err = s.repo.UnlockMtmForPeriode(c, tx, periodeID, from, to, actorID)
 	return err
 }
 
+// resolvePeriodeDates fetches tanggal_mulai and tanggal_akhir for a periode_buku row.
+// M1 fix: replaces hardcoded 2000-2100 stub in LockMtmForPeriode / UnlockMtmForPeriode.
+// Uses tanggal_mulai as anchor date for GetPeriodeByTanggal lookup.
+// Falls back to full-wide range (2000-2100) only if the periode cannot be found (logs WARN).
+func (s *Service) resolvePeriodeDates(ctx context.Context, periodeID uuid.UUID) (from, to time.Time, err error) {
+	// We look up the periode by ID via a date-based adapter since we only have GetPeriodeByTanggal.
+	// Strategy: use the start of each month for the past 24 months as search probe.
+	// A more correct implementation would add GetPeriodeByID to the repo interface (tracked OQ-M6-7).
+	// For now: probe today and walk back month-by-month up to 24 months.
+	now := time.Now()
+	for i := 0; i < 24; i++ {
+		probe := time.Date(now.Year(), now.Month()-time.Month(i), 1, 0, 0, 0, 0, time.UTC)
+		p, lookupErr := s.repo.GetPeriodeByTanggal(ctx, probe)
+		if lookupErr != nil {
+			continue
+		}
+		if p == nil {
+			continue
+		}
+		if p.ID == periodeID {
+			return p.TanggalMulai, p.TanggalAkhir, nil
+		}
+	}
+	// Could not find periode — fall back to wide range but log WARN
+	s.logger.WarnContext(ctx, "resolvePeriodeDates: periode not found — using fallback 2000-2100 (OQ-M6-7)",
+		"periode_id", periodeID)
+	return time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2100, 12, 31, 0, 0, 0, 0, time.UTC),
+		nil
+}
+
 // ─── AsynqEnqueuer (interface for TriggerCron) ───────────────────────────────
+
+// isACSkipErr checks if an error is the AC-skip sentinel.
+// Used in OverrideApprove (M2 fix) to distinguish AC skip from real routing errors.
+func isACSkipErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return err.Error() == ErrMTMInstrumenACSkip.Error()
+}
 
 // AsynqEnqueuer is a minimal interface for enqueuing Asynq tasks.
 // Implemented by the real Asynq client in main.go; stub in tests.

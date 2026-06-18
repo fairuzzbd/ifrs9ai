@@ -104,8 +104,17 @@ const (
 	StatusStalePrice    Status = "STALE_PRICE"
 )
 
-// CanOverride returns true when the status allows override-approve or override-reject.
+// CanOverride returns true when the status allows override-approve action.
+// STALE_PRICE rows must use OverrideReject (CanReject), not OverrideApprove.
+// Fix m3: removed StatusStalePrice from CanOverride (compliance F-8).
 func (s Status) CanOverride() bool {
+	return s == StatusPendingReview
+}
+
+// CanReject returns true when the status allows override-reject action.
+// Both PENDING_REVIEW and STALE_PRICE rows can be rejected.
+// Fix m3: added to allow STALE_PRICE rejection (compliance F-8).
+func (s Status) CanReject() bool {
 	return s == StatusPendingReview || s == StatusStalePrice
 }
 
@@ -161,6 +170,9 @@ type Mtm struct {
 	// FX
 	KursID     *uuid.UUID       `db:"kurs_id"`     // NULL for IDR
 	KursTengah *decimal.Decimal `db:"kurs_tengah"` // NUMERIC(20,8), NULL for IDR
+
+	// Currency snapshot (B2 fix: added for FCY jurnal routing in OverrideApprove)
+	MataUang string `db:"mata_uang"` // ISO 4217, e.g. "IDR", "USD". Migration 000042.
 
 	// Classification snapshot
 	KlasifikasiSnapshot string `db:"klasifikasi_snapshot"`
@@ -348,8 +360,9 @@ type OverrideRejectResponse struct {
 
 // CronTriggerRequest is the body for POST /trx/mtm/cron/trigger.
 type CronTriggerRequest struct {
-	TanggalTarget string `json:"tanggalTarget"` // "YYYY-MM-DD", default: today
-	ForceRerun    bool   `json:"forceRerun"`
+	TanggalTarget    string `json:"tanggalTarget"`    // "YYYY-MM-DD", default: today
+	ForceRerun       bool   `json:"forceRerun"`       // skip idempotency check if true
+	ForceRerunReason string `json:"forceRerunReason"` // required ≥ 30 chars when ForceRerun=true (m7 fix)
 }
 
 // CronTriggerResponse is returned by POST /trx/mtm/cron/trigger.
@@ -462,11 +475,12 @@ const (
 
 // MtmCronPayload is the Asynq task payload for trx:mtm_daily_run.
 type MtmCronPayload struct {
-	TanggalTarget string `json:"tanggal_target"` // "YYYY-MM-DD"
-	TenantID      string `json:"tenant_id"`
-	JobID         string `json:"job_id"`
-	ForceRerun    bool   `json:"force_rerun"`
-	ActorID       string `json:"actor_id"` // empty for scheduled cron; set for manual trigger
+	TanggalTarget    string `json:"tanggal_target"`    // "YYYY-MM-DD"
+	TenantID         string `json:"tenant_id"`
+	JobID            string `json:"job_id"`
+	ForceRerun       bool   `json:"force_rerun"`
+	ForceRerunReason string `json:"force_rerun_reason"` // ≥ 30 chars when force_rerun=true (m7 fix)
+	ActorID          string `json:"actor_id"`           // empty for scheduled cron; set for manual trigger
 }
 
 // NewDailyRunTask creates an *asynq.Task for the MTM daily run.

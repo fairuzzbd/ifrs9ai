@@ -925,6 +925,11 @@ func main() {
 	// -----------------------------------------------------------------------
 	mtmRepo := mtm.NewDBRepository(db)
 	mtmJurnalPoster := mtm.NewRealJurnalPoster(logger)
+	// m5 fix: production guard — fatal if NoopJurnalPoster used in production
+	if mtm.IsNoopProduction(mtmJurnalPoster) {
+		log.Fatal("FATAL: APP_ENV=production but MTM JurnalPoster is NoopJurnalPoster. " +
+			"Wire internal/app-d/jurnal.Service before deploying to production.")
+	}
 	mtmSvc := mtm.NewService(mtmRepo, mtmJurnalPoster, auditWriter, logger)
 	mtmWorker := mtm.NewHandler(mtmSvc, logger)
 	_ = mtmWorker // registered in Redis block below
@@ -932,7 +937,8 @@ func main() {
 	// HTTP handler: enqueuer set to NoopEnqueuer in dev; overridden in Redis block below.
 	var mtmEnqueuer mtm.AsynqEnqueuer = mtm.NoopEnqueuer{}
 	mtmHandler := mtm.NewHTTPHandler(mtmSvc, mtmEnqueuer)
-	mtm.RegisterRoutes(v1, mtmHandler)
+	// B4 fix: pass rdb to RegisterRoutes so SensitiveRateLimit can be applied on cron/trigger.
+	mtm.RegisterRoutes(v1, mtmHandler, rdb)
 
 	// -----------------------------------------------------------------------
 	// P5-M3: GL Host REST Delivery — DeliveryService, DLQService, ReconciliationService.

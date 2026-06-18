@@ -3,6 +3,7 @@ package mtm
 import (
 	"bytes"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -31,7 +32,7 @@ func setupRouter(repo Repository) (*gin.Engine, *HTTPHandler) {
 	// Inject test claims so RequirePermission passes (reads "claims" from gin context).
 	testClaims := &auth.Claims{
 		Sub:         uuid.New().String(),
-		Permissions: []string{"fx_rate.read", "fx_rate.create", "fx_rate.approve"},
+		Permissions: []string{"mtm.read", "mtm.create", "mtm.override", "mtm.trigger"},
 	}
 	engine.Use(func(c *gin.Context) {
 		c.Set("claims", testClaims)
@@ -299,7 +300,7 @@ func TestHandler_OverrideApprove_SOD_Violation_403(t *testing.T) {
 	// Injected claims sub = testClaims.Sub, set uploader to same
 	testClaims := &auth.Claims{
 		Sub:         uuid.New().String(),
-		Permissions: []string{"fx_rate.read", "fx_rate.create", "fx_rate.approve"},
+		Permissions: []string{"mtm.read", "mtm.create", "mtm.override", "mtm.trigger"},
 	}
 	uploaderID, _ := uuid.Parse(testClaims.Sub)
 	m.UploaderID = &uploaderID
@@ -378,6 +379,57 @@ func TestHandler_OverrideReject_LockedFlag_423(t *testing.T) {
 	engine.ServeHTTP(w, req)
 
 	assert.Equal(t, 423, w.Code)
+}
+
+// ─── POST /trx/mtm/upload/batch — multipart tests (M4 MIME detection) ────────
+
+func buildMultipartCSV(t *testing.T, content []byte) (*bytes.Buffer, string) {
+	t.Helper()
+	body := &bytes.Buffer{}
+	w := multipart.NewWriter(body)
+	part, err := w.CreateFormFile("file", "mtm_upload.csv")
+	require.NoError(t, err)
+	_, err = part.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	return body, w.FormDataContentType()
+}
+
+func TestHandler_UploadBatch_TextPlainCSV_201(t *testing.T) {
+	engine, _ := setupRouter(newStubRepo())
+	// CSV content → MIME text/plain → accepted
+	csvContent := []byte("kode_instrumen,tanggal_mtm,harga_pasar,harga_sumber\nOBL-001,2026-06-10,100,MANUAL\n")
+	body, ct := buildMultipartCSV(t, csvContent)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/trx/mtm/upload/batch", body)
+	req.Header.Set("Content-Type", ct)
+	engine.ServeHTTP(w, req)
+
+	// CSV is text/plain → valid MIME → UploadManual called → 201 (empty rows from stub parser)
+	assert.Equal(t, http.StatusCreated, w.Code)
+}
+
+func TestHandler_UploadBatch_InvalidMIME_400(t *testing.T) {
+	engine, _ := setupRouter(newStubRepo())
+	// JPEG magic bytes → MIME image/jpeg → rejected
+	jpegMagic := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46}
+	jpegMagic = append(jpegMagic, make([]byte, 502)...) // pad to 512+
+
+	body := &bytes.Buffer{}
+	mw := multipart.NewWriter(body)
+	part, err := mw.CreateFormFile("file", "evil.jpg")
+	require.NoError(t, err)
+	_, err = part.Write(jpegMagic)
+	require.NoError(t, err)
+	require.NoError(t, mw.Close())
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/trx/mtm/upload/batch", body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	engine.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 // ─── parseUUID helper ────────────────────────────────────────────────────────

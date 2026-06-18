@@ -25,7 +25,7 @@ import (
 func makeClaimsContext(userID string) context.Context {
 	claims := &auth.Claims{
 		Sub:         userID,
-		Permissions: []string{"fx_rate.read", "fx_rate.create", "fx_rate.approve"},
+		Permissions: []string{"mtm.read", "mtm.create", "mtm.override", "mtm.trigger"},
 		TenantID:    "TUGURE",
 	}
 	return auth.ContextWithClaims(context.Background(), claims)
@@ -37,6 +37,7 @@ func makePendingMtm() *Mtm {
 	m.UploaderID = &uploaderID
 	m.DeviationFlag = true
 	m.LockedFlag = false
+	m.MataUang = "IDR" // B2 fix: required non-empty for OverrideApprove routing
 	return m
 }
 
@@ -139,7 +140,7 @@ func TestService_OverrideApprove_FVOCIDebt_FCY_TwoJurnalEntries(t *testing.T) {
 	repo := newStubRepo()
 	m := makePendingMtm()
 	m.KlasifikasiSnapshot = KlasifikasiFVOCIDebt
-	// Override with FCY klasifikasi should use stored snapshot, not re-detect
+	m.MataUang = "USD" // B2 fix: OverrideApprove uses m.MataUang (not hardcoded "IDR")
 	repo.mtm = m
 	svc := newTestService(repo)
 	poster := svc.poster.(*JurnalPosterStub)
@@ -148,11 +149,12 @@ func TestService_OverrideApprove_FVOCIDebt_FCY_TwoJurnalEntries(t *testing.T) {
 	_, err := svc.OverrideApprove(ctx, m.ID, OverrideApproveRequest{
 		Comment: "Override justified: Bloomberg price confirmed by phone with dealer.",
 	})
-	// OverrideApprove uses KlasifikasiSnapshot + "IDR" as hardcoded mata_uang for jurnal
-	// so FVOCI_DEBT IDR → 1 entry
+	// B2 fix: FVOCI_DEBT FCY → 2 entries (MTM_FVOCI + MTM_FX_OCI_RESERVE)
 	require.NoError(t, err)
 	calls := poster.Calls()
-	assert.Len(t, calls, 1)
+	assert.Len(t, calls, 2, "FVOCI_DEBT FCY must produce 2 jurnal entries (§B5.7.2A)")
+	assert.Equal(t, EventCodeMTMFVOCI, calls[0].EventCode)
+	assert.Equal(t, EventCodeMTMFXOCIReserve, calls[1].EventCode)
 }
 
 // ─── OverrideReject ───────────────────────────────────────────────────────────
@@ -372,12 +374,13 @@ func TestNewRealJurnalPoster_ReturnsNoop(t *testing.T) {
 // ─── domain.Status.CanOverride ────────────────────────────────────────────────
 
 func TestStatus_CanOverride_AllStatuses(t *testing.T) {
+	// m3 fix: CanOverride no longer allows STALE_PRICE (must use CanReject for that).
 	cases := []struct {
 		s    Status
 		want bool
 	}{
 		{StatusPendingReview, true},
-		{StatusStalePrice, true},
+		{StatusStalePrice, false},  // m3 fix: STALE_PRICE uses CanReject, not CanOverride
 		{StatusAutoPOSTED, false},
 		{StatusApproved, false},
 		{StatusRejected, false},
@@ -385,6 +388,25 @@ func TestStatus_CanOverride_AllStatuses(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(string(tc.s), func(t *testing.T) {
 			assert.Equal(t, tc.want, tc.s.CanOverride())
+		})
+	}
+}
+
+func TestStatus_CanReject_AllStatuses(t *testing.T) {
+	// m3 fix: CanReject allows both PENDING_REVIEW and STALE_PRICE.
+	cases := []struct {
+		s    Status
+		want bool
+	}{
+		{StatusPendingReview, true},
+		{StatusStalePrice, true},  // m3 fix: STALE_PRICE can be rejected
+		{StatusAutoPOSTED, false},
+		{StatusApproved, false},
+		{StatusRejected, false},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.s), func(t *testing.T) {
+			assert.Equal(t, tc.want, tc.s.CanReject())
 		})
 	}
 }
@@ -680,4 +702,294 @@ func TestNoopEnqueuer_ReturnsError(t *testing.T) {
 	err := n.Enqueue(context.Background(), TaskMtmDailyRun, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Redis not configured")
+}
+
+// ─── isACSkipErr (service.go) — M2 fix ───────────────────────────────────────
+
+func TestIsACSkipErr_True(t *testing.T) {
+	assert.True(t, isACSkipErr(ErrMTMInstrumenACSkip))
+}
+
+func TestIsACSkipErr_False_DifferentErr(t *testing.T) {
+	assert.False(t, isACSkipErr(ErrMTMPeriodeLocked))
+}
+
+func TestIsACSkipErr_False_Nil(t *testing.T) {
+	assert.False(t, isACSkipErr(nil))
+}
+
+// OverrideApprove with AC klasifikasi triggers isACSkipErr path.
+func TestService_OverrideApprove_ACKlasifikasi_SkipJurnalStillApproved(t *testing.T) {
+	repo := newStubRepo()
+	m := makePendingMtm()
+	m.KlasifikasiSnapshot = KlasifikasiAC
+	m.MataUang = "IDR"
+	repo.mtm = m
+	svc := newTestService(repo)
+	poster := svc.poster.(*JurnalPosterStub)
+
+	ctx := makeClaimsContext(uuid.New().String())
+	result, err := svc.OverrideApprove(ctx, m.ID, OverrideApproveRequest{
+		Comment: "Override justified: AC instrument incorrectly routed, skipping jurnal post.",
+	})
+	// M2 fix: AC skip → APPROVED without jurnal post (not an error)
+	require.NoError(t, err)
+	assert.Equal(t, "APPROVED", result.Status)
+	assert.Len(t, poster.Calls(), 0, "AC instrument must not produce jurnal entry")
+}
+
+// ─── OverrideReject — STALE_PRICE status (m3 fix) ────────────────────────────
+
+func TestService_OverrideReject_StalePrice_Succeeds(t *testing.T) {
+	repo := newStubRepo()
+	m := makeMtm(StatusStalePrice)
+	m.LockedFlag = false
+	uploaderID := uuid.New()
+	m.UploaderID = &uploaderID
+	m.MataUang = "IDR"
+	repo.mtm = m
+	svc := newTestService(repo)
+
+	ctx := makeClaimsContext(uuid.New().String())
+	result, err := svc.OverrideReject(ctx, m.ID, OverrideRejectRequest{
+		Comment: "Price is clearly wrong — reverting to stale price for re-verification.",
+	})
+	// m3 fix: STALE_PRICE can be rejected via CanReject()
+	require.NoError(t, err)
+	assert.Equal(t, "REJECTED", result.Status)
+}
+
+// ─── IsNoopProduction (jurnal_poster.go) — m5 fix ────────────────────────────
+
+func TestIsNoopProduction_NonProduction_AlwaysFalse(t *testing.T) {
+	// In test env, APP_ENV is not "production"
+	noop := NewNoopJurnalPoster(nil)
+	// Should return false since APP_ENV != "production"
+	assert.False(t, IsNoopProduction(noop))
+}
+
+func TestIsNoopProduction_RealPoster_False(t *testing.T) {
+	real := NewRealJurnalPoster(slog.Default())
+	assert.False(t, IsNoopProduction(real))
+}
+
+func TestIsNoopProduction_Stub_False(t *testing.T) {
+	stub := NewJurnalPosterStub(nil)
+	assert.False(t, IsNoopProduction(stub))
+}
+
+// ─── resolvePeriodeDates — found path (M1 fix) ───────────────────────────────
+
+func TestService_resolvePeriodeDates_Found(t *testing.T) {
+	repo := newStubRepo()
+	targetID := uuid.New()
+	repo.periodeBukuRef = &PeriodeBukuRef{
+		ID:             targetID,
+		TanggalMulai:  time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+		TanggalAkhir:  time.Date(2026, 6, 30, 23, 59, 59, 0, time.UTC),
+		StatusPeriode: "OPEN",
+	}
+	svc := newTestService(repo)
+
+	from, to, err := svc.resolvePeriodeDates(context.Background(), targetID)
+	require.NoError(t, err)
+	assert.Equal(t, 2026, from.Year())
+	assert.Equal(t, time.June, from.Month())
+	assert.Equal(t, 2026, to.Year())
+}
+
+func TestService_resolvePeriodeDates_NotFound_Fallback(t *testing.T) {
+	repo := newStubRepo()
+	repo.periodeBukuRef = nil // GetPeriodeByTanggal returns nil
+	svc := newTestService(repo)
+
+	// Non-existent periodeID → fallback to 2000-2100
+	from, to, err := svc.resolvePeriodeDates(context.Background(), uuid.New())
+	require.NoError(t, err)
+	assert.Equal(t, 2000, from.Year())
+	assert.Equal(t, 2100, to.Year())
+}
+
+// ─── GetPeriodeByTanggal stub coverage ───────────────────────────────────────
+
+func TestStubRepo_GetPeriodeByTanggal_Nil(t *testing.T) {
+	repo := newStubRepo()
+	p, err := repo.GetPeriodeByTanggal(context.Background(), time.Now())
+	require.NoError(t, err)
+	assert.Nil(t, p)
+}
+
+func TestStubRepo_GetPeriodeByTanggal_Set(t *testing.T) {
+	repo := newStubRepo()
+	pID := uuid.New()
+	repo.periodeBukuRef = &PeriodeBukuRef{ID: pID, StatusPeriode: "OPEN"}
+	p, err := repo.GetPeriodeByTanggal(context.Background(), time.Now())
+	require.NoError(t, err)
+	require.NotNil(t, p)
+	assert.Equal(t, pID, p.ID)
+}
+
+// ─── TriggerCron — ForceRerun validation (m7 fix) ────────────────────────────
+
+func TestService_TriggerCron_ForceRerun_ShortReason_Rejected(t *testing.T) {
+	svc := newTestService(newStubRepo())
+	eq := &stubEnqueuer{}
+
+	_, err := svc.TriggerCron(context.Background(), eq, CronTriggerRequest{
+		TanggalTarget:    "2026-06-10",
+		ForceRerun:       true,
+		ForceRerunReason: "too short", // < 30 chars
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "30")
+	assert.Len(t, eq.calls, 0)
+}
+
+func TestService_TriggerCron_ForceRerun_ValidReason_Enqueued(t *testing.T) {
+	svc := newTestService(newStubRepo())
+	eq := &stubEnqueuer{}
+
+	result, err := svc.TriggerCron(context.Background(), eq, CronTriggerRequest{
+		TanggalTarget:    "2026-06-10",
+		ForceRerun:       true,
+		ForceRerunReason: "Recompute needed due to IBPA feed corruption on this date.",
+	})
+	require.NoError(t, err)
+	assert.NotEmpty(t, result.JobID)
+	assert.Len(t, eq.calls, 1)
+}
+
+// ─── OverrideApprove — invalid SignatureMethod (m6 fix) ──────────────────────
+
+func TestService_OverrideApprove_InvalidSignatureMethod(t *testing.T) {
+	repo := newStubRepo()
+	m := makePendingMtm()
+	repo.mtm = m
+	svc := newTestService(repo)
+
+	ctx := makeClaimsContext(uuid.New().String())
+	_, err := svc.OverrideApprove(ctx, m.ID, OverrideApproveRequest{
+		Comment:         "Override justified: Bloomberg price confirmed by phone with dealer.",
+		SignatureMethod: "INVALID_METHOD",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "signatureMethod")
+}
+
+func TestService_OverrideApprove_JWTStepUp_Accepted(t *testing.T) {
+	repo := newStubRepo()
+	m := makePendingMtm()
+	repo.mtm = m
+	svc := newTestService(repo)
+
+	ctx := makeClaimsContext(uuid.New().String())
+	result, err := svc.OverrideApprove(ctx, m.ID, OverrideApproveRequest{
+		Comment:         "Override justified: Bloomberg price confirmed by phone with dealer.",
+		SignatureMethod:  "JWT_STEP_UP",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "APPROVED", result.Status)
+}
+
+// ─── OverrideReject — invalid SignatureMethod (m6 fix) ───────────────────────
+
+func TestService_OverrideReject_InvalidSignatureMethod(t *testing.T) {
+	repo := newStubRepo()
+	m := makePendingMtm()
+	repo.mtm = m
+	svc := newTestService(repo)
+
+	ctx := makeClaimsContext(uuid.New().String())
+	_, err := svc.OverrideReject(ctx, m.ID, OverrideRejectRequest{
+		Comment:         "Price is clearly wrong — reverting to stale price for re-verification.",
+		SignatureMethod: "INVALID_METHOD",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "signatureMethod")
+}
+
+// ─── OverrideReject — SoD violation path ─────────────────────────────────────
+
+func TestService_OverrideReject_SOD_Violation(t *testing.T) {
+	repo := newStubRepo()
+	m := makePendingMtm()
+	// uploader_id == rejecter_id → SoD violation
+	rejecterID := uuid.New()
+	m.UploaderID = &rejecterID
+	repo.mtm = m
+	svc := newTestService(repo)
+
+	ctx := makeClaimsContext(rejecterID.String())
+	_, err := svc.OverrideReject(ctx, m.ID, OverrideRejectRequest{
+		Comment: "Price is clearly wrong — reverting to stale price for re-verification.",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "upload")
+}
+
+// ─── UploadManual — insert error path (processUploadRow) ─────────────────────
+
+func TestService_UploadManual_InsertError(t *testing.T) {
+	repo := newStubRepo()
+	repo.insertErr = fmt.Errorf("database insert failed")
+	svc := newTestService(repo)
+
+	rows := []UploadFileRow{
+		{LineNumber: 1, KodeInstrumen: "OBL-001", TanggalMtm: "2026-06-10", HargaPasar: "100", HargaSumber: "MANUAL"},
+	}
+	result, err := svc.UploadManual(context.Background(), uuid.New(), rows, "")
+	require.NoError(t, err)
+	// Insert error → row counted as invalid
+	assert.Equal(t, 1, result.RowsInvalid)
+}
+
+// ─── GetStalePriceAlerts — error from repo ───────────────────────────────────
+
+type errStaleRepo struct {
+	*stubRepo
+}
+
+func (r *errStaleRepo) ListStaleAlerts(_ context.Context, _ string, _ int) ([]*Mtm, bool, int, error) {
+	return nil, false, 0, fmt.Errorf("stale repo error")
+}
+
+func TestService_GetStalePriceAlerts_RepoError(t *testing.T) {
+	svc := newTestService(&errStaleRepo{newStubRepo()})
+	_, _, _, err := svc.GetStalePriceAlerts(context.Background(), "TUGURE", 50)
+	require.Error(t, err)
+}
+
+// ─── GetDetail — repo error path ─────────────────────────────────────────────
+
+type errGetByIDRepo struct {
+	*stubRepo
+}
+
+func (r *errGetByIDRepo) GetByID(_ context.Context, _ uuid.UUID) (*Mtm, error) {
+	return nil, fmt.Errorf("db read error")
+}
+
+func TestService_GetDetail_RepoError(t *testing.T) {
+	svc := newTestService(&errGetByIDRepo{newStubRepo()})
+	_, err := svc.GetDetail(context.Background(), uuid.New())
+	require.Error(t, err)
+}
+
+// ─── UploadManual — deviation warning path ────────────────────────────────────
+
+func TestService_UploadManual_DeviationWarning_Captured(t *testing.T) {
+	// Large deviation → status=PENDING_REVIEW, devWarn populated
+	repo := newStubRepo()
+	bv := decimal.NewFromFloat(100)
+	repo.hargaBukuIdr = &bv
+	svc := newTestService(repo)
+
+	rows := []UploadFileRow{
+		{LineNumber: 1, KodeInstrumen: "OBL-001", TanggalMtm: "2026-06-10", HargaPasar: "200", HargaSumber: "MANUAL"},
+	}
+	result, err := svc.UploadManual(context.Background(), uuid.New(), rows, "")
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.RowsValid)
+	// DeviationWarnings should be populated
+	assert.NotEmpty(t, result.DeviationWarnings)
 }

@@ -19,21 +19,22 @@ import (
 // ─── Stub Repository ─────────────────────────────────────────────────────────
 
 type stubRepo struct {
-	mtm          *Mtm
-	mtmList      []*Mtm
-	batch        *UploadBatch
-	batchRows    []*Mtm
-	staleRows    []*Mtm
-	activeInstr  []InstrumenInfo
-	feedPrice    *FeedPrice
-	kurs         *KursSnapshot
-	hargaBukuIdr *decimal.Decimal
-	configValues map[string]string
-	insertErr    error
-	updateErr    error
-	existsActive bool
-	existsMtm    *Mtm
-	isHoliday    bool
+	mtm            *Mtm
+	mtmList        []*Mtm
+	batch          *UploadBatch
+	batchRows      []*Mtm
+	staleRows      []*Mtm
+	activeInstr    []InstrumenInfo
+	feedPrice      *FeedPrice
+	kurs           *KursSnapshot
+	hargaBukuIdr   *decimal.Decimal
+	periodeBukuRef *PeriodeBukuRef
+	configValues   map[string]string
+	insertErr      error
+	updateErr      error
+	existsActive   bool
+	existsMtm      *Mtm
+	isHoliday      bool
 }
 
 func newStubRepo() *stubRepo {
@@ -118,6 +119,10 @@ func (r *stubRepo) GetApprovedKurs(_ context.Context, _ string, _ time.Time) (*K
 
 func (r *stubRepo) GetHargaBukuIdr(_ context.Context, _ uuid.UUID) (*decimal.Decimal, error) {
 	return r.hargaBukuIdr, nil
+}
+
+func (r *stubRepo) GetPeriodeByTanggal(_ context.Context, _ time.Time) (*PeriodeBukuRef, error) {
+	return r.periodeBukuRef, nil
 }
 
 func (r *stubRepo) InsertUploadBatch(_ context.Context, _ *sql.Tx, b *UploadBatch) error {

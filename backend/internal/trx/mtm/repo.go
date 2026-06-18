@@ -71,6 +71,11 @@ type Repository interface {
 	// For Stage 3: Net Carrying (Gross − ECL). Returns (nil, nil) if not found.
 	GetHargaBukuIdr(ctx context.Context, instrumenID uuid.UUID) (*decimal.Decimal, error)
 
+	// GetPeriodeByTanggal finds the active periode_buku that contains the given date.
+	// Returns (nil, nil) if no periode covers tanggal.
+	// Used by LockMtmForPeriode (M1 fix) and ProcessOneInstrument (m1 fix).
+	GetPeriodeByTanggal(ctx context.Context, tanggal time.Time) (*PeriodeBukuRef, error)
+
 	// InsertUploadBatch inserts a sys.upload_batch row (batch_type='MTM_UPLOAD').
 	InsertUploadBatch(ctx context.Context, tx *sql.Tx, b *UploadBatch) error
 
@@ -108,6 +113,15 @@ type StatusUpdate struct {
 	JurnalEventCode2   *string
 	UpdatedBy          uuid.UUID
 	RowVersion         int64 // expected current row_version for optimistic lock
+}
+
+// PeriodeBukuRef holds the minimal periode_buku fields needed by MTM service.
+// Obtained via GetPeriodeByTanggal (M1 fix — replaces hardcoded 2000-2100 stub).
+type PeriodeBukuRef struct {
+	ID            uuid.UUID
+	TanggalMulai  time.Time
+	TanggalAkhir  time.Time
+	StatusPeriode string // OPEN | SOFT_CLOSED | HARD_CLOSED
 }
 
 // UploadBatch mirrors sys.upload_batch minimal shape for MTM upload.
@@ -292,6 +306,7 @@ func (r *DBRepository) GetHargaBukuIdr(ctx context.Context, instrumenID uuid.UUI
 }
 
 // Insert inserts a new Mtm row in the given transaction.
+// Includes mata_uang column added by migration 000042 (B2 fix).
 func (r *DBRepository) Insert(ctx context.Context, tx *sql.Tx, m *Mtm) error {
 	if r.db == nil {
 		return fmt.Errorf("DBRepository.Insert: database not configured")
@@ -302,6 +317,7 @@ func (r *DBRepository) Insert(ctx context.Context, tx *sql.Tx, m *Mtm) error {
 			harga_sumber, harga_tanggal, harga_age_days,
 			harga_pasar_fcy, harga_pasar_idr, harga_buku_idr, delta_idr, delta_pct,
 			kurs_id, kurs_tengah,
+			mata_uang,
 			klasifikasi_snapshot, treatment_snapshot,
 			jurnal_entry_id, jurnal_entry_id_2, jurnal_event_code, jurnal_event_code_2,
 			stale_price_flag, deviation_flag, locked_flag, status,
@@ -313,18 +329,24 @@ func (r *DBRepository) Insert(ctx context.Context, tx *sql.Tx, m *Mtm) error {
 			$5,$6,$7,
 			$8,$9,$10,$11,$12,
 			$13,$14,
-			$15,$16,
-			$17,$18,$19,$20,
-			$21,$22,$23,$24,
-			$25,$26,$27,
-			$28,$29,$30,
-			$31,$32,$33,$34,$35,$36
+			$15,
+			$16,$17,
+			$18,$19,$20,$21,
+			$22,$23,$24,$25,
+			$26,$27,$28,
+			$29,$30,$31,
+			$32,$33,$34,$35,$36,$37
 		)`
+	mataUang := m.MataUang
+	if mataUang == "" {
+		mataUang = "IDR"
+	}
 	_, err := tx.ExecContext(ctx, q,
 		m.ID, m.InstrumenID, m.PeriodeBulananID, m.TanggalMtm,
 		m.HargaSumber, m.HargaTanggal, m.HargaAgeDays,
 		m.HargaPasarFcy, m.HargaPasarIdr, m.HargaBukuIdr, m.DeltaIdr, m.DeltaPct,
 		m.KursID, m.KursTengah,
+		mataUang,
 		m.KlasifikasiSnapshot, m.TreatmentSnapshot,
 		m.JurnalEntryID, m.JurnalEntryID2, m.JurnalEventCode, m.JurnalEventCode2,
 		m.StalePriceFlag, m.DeviationFlag, m.LockedFlag, string(m.Status),
@@ -339,6 +361,7 @@ func (r *DBRepository) Insert(ctx context.Context, tx *sql.Tx, m *Mtm) error {
 }
 
 // GetByID fetches one Mtm row by UUID.
+// Includes mata_uang column added by migration 000042 (B2 fix).
 func (r *DBRepository) GetByID(ctx context.Context, id uuid.UUID) (*Mtm, error) {
 	if r.db == nil {
 		return nil, nil
@@ -348,6 +371,7 @@ func (r *DBRepository) GetByID(ctx context.Context, id uuid.UUID) (*Mtm, error) 
 		       harga_sumber, harga_tanggal, harga_age_days,
 		       harga_pasar_fcy, harga_pasar_idr, harga_buku_idr, delta_idr, delta_pct,
 		       kurs_id, kurs_tengah,
+		       COALESCE(mata_uang, 'IDR'),
 		       klasifikasi_snapshot, treatment_snapshot,
 		       jurnal_entry_id, jurnal_entry_id_2, jurnal_event_code, jurnal_event_code_2,
 		       stale_price_flag, deviation_flag, locked_flag, status,
@@ -361,6 +385,7 @@ func (r *DBRepository) GetByID(ctx context.Context, id uuid.UUID) (*Mtm, error) 
 		&m.HargaSumber, &m.HargaTanggal, &m.HargaAgeDays,
 		&m.HargaPasarFcy, &m.HargaPasarIdr, &m.HargaBukuIdr, &m.DeltaIdr, &m.DeltaPct,
 		&m.KursID, &m.KursTengah,
+		&m.MataUang,
 		&m.KlasifikasiSnapshot, &m.TreatmentSnapshot,
 		&m.JurnalEntryID, &m.JurnalEntryID2, &m.JurnalEventCode, &m.JurnalEventCode2,
 		&m.StalePriceFlag, &m.DeviationFlag, &m.LockedFlag, &m.Status,
@@ -375,6 +400,34 @@ func (r *DBRepository) GetByID(ctx context.Context, id uuid.UUID) (*Mtm, error) 
 		return nil, fmt.Errorf("DBRepository.GetByID: %w", err)
 	}
 	return m, nil
+}
+
+// GetPeriodeByTanggal finds the active periode_buku that covers the given date.
+// Returns (nil, nil) if no periode row is found for the date.
+// M1 fix: used by LockMtmForPeriode to derive real tanggal_mulai/tanggal_akhir.
+func (r *DBRepository) GetPeriodeByTanggal(ctx context.Context, tanggal time.Time) (*PeriodeBukuRef, error) {
+	if r.db == nil {
+		return nil, nil
+	}
+	const q = `
+		SELECT id, tanggal_mulai, tanggal_akhir, status_periode
+		FROM mst.periode_buku
+		WHERE tanggal_mulai <= $1 AND tanggal_akhir >= $1
+		  AND deleted_at IS NULL
+		  AND tenant_id = 'TUGURE'
+		ORDER BY tanggal_akhir DESC
+		LIMIT 1`
+	p := &PeriodeBukuRef{}
+	err := r.db.QueryRowContext(ctx, q, tanggal.Format("2006-01-02")).Scan(
+		&p.ID, &p.TanggalMulai, &p.TanggalAkhir, &p.StatusPeriode,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("DBRepository.GetPeriodeByTanggal: %w", err)
+	}
+	return p, nil
 }
 
 // UpdateStatus updates status and related fields in a transaction.
@@ -517,6 +570,7 @@ func (r *DBRepository) ListStaleAlerts(ctx context.Context, cursor string, limit
 }
 
 // LockMtmForPeriode sets locked_flag=TRUE for all rows in the periode date range.
+// M1 fix: added AND periode_bulanan_id = $4 for defence-in-depth scoping.
 func (r *DBRepository) LockMtmForPeriode(ctx context.Context, tx *sql.Tx, periodeID uuid.UUID, tanggalMulai, tanggalAkhir time.Time, actorID uuid.UUID) (int64, error) {
 	if r.db == nil {
 		return 0, nil
@@ -525,10 +579,11 @@ func (r *DBRepository) LockMtmForPeriode(ctx context.Context, tx *sql.Tx, period
 		UPDATE trx.mtm
 		SET locked_flag = TRUE, updated_at = now(), updated_by = $1, row_version = row_version + 1
 		WHERE tanggal_mtm BETWEEN $2 AND $3
+		  AND periode_bulanan_id = $4
 		  AND tenant_id = 'TUGURE'
 		  AND deleted_at IS NULL`
 	result, err := tx.ExecContext(ctx, q, actorID,
-		tanggalMulai.Format("2006-01-02"), tanggalAkhir.Format("2006-01-02"))
+		tanggalMulai.Format("2006-01-02"), tanggalAkhir.Format("2006-01-02"), periodeID)
 	if err != nil {
 		return 0, fmt.Errorf("DBRepository.LockMtmForPeriode: %w", err)
 	}
@@ -537,6 +592,7 @@ func (r *DBRepository) LockMtmForPeriode(ctx context.Context, tx *sql.Tx, period
 }
 
 // UnlockMtmForPeriode sets locked_flag=FALSE for all rows in the periode date range.
+// M1 fix: added AND periode_bulanan_id = $4 for defence-in-depth scoping.
 func (r *DBRepository) UnlockMtmForPeriode(ctx context.Context, tx *sql.Tx, periodeID uuid.UUID, tanggalMulai, tanggalAkhir time.Time, actorID uuid.UUID) (int64, error) {
 	if r.db == nil {
 		return 0, nil
@@ -545,10 +601,11 @@ func (r *DBRepository) UnlockMtmForPeriode(ctx context.Context, tx *sql.Tx, peri
 		UPDATE trx.mtm
 		SET locked_flag = FALSE, updated_at = now(), updated_by = $1, row_version = row_version + 1
 		WHERE tanggal_mtm BETWEEN $2 AND $3
+		  AND periode_bulanan_id = $4
 		  AND tenant_id = 'TUGURE'
 		  AND deleted_at IS NULL`
 	result, err := tx.ExecContext(ctx, q, actorID,
-		tanggalMulai.Format("2006-01-02"), tanggalAkhir.Format("2006-01-02"))
+		tanggalMulai.Format("2006-01-02"), tanggalAkhir.Format("2006-01-02"), periodeID)
 	if err != nil {
 		return 0, fmt.Errorf("DBRepository.UnlockMtmForPeriode: %w", err)
 	}

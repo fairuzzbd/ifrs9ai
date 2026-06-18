@@ -444,11 +444,13 @@ func TestDBRepository_GetByID_Found(t *testing.T) {
 	now := time.Now()
 	createdBy := uuid.New()
 
+	// B2 fix: mata_uang column added by migration 000042 — add to mock scan list.
 	cols := []string{
 		"id", "instrumen_id", "periode_bulanan_id", "tanggal_mtm",
 		"harga_sumber", "harga_tanggal", "harga_age_days",
 		"harga_pasar_fcy", "harga_pasar_idr", "harga_buku_idr", "delta_idr", "delta_pct",
 		"kurs_id", "kurs_tengah",
+		"coalesce", // COALESCE(mata_uang, 'IDR') in GetByID query
 		"klasifikasi_snapshot", "treatment_snapshot",
 		"jurnal_entry_id", "jurnal_entry_id_2", "jurnal_event_code", "jurnal_event_code_2",
 		"stale_price_flag", "deviation_flag", "locked_flag", "status",
@@ -463,6 +465,7 @@ func TestDBRepository_GetByID_Found(t *testing.T) {
 			"IBPA", now, int16(1),
 			nil, "100.0000", "95.0000", "5.0000", "5.2600",
 			nil, nil,
+			"IDR", // mata_uang
 			"FVTPL", "MTM_FVTPL",
 			nil, nil, nil, nil,
 			false, true, false, "AUTO_POSTED",
@@ -599,6 +602,56 @@ func TestDBRepository_InsertUploadBatch_Success(t *testing.T) {
 	err = repo.InsertUploadBatch(context.Background(), tx, b)
 	require.NoError(t, err)
 	_ = tx.Commit()
+}
+
+// ─── GetPeriodeByTanggal (M1 fix) ────────────────────────────────────────────
+
+func TestDBRepository_GetPeriodeByTanggal_Found(t *testing.T) {
+	repo, mock := newMockRepo(t)
+	periodeID := uuid.New()
+	tanggalMulai := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	tanggalAkhir := time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery(`SELECT id, tanggal_mulai, tanggal_akhir, status_periode`).
+		WithArgs("2026-06-10").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "tanggal_mulai", "tanggal_akhir", "status_periode",
+		}).AddRow(periodeID, tanggalMulai, tanggalAkhir, "OPEN"))
+
+	tanggal := time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC)
+	p, err := repo.GetPeriodeByTanggal(context.Background(), tanggal)
+	require.NoError(t, err)
+	require.NotNil(t, p)
+	assert.Equal(t, periodeID, p.ID)
+	assert.Equal(t, "OPEN", p.StatusPeriode)
+}
+
+func TestDBRepository_GetPeriodeByTanggal_NotFound(t *testing.T) {
+	repo, mock := newMockRepo(t)
+	mock.ExpectQuery(`SELECT id, tanggal_mulai, tanggal_akhir, status_periode`).
+		WillReturnError(sql.ErrNoRows)
+
+	p, err := repo.GetPeriodeByTanggal(context.Background(), time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	assert.Nil(t, p)
+}
+
+func TestDBRepository_GetPeriodeByTanggal_DBError(t *testing.T) {
+	repo, mock := newMockRepo(t)
+	mock.ExpectQuery(`SELECT id, tanggal_mulai, tanggal_akhir, status_periode`).
+		WillReturnError(fmt.Errorf("connection timeout"))
+
+	_, err := repo.GetPeriodeByTanggal(context.Background(), time.Now())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "GetPeriodeByTanggal")
+}
+
+func TestDBRepository_GetPeriodeByTanggal_NilDB_ReturnsNil(t *testing.T) {
+	// DBRepository with nil db → returns nil, nil early
+	repo := &DBRepository{db: nil}
+	p, err := repo.GetPeriodeByTanggal(context.Background(), time.Now())
+	require.NoError(t, err)
+	assert.Nil(t, p)
 }
 
 // ─── ListStaleAlerts with hasMore ────────────────────────────────────────────

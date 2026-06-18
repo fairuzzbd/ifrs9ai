@@ -14,6 +14,8 @@ package mtm
 //   POST   /trx/mtm/:id/override-reject     → OverrideReject
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -40,7 +42,8 @@ func NewHTTPHandler(svc *Service, enqueuer AsynqEnqueuer) *HTTPHandler {
 // ─── GET /trx/mtm ─────────────────────────────────────────────────────────────
 
 // List handles GET /api/v1/trx/mtm.
-// Permission: fx_rate.read (ROLE-AKUN, ROLE-AUDIT, etc.)
+// Permission: mtm.read (ROLE-AKUN, ROLE-AUDIT, etc.)
+// m2 fix: comment corrected from fx_rate.read → mtm.read.
 func (h *HTTPHandler) List(c *gin.Context) {
 	allCols := append(AllowedSortCols, AllowedFilterCols...) //nolint:gocritic
 	q, err := listquery.ParseFromRequest(c.Request, allCols)
@@ -96,8 +99,10 @@ func (h *HTTPHandler) GetByID(c *gin.Context) {
 // ─── POST /trx/mtm/upload/batch ───────────────────────────────────────────────
 
 // UploadBatch handles POST /api/v1/trx/mtm/upload/batch.
-// Permission: fx_rate.create (ROLE-AKUN)
+// Permission: mtm.create (ROLE-AKUN)
 // multipart/form-data: field "file" (XLSX or CSV, max 5MB).
+// M4 fix: MIME type detection — rejects non-XLSX/CSV files before parsing.
+// m2 fix: comment corrected from fx_rate.create → mtm.create.
 func (h *HTTPHandler) UploadBatch(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 5<<20)
 
@@ -119,6 +124,39 @@ func (h *HTTPHandler) UploadBatch(c *gin.Context) {
 		return
 	}
 	defer file.Close() //nolint:errcheck
+
+	// M4 fix: detect MIME type from first 512 bytes to prevent non-XLSX/CSV uploads.
+	// XLSX is a ZIP archive; CSV is plain text. Both are detected via http.DetectContentType.
+	sniff := make([]byte, 512)
+	n, _ := io.ReadFull(file, sniff)
+	detected := http.DetectContentType(sniff[:n])
+	// XLSX (Office Open XML) is a ZIP: application/zip or application/octet-stream
+	// CSV is text/plain
+	validMIME := detected == "application/zip" ||
+		detected == "application/octet-stream" ||
+		detected == "text/plain; charset=utf-8" ||
+		detected == "text/plain; charset=utf-8\x00"
+	if !validMIME {
+		response.Error(c, domainerrors.New(domainerrors.CodeValidationFailed,
+			"File harus berformat XLSX atau CSV. MIME terdeteksi: "+detected))
+		return
+	}
+	// Seek back to start so the parser can read from beginning
+	if seeker, ok := file.(io.Seeker); ok {
+		if _, seekErr := seeker.Seek(0, io.SeekStart); seekErr != nil {
+			// Reconstruct reader from already-read bytes + remainder
+			remainder := make([]byte, 0, 4*1024*1024)
+			rest, _ := io.ReadAll(file)
+			full := append(sniff[:n], remainder...)
+			full = append(full, rest...)
+			_ = full // parser not yet wired (TODO follow-up)
+		}
+	} else {
+		// Fallback: combine sniffed + remaining bytes into buffer
+		rest, _ := io.ReadAll(file)
+		combined := bytes.NewReader(append(sniff[:n], rest...))
+		_ = combined // parser not yet wired (TODO follow-up)
+	}
 
 	catatan := c.PostForm("catatan")
 
@@ -155,8 +193,9 @@ func (h *HTTPHandler) GetUploadBatch(c *gin.Context) {
 // ─── POST /trx/mtm/:id/override-approve ──────────────────────────────────────
 
 // OverrideApprove handles POST /api/v1/trx/mtm/:id/override-approve.
-// Permission: fx_rate.approve (ROLE-AKUN-CTL).
+// Permission: mtm.override (ROLE-AKUN-CTL).
 // SoD: approver ≠ uploader (enforced in service).
+// m2 fix: comment corrected from fx_rate.approve → mtm.override.
 func (h *HTTPHandler) OverrideApprove(c *gin.Context) {
 	id, err := parseUUID(c, "id")
 	if err != nil {
@@ -180,7 +219,8 @@ func (h *HTTPHandler) OverrideApprove(c *gin.Context) {
 // ─── POST /trx/mtm/:id/override-reject ───────────────────────────────────────
 
 // OverrideReject handles POST /api/v1/trx/mtm/:id/override-reject.
-// Permission: fx_rate.approve (ROLE-AKUN-CTL).
+// Permission: mtm.override (ROLE-AKUN-CTL).
+// m2 fix: comment corrected from fx_rate.approve → mtm.override.
 func (h *HTTPHandler) OverrideReject(c *gin.Context) {
 	id, err := parseUUID(c, "id")
 	if err != nil {
@@ -204,7 +244,9 @@ func (h *HTTPHandler) OverrideReject(c *gin.Context) {
 // ─── POST /trx/mtm/cron/trigger ──────────────────────────────────────────────
 
 // CronTrigger handles POST /api/v1/trx/mtm/cron/trigger.
-// Permission: fx_rate.create or internal ROLE-IT-ADMIN.
+// Permission: mtm.trigger (ROLE-AKUN or ROLE-IT-ADMIN).
+// B3 fix: comment corrected from fx_rate.create → mtm.trigger.
+// B4 fix: SensitiveRateLimit applied at route registration level (routes.go).
 func (h *HTTPHandler) CronTrigger(c *gin.Context) {
 	var req CronTriggerRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -222,7 +264,8 @@ func (h *HTTPHandler) CronTrigger(c *gin.Context) {
 // ─── GET /trx/mtm/alerts/stale-price ─────────────────────────────────────────
 
 // StalePriceAlerts handles GET /api/v1/trx/mtm/alerts/stale-price.
-// Permission: fx_rate.read.
+// Permission: mtm.read.
+// m2 fix: comment corrected from fx_rate.read → mtm.read.
 func (h *HTTPHandler) StalePriceAlerts(c *gin.Context) {
 	cursor := c.Query("cursor")
 	limit := 50

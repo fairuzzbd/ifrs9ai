@@ -86,10 +86,23 @@ func (h *Handler) HandleMtmDailyRun(ctx context.Context, t *asynq.Task) error {
 		return fmt.Errorf("HandleMtmDailyRun: GetActiveNonACInstrumen: %w", err)
 	}
 
+	// m7 fix: honor ForceRerun by passing "force:" prefixed jobID to ProcessOneInstrument.
+	// ProcessOneInstrument checks for the "force:" prefix to skip ExistsActive idempotency check.
+	effectiveJobID := jobID
+	if payload.ForceRerun {
+		effectiveJobID = "force:" + jobID
+		h.logger.WarnContext(ctx, "HandleMtmDailyRun: force-rerun requested — skipping idempotency check",
+			"job_id", jobID,
+			"tanggal_target", payload.TanggalTarget,
+			"force_rerun_reason", payload.ForceRerunReason,
+		)
+	}
+
 	h.logger.InfoContext(ctx, "HandleMtmDailyRun: starting",
 		"tanggal_target", payload.TanggalTarget,
 		"job_id", jobID,
-		"instrument_count", len(instruments))
+		"instrument_count", len(instruments),
+		"force_rerun", payload.ForceRerun)
 
 	total := len(instruments)
 	processed := 0
@@ -107,7 +120,7 @@ func (h *Handler) HandleMtmDailyRun(ctx context.Context, t *asynq.Task) error {
 		default:
 		}
 
-		_, err := h.svc.ProcessOneInstrument(ctx, inst, tanggalMtm, jobID)
+		_, err := h.svc.ProcessOneInstrument(ctx, inst, tanggalMtm, effectiveJobID)
 		if err != nil {
 			if isACSkip(err) {
 				skipped++

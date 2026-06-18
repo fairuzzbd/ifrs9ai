@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -148,11 +149,26 @@ type NoopJurnalPoster struct {
 }
 
 // NewNoopJurnalPoster creates a no-op poster that logs warnings.
+// m5 fix: logs WARN at construction time to make it visible in observability.
+// Production guard: if APP_ENV=production and NoopJurnalPoster is still in use → log.Fatal.
+// Call IsProdNoopGuard() from main.go after wiring to enforce this.
 func NewNoopJurnalPoster(logger *slog.Logger) *NoopJurnalPoster {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	logger.Warn("NoopJurnalPoster created — jurnal posting is disabled. " +
+		"Wire internal/app-d/jurnal.Service in main.go before production deployment.")
 	return &NoopJurnalPoster{logger: logger}
+}
+
+// IsNoopProduction returns true if APP_ENV=production and this is a NoopJurnalPoster.
+// main.go should call log.Fatal if this returns true at startup (m5 fix).
+func IsNoopProduction(p JurnalPoster) bool {
+	if os.Getenv("APP_ENV") != "production" {
+		return false
+	}
+	_, isNoop := p.(*NoopJurnalPoster)
+	return isNoop
 }
 
 // Post implements JurnalPoster with a no-op (returns a synthetic entry ID).

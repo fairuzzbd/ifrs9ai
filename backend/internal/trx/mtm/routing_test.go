@@ -171,11 +171,16 @@ func TestResolveJurnalEventCode_EmptyString(t *testing.T) {
 }
 
 func TestResolveJurnalEventCode_EmptyMataUang(t *testing.T) {
-	// Empty mataUang treated as IDR (not "IDR" string → no FCY branch)
+	// m4 fix: empty mataUang is now rejected at the SERVICE layer (OverrideApprove and
+	// ProcessOneInstrument both validate non-empty mata_uang before calling routing).
+	// This test documents the current routing.go behaviour (routing.go itself does NOT
+	// validate empty mataUang — it treats "" != "IDR" so FCY branch fires → 2 codes).
+	// Service-layer guard (service.go) prevents empty mataUang from reaching this function.
 	codes, err := ResolveJurnalEventCode(KlasifikasiFVOCIDebt, "", false)
 	require.NoError(t, err)
-	// "" != "IDR" so it triggers the FCY branch (2 codes)
-	assert.Len(t, codes, 2)
+	// "" != "IDR" triggers FCY branch (2 codes) — routing.go trusts caller to validate.
+	// Guard: DO NOT call this directly with empty mataUang in production; service validates first.
+	assert.Len(t, codes, 2, "routing.go allows empty mataUang (service layer rejects it before calling)")
 }
 
 // ─── Exported wrapper delegates to private function ───────────────────────────
