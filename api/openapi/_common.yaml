@@ -401,6 +401,13 @@ components:
         - GL_RECONCILIATION_HOST_FETCH_FAILED # 502 — GL Host tidak bisa di-reach saat fetch daily-summary
         - GL_RECONCILIATION_IN_PROGRESS      # 409 — rekonsiliasi untuk tanggal ini sedang berjalan
         - GL_DLQ_REPLAY_INVALID_STATE        # 422 — DLQ entry status bukan FAILED (replay dari ABANDONED, dll)
+        # APP-B P5-M6 — MTM Daily Job + Manual Upload
+        - MTM_PRICE_STALE              # 422 — stale_price_flag=TRUE; harga_age_days > MTM_PRICE_STALE_DAYS OR kurs FCY tidak tersedia; jurnal tidak dapat diposting otomatis
+        - MTM_PRICE_DEVIATION_REJECTED # 422 — informational: digunakan dalam notifikasi uploader saat override-reject baris dengan deviation_flag=TRUE (bukan HTTP error dari reject endpoint yang return 200)
+        - MTM_BATCH_NOT_FOUND          # 404 — upload_batch_id tidak ditemukan di sys.upload_batch scope MTM_UPLOAD
+        - MTM_OVERRIDE_SOD_VIOLATION   # 403 — override_approver_id = uploader_id; SoD violation saat override-approve/reject; details berisi uploader_id untuk tracing; DEC-017
+        - MTM_INSTRUMEN_AC_SKIP        # 422 — instrumen berklasifikasi AC dimasukkan ke upload MTM; tidak ada MTM untuk AC per PSAK 71 amortised cost method
+        - MTM_PERIODE_LOCKED           # 423 — mutasi trx.mtm saat locked_flag=TRUE (periode CLOSED); mirror FX_RATE_LOCKED pattern P5-M5; raised by MtmLockMiddleware + tg_mtm_locked_check trigger
         # APP-B P5-M1 — Penempatan Deposito
         - PENEMPATAN_INSTRUMEN_NOT_FOUND           # 404 — instrumen_id tidak ada atau soft-deleted
         - PENEMPATAN_INSTRUMEN_INVALID_KLASIFIKASI # 422 — klasifikasi instrumen belum APPROVED di mst.instrumen

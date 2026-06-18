@@ -66,6 +66,7 @@ import (
 	jurnal "blips-ifrs9.tugu-re.com/internal/app-d/jurnal"
 	"blips-ifrs9.tugu-re.com/internal/jrnl/gldelivery"
 	"blips-ifrs9.tugu-re.com/internal/periode/closeflow"
+	"blips-ifrs9.tugu-re.com/internal/trx/mtm"
 )
 
 // version adalah versi service yang dilaporkan probe liveness.
@@ -905,6 +906,35 @@ func main() {
 	_ = jurnalWorker // registered in Redis block below
 
 	// -----------------------------------------------------------------------
+	// APP-B P5-M6 — MTM (Mark-to-Market) Daily Job + Manual Override
+	// Endpoints (all under /api/v1/trx/mtm/):
+	//   GET    /                          — list (cursor, sort, filter, export) (fx_rate.read)
+	//   POST   /upload/batch              — manual upload CSV (fx_rate.create)
+	//   GET    /upload/batch/:batch_id    — batch status (fx_rate.read)
+	//   POST   /cron/trigger              — manual cron trigger (fx_rate.create)
+	//   GET    /alerts/stale-price        — stale-price alert list (fx_rate.read)
+	//   GET    /:id                       — MTM detail (fx_rate.read)
+	//   POST   /:id/override-approve      — ROLE-AKUN-CTL approve override (fx_rate.approve)
+	//   POST   /:id/override-reject       — ROLE-AKUN-CTL reject override (fx_rate.approve)
+	//
+	// Domain: AC instruments skipped (ErrMTMInstrumenACSkip). SoD: override_approver ≠ uploader.
+	// locked_flag=TRUE → HTTP 423 MTM_PERIODE_LOCKED (set by closeflow hard-close hook).
+	// Cron: "0 11 * * 1-5" (18:00 WIB = 11:00 UTC, Mon-Fri).
+	// JurnalPoster: NoopJurnalPoster placeholder until P5-M2 interface stabilises.
+	// AsynqEnqueuer: NoopEnqueuer in dev (no Redis); real asynq.Client wired below when REDIS_URL set.
+	// -----------------------------------------------------------------------
+	mtmRepo := mtm.NewDBRepository(db)
+	mtmJurnalPoster := mtm.NewRealJurnalPoster(logger)
+	mtmSvc := mtm.NewService(mtmRepo, mtmJurnalPoster, auditWriter, logger)
+	mtmWorker := mtm.NewHandler(mtmSvc, logger)
+	_ = mtmWorker // registered in Redis block below
+
+	// HTTP handler: enqueuer set to NoopEnqueuer in dev; overridden in Redis block below.
+	var mtmEnqueuer mtm.AsynqEnqueuer = mtm.NoopEnqueuer{}
+	mtmHandler := mtm.NewHTTPHandler(mtmSvc, mtmEnqueuer)
+	mtm.RegisterRoutes(v1, mtmHandler)
+
+	// -----------------------------------------------------------------------
 	// P5-M3: GL Host REST Delivery — DeliveryService, DLQService, ReconciliationService.
 	// Uses StubAdapter by default (dev mode); RESTAdapter when GL_HOST_URL is set.
 	// All services panic on nil auditWriter (DEC-018).
@@ -984,6 +1014,9 @@ func main() {
 		// P5-M5: JISDOR fetch + upload-process tasks.
 		fxJisdorWorker.RegisterHandlers(asynqMux)
 
+		// P5-M6: MTM daily run task.
+		mtmWorker.RegisterHandlers(asynqMux)
+
 		// Asynq Server — pulls tasks from Redis queue and dispatches to mux.
 		asynqServer := asynq.NewServer(asynqRedisOpt, asynq.Config{
 			Concurrency: 5,
@@ -1026,6 +1059,16 @@ func main() {
 		if _, err := scheduler.Register("30 3 * * 1-5", jisdorTask); err != nil {
 			log.Fatalf("register jisdor fetch cron: %v", err)
 		}
+
+		// P5-M6: MTM daily run cron — 11:00 UTC (18:00 WIB), Mon-Fri.
+		// Payload date injected at runtime (today's date in UTC, aligned with WIB business day).
+		mtmTask, mtmTaskErr := mtm.NewDailyRunTask(time.Now().UTC().Format("2006-01-02"), "TUGURE")
+		if mtmTaskErr != nil {
+			log.Fatalf("build mtm daily run task: %v", mtmTaskErr)
+		}
+		if _, err := scheduler.Register("0 11 * * 1-5", mtmTask); err != nil {
+			log.Fatalf("register mtm daily run cron: %v", err)
+		}
 		go func() {
 			if err := scheduler.Run(); err != nil {
 				log.Fatalf("asynq scheduler: %v", err)
@@ -1035,6 +1078,7 @@ func main() {
 		logger.Info("asynq penempatan maturity cron registered", "schedule", "0 19 * * * UTC", "task", penempatan.MaturityCheckTaskType)
 		logger.Info("asynq GL recon cron registered", "schedule", "0 1 * * * UTC", "task", gldelivery.TaskGLReconcileDaily)
 		logger.Info("asynq JISDOR fetch cron registered", "schedule", "30 3 * * 1-5 UTC (10:30 WIB)", "task", kurs.TaskFxJisdorFetch)
+		logger.Info("asynq MTM daily run cron registered", "schedule", "0 11 * * 1-5 UTC (18:00 WIB)", "task", mtm.TaskMtmDailyRun)
 	} else {
 		logger.Warn("REDIS_URL not set — Asynq drift cron NOT registered (dev mode)")
 	}
