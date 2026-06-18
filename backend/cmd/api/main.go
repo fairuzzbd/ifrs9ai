@@ -415,6 +415,9 @@ func main() {
 	kursHandler := kurs.NewHandler(kursSvc, wfHandler)
 	kurs.RegisterRoutes(v1, kursHandler)
 
+	// P5-M5: JISDOR fetch worker. Registered on Asynq mux in the Redis block below.
+	fxJisdorWorker := kurs.NewFxJisdorWorker(kursSvc, logger)
+
 	// -----------------------------------------------------------------------
 	// Master Data — LGD Basel (APP-C-MSTR-ECL-001, 6-eyes + step-up MFA)
 	// -----------------------------------------------------------------------
@@ -978,6 +981,9 @@ func main() {
 		// P5-M3: GL Host delivery + reconciliation tasks.
 		glWorker.RegisterHandlers(asynqMux)
 
+		// P5-M5: JISDOR fetch + upload-process tasks.
+		fxJisdorWorker.RegisterHandlers(asynqMux)
+
 		// Asynq Server — pulls tasks from Redis queue and dispatches to mux.
 		asynqServer := asynq.NewServer(asynqRedisOpt, asynq.Config{
 			Concurrency: 5,
@@ -1009,6 +1015,17 @@ func main() {
 		if _, err := scheduler.Register("0 1 * * *", glReconTask); err != nil {
 			log.Fatalf("register gl recon cron: %v", err)
 		}
+
+		// P5-M5: JISDOR daily fetch cron — 03:30 UTC (10:30 WIB), Mon-Fri.
+		// Schedule: "30 3 * * 1-5" (sys.config FX_JISDOR_CRON_SCHEDULE).
+		// Payload date is injected at runtime by the cron task builder (today's date in WIB).
+		jisdorTask, jisdorTaskErr := kurs.NewJisdorFetchTask(time.Now().UTC().Format("2006-01-02"), "TUGURE")
+		if jisdorTaskErr != nil {
+			log.Fatalf("build jisdor fetch task: %v", jisdorTaskErr)
+		}
+		if _, err := scheduler.Register("30 3 * * 1-5", jisdorTask); err != nil {
+			log.Fatalf("register jisdor fetch cron: %v", err)
+		}
 		go func() {
 			if err := scheduler.Run(); err != nil {
 				log.Fatalf("asynq scheduler: %v", err)
@@ -1017,6 +1034,7 @@ func main() {
 		logger.Info("asynq drift cron registered", "schedule", "0 19 * * * UTC", "task", eir.TaskDriftCron)
 		logger.Info("asynq penempatan maturity cron registered", "schedule", "0 19 * * * UTC", "task", penempatan.MaturityCheckTaskType)
 		logger.Info("asynq GL recon cron registered", "schedule", "0 1 * * * UTC", "task", gldelivery.TaskGLReconcileDaily)
+		logger.Info("asynq JISDOR fetch cron registered", "schedule", "30 3 * * 1-5 UTC (10:30 WIB)", "task", kurs.TaskFxJisdorFetch)
 	} else {
 		logger.Warn("REDIS_URL not set — Asynq drift cron NOT registered (dev mode)")
 	}

@@ -429,6 +429,12 @@ func (c Code) HTTPStatus() int {
 	case CodeSoftClosePendingExists:
 		return http.StatusConflict // 409
 
+	// P5-M5 FX Rate codes.
+	case "FX_RATE_LOCKED":
+		return 423 // Locked
+	case "KURS_UPLOAD_VALIDATION_FAILED", "KURS_PERIODE_MISMATCH", "KLASIFIKASI_NOT_LOCKED":
+		return http.StatusUnprocessableEntity
+
 	// P5-M2 Jurnal Engine codes.
 	case CodeJurnalInstrumenNotFound, CodeJurnalHeaderNotFound, CodeJurnalDlqNotFound:
 		return http.StatusNotFound
