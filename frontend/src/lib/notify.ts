@@ -111,6 +111,20 @@ const ERROR_MESSAGE_MAP: Record<string, string> = {
   KURS_PERIODE_MISMATCH:
     "Tanggal berlaku kurs tidak berada dalam periode buku manapun yang OPEN. Pastikan tanggal benar atau hubungi Finance Controller untuk membuka periode.",
 
+  // --- MTM Daily (P5-M6) ---
+  MTM_PRICE_STALE:
+    "Kurs mata uang asing untuk tanggal tersebut belum tersedia (APPROVED). Upload kurs manual via halaman Kurs terlebih dahulu.",
+  MTM_PRICE_DEVIATION_REJECTED:
+    "MTM ditolak karena deviasi harga melebihi threshold. ROLE-AKUN telah dinotifikasi untuk re-upload dengan harga yang benar.",
+  MTM_BATCH_NOT_FOUND:
+    "Batch upload MTM tidak ditemukan. Pastikan batch_id benar dan Anda memiliki akses ke batch tersebut.",
+  MTM_OVERRIDE_SOD_VIOLATION:
+    "Anda tidak dapat menyetujui MTM yang Anda upload sendiri. SoD: override-approver ≠ uploader (DEC-017).",
+  MTM_INSTRUMEN_AC_SKIP:
+    "Instrumen berklasifikasi AC — tidak ada MTM untuk AC per PSAK 71. Hapus baris instrumen AC dari file upload.",
+  MTM_PERIODE_LOCKED:
+    "Periode buku sudah hard-closed. Tidak bisa menambah atau mengubah MTM untuk periode ini.",
+
   // --- GL Delivery (P5-M3) ---
   GL_DELIVERY_JURNAL_NOT_FOUND:
     "Jurnal header tidak ditemukan.",

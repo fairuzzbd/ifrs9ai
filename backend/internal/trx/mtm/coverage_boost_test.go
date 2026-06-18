@@ -654,3 +654,30 @@ func TestNewMTMErr_FallbackToValidation(t *testing.T) {
 	require.NotNil(t, err)
 	assert.Contains(t, err.Error(), "batch not found")
 }
+
+// ─── NewDailyRunTask (domain.go:475) — 0% before this test ──────────────────
+
+func TestNewDailyRunTask_HappyPath(t *testing.T) {
+	task, err := NewDailyRunTask("2026-06-18", "TUGURE")
+	require.NoError(t, err)
+	require.NotNil(t, task)
+	assert.Equal(t, TaskMtmDailyRun, task.Type())
+	// Payload must be non-empty JSON
+	require.NotEmpty(t, task.Payload())
+}
+
+func TestNewDailyRunTask_EmptyFields(t *testing.T) {
+	// Even empty strings must marshal without error (JSON handles them fine)
+	task, err := NewDailyRunTask("", "")
+	require.NoError(t, err)
+	require.NotNil(t, task)
+}
+
+// ─── NoopEnqueuer (service.go:974) — 0% before this test ────────────────────
+
+func TestNoopEnqueuer_ReturnsError(t *testing.T) {
+	n := NoopEnqueuer{}
+	err := n.Enqueue(context.Background(), TaskMtmDailyRun, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Redis not configured")
+}
