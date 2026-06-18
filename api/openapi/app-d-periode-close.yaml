@@ -1,0 +1,2025 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-D Periode Buku Close Workflow (P5-M4)
+  version: "1.0.0"
+  description: |
+    Modul APP-D — Periode Buku Close Workflow (Phase 5, Module 4).
+
+    Cakupan:
+      - Soft-close request dengan pre-condition snapshot (S1)
+      - Soft-close approve — 4-eyes SoD, OPEN → SOFT_CLOSED (S2)
+      - Hard-close request — SOFT_CLOSED → HARD_CLOSE_PENDING (S3)
+      - Hard-close approve — CFO step-up MFA, HARD_CLOSE_PENDING → CLOSED (S3)
+      - CFO reject hard-close request — HARD_CLOSE_PENDING → SOFT_CLOSED (OQ-M4-3a)
+      - Reopen request + approve — SOFT_CLOSED → OPEN | CLOSED → SOFT_CLOSED (S4)
+      - Closing checklist real-time (S5)
+      - Status periode report — list + sort + filter + export (S5)
+
+    Dependensi:
+      - P5-M2 (merged PR #113) — jrnl.header + jrnl.detail + jurnal.header.total_debit/kredit
+      - P5-M3 (merged PR #120) — jrnl.gl_status.gl_host_status + sys.gl_reconciliation_report
+      - P5-M13 (upcoming) — MV refresh triggered by hard-close approve
+      - DEC-017 (LOCKED) — 4-eyes SoD; CFO sole approver untuk hard-close
+      - DEC-018 (LOCKED) — audit trail append-only 10+10 tahun
+      - DEC-021 (LOCKED) — Idempotency-Key wajib di setiap mutating endpoint
+      - DEC-022 (LOCKED) — cursor pagination
+      - DEC-026 (LOCKED) — MFA mandatory untuk ROLE-CFO
+      - DEC-027 (LOCKED) — step-up MFA wajib untuk hard-close approve + reopen CLOSED→SOFT_CLOSED
+      - DEC-036 (RESOLVED) — cure evaluation diizinkan saat SOFT_CLOSED via CORRECTION_PERIODE_CLOSED
+
+    4-Item Closing Checklist (evaluasi real-time setiap transisi):
+      1. PENDING_APPROVAL_ZERO — COUNT(*) entity dengan workflow_status PENDING_* = 0
+      2. JURNAL_BALANCED — semua jrnl.header: ABS(total_debit - total_kredit) ≤ IDR 0.01
+      3. GL_DELIVERED — tidak ada jrnl.gl_status.gl_host_status = 'FAILED' (DEAD_LETTER dikecualikan)
+      4. RECON_PASS — sys.gl_reconciliation_report terakhir: status = 'COMPLETED' strict
+
+    State machine:
+      OPEN → (soft-close-request) → OPEN[pending]
+           → (soft-close-approve, SoD) → SOFT_CLOSED
+      SOFT_CLOSED → (hard-close-request) → HARD_CLOSE_PENDING
+                 → (reopen-request + reopen-approve, CFO) → OPEN
+      HARD_CLOSE_PENDING → (hard-close-approve, CFO step-up MFA) → CLOSED
+                        → (hard-close-reject, CFO) → SOFT_CLOSED
+      CLOSED → (reopen-request + reopen-approve, CFO step-up MFA, grace window) → SOFT_CLOSED
+
+    Cross-cutting enforcement:
+      - SOFT_CLOSED: 423 PERIODE_SOFT_CLOSED untuk semua mutasi kecuali GL delivery retry
+        dan CORRECTION_PERIODE_CLOSED (DEC-036)
+      - CLOSED: 423 PERIODE_CLOSED untuk semua mutasi di trx.*, jrnl.*, ecl.*
+      - Enforcement via PeriodeLockMiddleware (DB state, bukan session cache)
+
+    Grace window: 48 jam dari tanggal_hard_close (konfigurabel HARD_CLOSE_GRACE_WINDOW_HOURS)
+    Checklist stale threshold: 24 jam dari request (konfigurabel SOFT_CLOSE_CHECKLIST_STALE_HOURS)
+
+    Audit events (all in-transaction):
+      - PERIODE.SOFT_CLOSE_REQUESTED
+      - PERIODE.SOFT_CLOSE_REQUEST_REJECTED (advisory — outside main tx)
+      - PERIODE.SOFT_CLOSED
+      - PERIODE.SOFT_CLOSE_APPROVE_REJECTED (advisory)
+      - PERIODE.HARD_CLOSE_REQUESTED
+      - PERIODE.HARDCLOSED
+      - PERIODE.HARD_CLOSE_APPROVE_REJECTED_NO_MFA (advisory)
+      - PERIODE.REOPEN_REQUESTED
+      - PERIODE.REOPENED
+      - PERIODE.REOPEN_REJECTED_GRACE_EXPIRED (advisory)
+      - PERIODE.CHECKLIST.READ
+      - PERIODE.EXPORT
+
+    PII: tidak ada PII dalam payload P5-M4 (no customer data in closing workflow).
+
+    Performance SLA:
+      - POST soft-close-request:           ≤ 500 ms (checklist query + snapshot INSERT)
+      - POST soft-close-approve:           ≤ 500 ms (re-run checklist jika stale)
+      - POST hard-close-request:           ≤ 500 ms (checklist query + snapshot INSERT)
+      - POST hard-close-approve:           ≤ 300 ms (state update + audit; MV refresh async)
+      - POST hard-close-reject:            ≤ 200 ms (state revert)
+      - POST reopen-request:               ≤ 300 ms
+      - POST reopen-approve:               ≤ 300 ms (grace window check + state update)
+      - GET closing-checklist:             ≤ 300 ms (real-time 4-item eval)
+      - GET reports/status-periode (list): ≤ 500 ms (cursor paginated)
+      - GET reports/status-periode/export: async if > 10k rows
+
+    Schema changes (handoff → data-modeler, migration 000038):
+      - ALTER mst.periode_buku ADD COLUMNS (12 kolom close workflow tracking)
+      - UPGRADE ck_periode_status CHECK constraint untuk HARD_CLOSE_PENDING
+      - CREATE TABLE sys.closing_checklist_snapshot (append-only, BEFORE DELETE trigger)
+      - Indexes: (periode_id, transition, created_at DESC) di sys.closing_checklist_snapshot
+      - sys.config seed: SOFT_CLOSE_CHECKLIST_STALE_HOURS (24), HARD_CLOSE_GRACE_WINDOW_HOURS (48)
+
+servers:
+  - url: /api/v1
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: periode-soft-close
+    description: "Soft-close request + approve (4-eyes SoD) — ROLE-AKUN-CTL"
+  - name: periode-hard-close
+    description: "Hard-close request (ROLE-AKUN-CTL) + CFO approve (step-up MFA) — irreversible setelah grace window"
+  - name: periode-reopen
+    description: "Reopen periode — ROLE-CFO only; step-up MFA wajib untuk CLOSED→SOFT_CLOSED"
+  - name: periode-checklist
+    description: "Closing checklist real-time + status periode report (read-only)"
+
+paths:
+
+  # ===========================================================================
+  # S1 — SOFT-CLOSE REQUEST
+  # ===========================================================================
+
+  /periode-buku/{id}/soft-close-request:
+    post:
+      operationId: periodeS1SoftCloseRequest
+      summary: Ajukan soft-close request dengan pre-condition checklist snapshot
+      description: |
+        AC: S1-AC1, S1-AC2, S1-AC3, S1-AC4
+
+        ROLE-AKUN-CTL (Maker) mengajukan permintaan soft-close untuk periode OPEN.
+        Sistem menjalankan 4-item closing checklist secara real-time:
+          1. PENDING_APPROVAL_ZERO — COUNT(entity dengan workflow PENDING*) = 0
+          2. JURNAL_BALANCED — ABS(total_debit - total_kredit) ≤ IDR 0.01 per header
+          3. GL_DELIVERED — tidak ada jrnl.gl_status.gl_host_status = 'FAILED'
+          4. RECON_PASS — sys.gl_reconciliation_report terakhir status = 'COMPLETED' strict
+
+        Jika semua lolos:
+          - INSERT sys.closing_checklist_snapshot (transition=SOFT_CLOSE_REQUEST, all_passed=true)
+          - UPDATE mst.periode_buku SET soft_close_requested_by, soft_close_requested_at, row_version++
+          - INSERT aud.audit_log action=PERIODE.SOFT_CLOSE_REQUESTED (in-transaction)
+          - Return 202 + snapshot detail
+
+        Jika ada yang gagal:
+          - INSERT sys.closing_checklist_snapshot (transition=SOFT_CLOSE_REQUEST, all_passed=false, transition_status=REJECTED)
+          - INSERT aud.audit_log action=PERIODE.SOFT_CLOSE_REQUEST_REJECTED (advisory — outside main tx)
+          - Return 422 CLOSING_CHECKLIST_FAILED + detail per item yang gagal
+          - status_periode tetap OPEN
+
+        Pre-conditions:
+          - status_periode = 'OPEN'
+          - Tidak ada soft-close request pending (soft_close_requested_by IS NOT NULL → 409 SOFT_CLOSE_PENDING_EXISTS)
+          - row_version di body HARUS cocok dengan DB (optimistic lock — S1-AC4)
+
+        Checklist stale: tidak berlaku di endpoint ini (snapshot fresh per request).
+
+        Permission: periode.softclose.request
+        MFA: tidak wajib (ROLE-AKUN-CTL bukan role MFA mandatory, DEC-026)
+        Rate limit: 10 req/min per user
+      tags: [periode-soft-close]
+      parameters:
+        - $ref: "#/components/parameters/PeriodeIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SoftCloseRequestBody"
+            example:
+              catatan: "Soft close request periode Juni 2026. Semua transaksi telah diverifikasi oleh tim Treasury dan Akuntansi."
+              rowVersion: 5
+      responses:
+        "202":
+          description: Checklist lolos — soft-close request diterima, menunggu approval
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SoftCloseRequestResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  periodeId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  periodeKode: "PRD-2026-06"
+                  transition: "SOFT_CLOSE_REQUEST"
+                  checklistSnapshotId: "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+                  checklist:
+                    evaluatedAt: "2026-06-30T16:45:00+07:00"
+                    allPassed: true
+                    items:
+                      - key: "PENDING_APPROVAL_ZERO"
+                        label: "0 transaksi/jurnal masih PENDING_APPROVAL"
+                        passed: true
+                        detail: "Total PENDING_APPROVAL: 0"
+                      - key: "JURNAL_BALANCED"
+                        label: "Semua jurnal seimbang (total_debit == total_kredit, delta ≤ IDR 0.01)"
+                        passed: true
+                        detail: "Jurnal checked: 248. Max delta: IDR 0.0000"
+                      - key: "GL_DELIVERED"
+                        label: "Tidak ada gl_host_status = FAILED yang belum diselesaikan"
+                        passed: true
+                        detail: "Tidak ada FAILED delivery. DEAD_LETTER: 0 (dikecualikan, sudah discarded)."
+                      - key: "RECON_PASS"
+                        label: "GL rekonsiliasi harian terakhir COMPLETED (strict)"
+                        passed: true
+                        detail: "Last recon: 2026-06-29 — COMPLETED. Delta IDR 0.0000"
+                  allPassed: true
+                  nextStep: "Menunggu approval ROLE-AKUN-CTL lain via /soft-close-approve"
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: Validasi field gagal (catatan terlalu pendek, row_version missing, dll)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: VALIDATION_FAILED
+                  message: "1 field tidak valid"
+                  details:
+                    - field: "body.rowVersion"
+                      rule: "required"
+                      message: "rowVersion wajib diisi untuk optimistic lock check"
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          description: Periode buku tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: NOT_FOUND
+                  message: "Periode buku tidak ditemukan."
+                  details: []
+                  traceId: "01HXY..."
+        "409":
+          description: Concurrent close attempt atau sudah ada pending request
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                row_version_conflict:
+                  summary: S1-AC4 — optimistic lock (row_version mismatch)
+                  value:
+                    error:
+                      code: CONFLICT
+                      message: "Data periode PRD-2026-06 sudah diubah oleh pengguna lain (row_version mismatch). Refresh dan coba lagi."
+                      details: []
+                      traceId: "01HXY..."
+                pending_exists:
+                  summary: Sudah ada soft-close request pending
+                  value:
+                    error:
+                      code: SOFT_CLOSE_PENDING_EXISTS
+                      message: "Sudah ada soft-close request yang menunggu approval untuk periode PRD-2026-06. Batalkan request tersebut atau tunggu approval."
+                      details: []
+                      traceId: "01HXY..."
+        "422":
+          description: Checklist gagal atau transisi tidak valid
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                checklist_failed:
+                  summary: S1-AC2 — checklist gagal (GL_DELIVERED)
+                  value:
+                    error:
+                      code: CLOSING_CHECKLIST_FAILED
+                      message: "Soft-close request ditolak: 1 item checklist tidak lolos."
+                      details:
+                        - field: "GL_DELIVERED"
+                          rule: "gl_delivered"
+                          message: "3 jurnal masih FAILED di GL delivery. Selesaikan via DLQ GL Delivery terlebih dahulu. Header IDs: [uuid1, uuid2, uuid3]"
+                      traceId: "01HXY..."
+                invalid_transition:
+                  summary: S1-AC3 — periode bukan OPEN
+                  value:
+                    error:
+                      code: WORKFLOW_INVALID_TRANSITION
+                      message: "Periode PRD-2026-06 sudah dalam status SOFT_CLOSED. Soft-close request tidak dapat diajukan."
+                      details:
+                        - field: "status_periode"
+                          rule: "expected_open"
+                          message: "Status harus OPEN untuk mengajukan soft-close request"
+                      traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S2 — SOFT-CLOSE APPROVE
+  # ===========================================================================
+
+  /periode-buku/{id}/soft-close-approve:
+    post:
+      operationId: periodeS2SoftCloseApprove
+      summary: Approve soft-close request — transisi OPEN ke SOFT_CLOSED (4-eyes SoD)
+      description: |
+        AC: S2-AC1, S2-AC2, S2-AC3, S2-AC4
+
+        ROLE-AKUN-CTL (Approver, user BERBEDA dari requester) menyetujui soft-close request.
+
+        Pre-conditions:
+          - status_periode = 'OPEN' dengan soft_close_requested_by IS NOT NULL (ada pending request)
+          - approver_id ≠ soft_close_requested_by (SoD server-side, DEC-017) — S2-AC2
+          - Jika (now() - snapshot.created_at) > SOFT_CLOSE_CHECKLIST_STALE_HOURS (default 24 jam):
+            server re-run 4-item checklist. Jika gagal → 422 CLOSING_CHECKLIST_FAILED (re-run) — S2-AC3
+
+        Sukses (semua checklist lolos + SoD pass):
+          - UPDATE mst.periode_buku SET status_periode='SOFT_CLOSED', tanggal_soft_close=now(),
+            soft_close_approved_by=actor_id, soft_close_approved_at=now(), row_version++
+          - INSERT sys.closing_checklist_snapshot (SOFT_CLOSE_APPROVE, all_passed=true)
+          - INSERT aud.audit_log action=PERIODE.SOFT_CLOSED (in-transaction)
+          - Notifikasi ke ROLE-CFO: "Periode PRD-2026-06 telah di-soft-close. Siap untuk hard-close."
+          - Notifikasi ke ROLE-RISK: "SOFT_CLOSED — cure evaluation dapat dijalankan (DEC-036)."
+          - Aktivasi PeriodeLockMiddleware: SOFT_CLOSED → 423 PERIODE_SOFT_CLOSED untuk mutasi
+            (kecuali: GL delivery retry + CORRECTION_PERIODE_CLOSED event code)
+
+        SoD violation → 403 SOD_VIOLATION + advisory audit log PERIODE.SOFT_CLOSE_APPROVE_REJECTED
+
+        Permission: periode.softclose.approve
+        MFA: tidak wajib (ROLE-AKUN-CTL, DEC-026)
+        Rate limit: 10 req/min per user
+      tags: [periode-soft-close]
+      parameters:
+        - $ref: "#/components/parameters/PeriodeIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowApproveBody"
+            example:
+              comment: "Approved. Semua posisi telah diverifikasi oleh Finance Controller. Data bersih."
+              signatureMethod: "JWT_STEP_UP"
+      responses:
+        "200":
+          description: Soft-close approved — status_periode sekarang SOFT_CLOSED
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SoftCloseApproveResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  periodeId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  periodeKode: "PRD-2026-06"
+                  statusPeriode: "SOFT_CLOSED"
+                  tanggalSoftClose: "2026-06-30T17:05:22+07:00"
+                  approvedBy: "c3d4e5f6-a7b8-9012-cdef-123456789012"
+                  checklistSnapshotId: "d4e5f6a7-b8c9-0123-def0-234567890123"
+                  message: "Periode PRD-2026-06 berhasil di-soft-close. Mutasi transaksi/jurnal diblokir kecuali GL delivery retry. Siap untuk hard-close oleh CFO."
+                meta:
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          description: SoD violation atau permission tidak terpenuhi
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                sod_violation:
+                  summary: S2-AC2 — Maker mencoba approve request sendiri
+                  value:
+                    error:
+                      code: SOD_VIOLATION
+                      message: "Anda tidak dapat meng-approve request soft-close yang Anda ajukan sendiri. Segregation of Duties wajib: approver_id ≠ requester_id (DEC-017)."
+                      details: []
+                      traceId: "01HXY..."
+                forbidden:
+                  summary: Permission tidak terpenuhi
+                  value:
+                    error:
+                      code: FORBIDDEN
+                      message: "Anda tidak memiliki permission 'periode.softclose.approve'."
+                      details: []
+                      traceId: "01HXY..."
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          description: Checklist gagal (fresh atau re-run stale) atau transisi tidak valid
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                checklist_stale_failed:
+                  summary: S2-AC3 — checklist di-re-run karena stale, ada item gagal
+                  value:
+                    error:
+                      code: CLOSING_CHECKLIST_FAILED
+                      message: "Checklist dievaluasi ulang karena sudah > 24 jam sejak request. 1 item gagal: PENDING_APPROVAL_ZERO — 2 transaksi masih PENDING."
+                      details:
+                        - field: "PENDING_APPROVAL_ZERO"
+                          rule: "pending_approval_zero"
+                          message: "2 transaksi masih dalam status PENDING_REVIEW. Selesaikan sebelum approve soft-close."
+                      traceId: "01HXY..."
+                no_pending_request:
+                  summary: S2-AC4 — tidak ada pending request
+                  value:
+                    error:
+                      code: WORKFLOW_INVALID_TRANSITION
+                      message: "Tidak ada soft-close request yang menunggu approval untuk periode PRD-2026-07. Ajukan soft-close request terlebih dahulu."
+                      details: []
+                      traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S3 — HARD-CLOSE REQUEST
+  # ===========================================================================
+
+  /periode-buku/{id}/hard-close-request:
+    post:
+      operationId: periodeS3HardCloseRequest
+      summary: Ajukan hard-close request — SOFT_CLOSED → HARD_CLOSE_PENDING
+      description: |
+        AC: S3-AC1 (langkah pertama)
+
+        ROLE-AKUN-CTL mengajukan hard-close request setelah periode SOFT_CLOSED dan semua
+        koreksi selesai. Sistem kembali menjalankan 4-item checklist (kondisi mungkin berubah
+        sejak soft-close).
+
+        Jika checklist lolos:
+          - UPDATE mst.periode_buku SET status_periode='HARD_CLOSE_PENDING',
+            hard_close_requested_by=actor_id, hard_close_requested_at=now(), row_version++
+          - INSERT sys.closing_checklist_snapshot (HARD_CLOSE_REQUEST, all_passed=true)
+          - INSERT aud.audit_log action=PERIODE.HARD_CLOSE_REQUESTED (in-transaction)
+          - Notifikasi ke ROLE-CFO: "Hard-close request PRD-2026-06 menunggu approval CFO. Step-up MFA diperlukan."
+
+        Pre-conditions:
+          - status_periode = 'SOFT_CLOSED'
+          - row_version cocok (optimistic lock)
+
+        Permission: periode.hardclose.request
+        MFA: tidak wajib
+        Rate limit: 10 req/min per user
+      tags: [periode-hard-close]
+      parameters:
+        - $ref: "#/components/parameters/PeriodeIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HardCloseRequestBody"
+            example:
+              catatan: "Hard close request PRD-2026-06. Semua koreksi selesai. Periode siap untuk finalisasi."
+              rowVersion: 8
+      responses:
+        "202":
+          description: Checklist lolos — hard-close request diterima, status HARD_CLOSE_PENDING
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/HardCloseRequestResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  periodeId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  periodeKode: "PRD-2026-06"
+                  transition: "HARD_CLOSE_REQUEST"
+                  statusPeriode: "HARD_CLOSE_PENDING"
+                  checklistSnapshotId: "e5f6a7b8-c9d0-1234-ef01-345678901234"
+                  checklist:
+                    evaluatedAt: "2026-07-02T09:28:00+07:00"
+                    allPassed: true
+                    items:
+                      - key: "PENDING_APPROVAL_ZERO"
+                        label: "0 transaksi/jurnal masih PENDING_APPROVAL"
+                        passed: true
+                        detail: "Total PENDING_APPROVAL: 0"
+                      - key: "JURNAL_BALANCED"
+                        label: "Semua jurnal seimbang"
+                        passed: true
+                        detail: "Jurnal checked: 252. Max delta: IDR 0.0000"
+                      - key: "GL_DELIVERED"
+                        label: "Tidak ada GL delivery FAILED"
+                        passed: true
+                        detail: "Tidak ada FAILED delivery."
+                      - key: "RECON_PASS"
+                        label: "GL rekonsiliasi terakhir COMPLETED"
+                        passed: true
+                        detail: "Last recon: 2026-07-01 — COMPLETED. Delta IDR 0.0000"
+                  nextStep: "Menunggu approval CFO via /hard-close-approve. Step-up MFA diperlukan."
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "./_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "./_common.yaml#/components/responses/Conflict"
+        "422":
+          description: Checklist gagal atau periode bukan SOFT_CLOSED
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                checklist_failed:
+                  summary: Checklist gagal setelah soft-close (kondisi berubah)
+                  value:
+                    error:
+                      code: CLOSING_CHECKLIST_FAILED
+                      message: "Hard-close request ditolak: 1 item checklist tidak lolos."
+                      details:
+                        - field: "GL_DELIVERED"
+                          rule: "gl_delivered"
+                          message: "1 jurnal masih FAILED di GL delivery (masuk setelah soft-close). Selesaikan terlebih dahulu."
+                      traceId: "01HXY..."
+                invalid_transition:
+                  summary: Periode bukan SOFT_CLOSED
+                  value:
+                    error:
+                      code: WORKFLOW_INVALID_TRANSITION
+                      message: "Periode PRD-2026-06 dalam status OPEN. Hard-close request hanya bisa diajukan dari status SOFT_CLOSED."
+                      details: []
+                      traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S3 — HARD-CLOSE APPROVE (CFO step-up MFA)
+  # ===========================================================================
+
+  /periode-buku/{id}/hard-close-approve:
+    post:
+      operationId: periodeS3HardCloseApprove
+      summary: CFO approve hard-close — HARD_CLOSE_PENDING → CLOSED (step-up MFA wajib)
+      description: |
+        AC: S3-AC1 (langkah kedua), S3-AC2, S3-AC3, S3-AC4
+
+        ROLE-CFO menyetujui hard-close request dengan step-up MFA (DEC-027).
+
+        Pre-conditions:
+          - status_periode = 'HARD_CLOSE_PENDING'
+          - X-Step-Up-Token header WAJIB — token valid, issued < 5 menit, scope = "hard_close" — S3-AC2
+          - Token expired (> 5 menit) → 401 MFA_STEP_UP_EXPIRED — S3-AC3
+
+        Sukses (in-transaction atomik):
+          1. UPDATE mst.periode_buku SET
+               status_periode='CLOSED',
+               tanggal_hard_close=now(),
+               hard_close_approved_by=actor_id,
+               hard_close_approved_at=now(),
+               hard_close_grace_expires_at = now() + INTERVAL '48 hours',
+               step_up_token_ref = hash(stepup_token),
+               row_version++
+          2. UPDATE mst.kurs SET locked_flag=TRUE WHERE periode_id={id} (lock FX rates)
+          3. INSERT sys.closing_checklist_snapshot (HARD_CLOSE_APPROVE, all_passed=true)
+          4. INSERT aud.audit_log action=PERIODE.HARDCLOSED
+             after_jsonb: { status_periode, tanggal_hard_close, grace_expires_at,
+                            step_up_token_ref, mfa_method }
+          5. Aktivasi PeriodeLockMiddleware: CLOSED → 423 PERIODE_CLOSED untuk SEMUA mutasi
+
+        Async (setelah transaksi commit):
+          - Asynq job reporting:mv_refresh (P5-M13) di-enqueue
+          - Notifikasi ke ROLE-AKUN-CTL + ROLE-RISK + ROLE-AUDIT: "Periode PRD-2026-06 HARD CLOSED."
+
+        Soft-close S3-AC4: semua mutasi untuk periode CLOSED → 423 PERIODE_CLOSED.
+
+        Permission: periode.hardclose.approve
+        MFA: wajib (ROLE-CFO, DEC-026) + step-up via X-Step-Up-Token (DEC-027)
+        Rate limit: 5 req/min per user (sensitif)
+      tags: [periode-hard-close]
+      parameters:
+        - $ref: "#/components/parameters/PeriodeIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XStepUpTokenHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowApproveBody"
+            example:
+              comment: "Hard close approved. Periode Juni 2026 final. Semua posisi telah dikonfirmasi."
+              signatureMethod: "JWT_STEP_UP"
+      responses:
+        "200":
+          description: Hard-close approved — status_periode = CLOSED, FX rate locked, MV refresh scheduled
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/HardCloseApproveResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  periodeId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  periodeKode: "PRD-2026-06"
+                  statusPeriode: "CLOSED"
+                  tanggalHardClose: "2026-07-02T09:30:00+07:00"
+                  graceExpiresAt: "2026-07-04T09:30:00+07:00"
+                  approvedBy: "f6a7b8c9-d0e1-2345-f012-456789012345"
+                  checklistSnapshotId: "07b8c9d0-e1f2-3456-0123-567890123456"
+                  mvRefreshJobId: "job_MV_REFRESH_01HXYZ"
+                  mvRefreshStatusUrl: "/api/v1/jobs/job_MV_REFRESH_01HXYZ"
+                  message: "Periode PRD-2026-06 berhasil HARD CLOSED. FX rate terkunci. Semua mutasi diblokir. Materialized views sedang diperbarui."
+                meta:
+                  traceId: "01HXY..."
+        "401":
+          description: Step-up MFA hilang atau expired
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                mfa_required:
+                  summary: S3-AC2 — X-Step-Up-Token header hilang
+                  value:
+                    error:
+                      code: MFA_STEP_UP_REQUIRED
+                      message: "Hard-close periode buku wajib step-up MFA (DEC-027). Lakukan challenge via POST /auth/step-up lalu sertakan X-Step-Up-Token di request."
+                      details: []
+                      traceId: "01HXY..."
+                mfa_expired:
+                  summary: S3-AC3 — token > 5 menit
+                  value:
+                    error:
+                      code: MFA_STEP_UP_EXPIRED
+                      message: "Step-up MFA token sudah expired (maksimal 5 menit). Ulangi step-up challenge via POST /auth/step-up."
+                      details: []
+                      traceId: "01HXY..."
+                unauthorized:
+                  summary: JWT invalid
+                  value:
+                    error:
+                      code: UNAUTHORIZED
+                      message: "Token JWT tidak valid atau sudah expired."
+                      details: []
+                      traceId: "01HXY..."
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          description: Periode bukan HARD_CLOSE_PENDING
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: WORKFLOW_INVALID_TRANSITION
+                  message: "Periode PRD-2026-06 dalam status SOFT_CLOSED. Hard-close approve hanya bisa dari status HARD_CLOSE_PENDING."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S3 — HARD-CLOSE REJECT (CFO revert ke SOFT_CLOSED) — OQ-M4-3a
+  # ===========================================================================
+
+  /periode-buku/{id}/hard-close-reject:
+    post:
+      operationId: periodeS3HardCloseReject
+      summary: CFO reject hard-close request — HARD_CLOSE_PENDING → SOFT_CLOSED
+      description: |
+        OQ-M4-3a RESOLVED: CFO dapat menolak hard-close request dan mengembalikan
+        periode ke SOFT_CLOSED. Tidak memerlukan step-up MFA (reject = reversible action,
+        bukan destructive).
+
+        Pre-conditions:
+          - status_periode = 'HARD_CLOSE_PENDING'
+          - actor.permissions contains 'periode.hardclose.approve' (CFO)
+          - reason.length ≥ 30 karakter
+
+        Sukses:
+          - UPDATE mst.periode_buku SET status_periode='SOFT_CLOSED',
+            hard_close_requested_by=NULL, hard_close_requested_at=NULL, row_version++
+          - INSERT aud.audit_log action=PERIODE.HARD_CLOSE_REJECTED (in-transaction)
+          - Notifikasi ke ROLE-AKUN-CTL: "Hard-close request PRD-2026-06 ditolak oleh CFO."
+
+        Permission: periode.hardclose.approve (CFO)
+        MFA: wajib login MFA (DEC-026), step-up tidak diperlukan
+        Rate limit: 10 req/min per user
+      tags: [periode-hard-close]
+      parameters:
+        - $ref: "#/components/parameters/PeriodeIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RejectBody"
+            example:
+              reason: "Ditemukan perbedaan saldo FVOCI antara laporan BLIPS dan sistem rekap Treasury. Perlu investigasi sebelum final close."
+      responses:
+        "200":
+          description: Hard-close request ditolak — status kembali ke SOFT_CLOSED
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/PeriodeStateTransitionResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  periodeId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  periodeKode: "PRD-2026-06"
+                  previousStatus: "HARD_CLOSE_PENDING"
+                  newStatus: "SOFT_CLOSED"
+                  transition: "HARD_CLOSE_REJECTED"
+                  reason: "Ditemukan perbedaan saldo FVOCI..."
+                  actorId: "f6a7b8c9-d0e1-2345-f012-456789012345"
+                  transitionedAt: "2026-07-02T10:15:00+07:00"
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: Reason terlalu pendek
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: VALIDATION_FAILED
+                  message: "1 field tidak valid"
+                  details:
+                    - field: "body.reason"
+                      rule: "min_length:30"
+                      message: "Alasan penolakan wajib minimal 30 karakter"
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          description: Periode bukan HARD_CLOSE_PENDING
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: WORKFLOW_INVALID_TRANSITION
+                  message: "Periode PRD-2026-06 dalam status SOFT_CLOSED (bukan HARD_CLOSE_PENDING). Tidak ada request aktif untuk ditolak."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S4 — REOPEN REQUEST
+  # ===========================================================================
+
+  /periode-buku/{id}/reopen-request:
+    post:
+      operationId: periodeS4ReopenRequest
+      summary: CFO ajukan reopen periode — SOFT_CLOSED→OPEN atau CLOSED→SOFT_CLOSED (dalam grace window)
+      description: |
+        AC: S4-AC1 (langkah pertama), S4-AC2 (langkah pertama), S4-AC3, S4-AC4
+
+        ROLE-CFO mengajukan permintaan reopen. Dua path yang diizinkan:
+          a. SOFT_CLOSED → OPEN: tidak ada batasan waktu; step-up MFA tidak diperlukan
+          b. CLOSED → SOFT_CLOSED: hanya dalam grace window (now() < hard_close_grace_expires_at);
+             step-up MFA wajib di /reopen-approve (DEC-027)
+
+        Pre-conditions:
+          - actor.permissions contains 'periode.reopen.request' (ROLE-CFO)
+          - reason.length ≥ 30 karakter (wajib untuk audit compliance) — S4-AC3
+          - target_status harus 'OPEN' (jika dari SOFT_CLOSED) atau 'SOFT_CLOSED' (jika dari CLOSED)
+          - CLOSED → OPEN: TIDAK diizinkan (S4 scope P5-M4)
+          - CLOSED setelah grace window → 423 PERIODE_GRACE_EXPIRED — S4-AC4
+          - row_version cocok (optimistic lock)
+
+        Sukses:
+          - UPDATE mst.periode_buku SET reopened_reason=reason, row_version++
+          - INSERT sys.closing_checklist_snapshot (REOPEN_REQUEST)
+          - INSERT aud.audit_log action=PERIODE.REOPEN_REQUESTED (in-transaction)
+            after_jsonb WAJIB mengandung reason
+
+        Status_periode belum berubah pada tahap ini — perubahan terjadi di /reopen-approve.
+
+        Permission: periode.reopen.request (ROLE-CFO)
+        MFA: wajib login MFA (DEC-026)
+        Rate limit: 5 req/min per user
+      tags: [periode-reopen]
+      parameters:
+        - $ref: "#/components/parameters/PeriodeIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReopenRequestBody"
+            example:
+              targetStatus: "OPEN"
+              reason: "Ditemukan jurnal FVOCI yang salah booking OCI periode Juni 2026. Koreksi material. Persetujuan ALCO sudah diperoleh via email referensi ALCO/2026/VI/001."
+              rowVersion: 7
+      responses:
+        "202":
+          description: Reopen request diterima — menunggu approve
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/ReopenRequestResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  periodeId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  periodeKode: "PRD-2026-06"
+                  currentStatus: "SOFT_CLOSED"
+                  targetStatus: "OPEN"
+                  checklistSnapshotId: "18c9d0e1-f2a3-4567-1234-678901234567"
+                  stepUpMfaRequired: false
+                  nextStep: "Lanjutkan dengan POST /reopen-approve. Step-up MFA tidak diperlukan untuk SOFT_CLOSED → OPEN."
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: Validasi gagal (reason < 30 char, target_status tidak valid)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: VALIDATION_FAILED
+                  message: "1 field tidak valid"
+                  details:
+                    - field: "body.reason"
+                      rule: "min_length:30"
+                      message: "Alasan reopen wajib minimal 30 karakter untuk audit compliance"
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "./_common.yaml#/components/responses/Conflict"
+        "422":
+          description: Transisi tidak valid (CLOSED → OPEN tidak diizinkan, dll)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: WORKFLOW_INVALID_TRANSITION
+                  message: "Reopen CLOSED → OPEN tidak diizinkan (P5-M4 scope). Target yang valid dari CLOSED: SOFT_CLOSED (dalam grace window)."
+                  details: []
+                  traceId: "01HXY..."
+        "423":
+          description: Grace window sudah berakhir — S4-AC4
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: PERIODE_GRACE_EXPIRED
+                  message: "Grace window untuk reopen periode PRD-2026-06 telah berakhir pada 2026-07-04T09:30:00+07:00. Reopen tidak dapat dilakukan secara otomatis. Ajukan RFC ke Direksi sesuai RACI BRD §3."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S4 — REOPEN APPROVE
+  # ===========================================================================
+
+  /periode-buku/{id}/reopen-approve:
+    post:
+      operationId: periodeS4ReopenApprove
+      summary: CFO approve reopen — state change + FX unlock (step-up MFA jika CLOSED→SOFT_CLOSED)
+      description: |
+        AC: S4-AC1 (langkah kedua), S4-AC2 (langkah kedua)
+
+        ROLE-CFO melanjutkan reopen setelah /reopen-request.
+
+        Dua path:
+          a. SOFT_CLOSED → OPEN:
+             - X-Step-Up-Token TIDAK diperlukan
+             - UPDATE status_periode='OPEN', reopened_flag=TRUE, reopened_at=now(),
+               reopened_by=actor_id, reopened_approved_by=actor_id
+             - PeriodeLockMiddleware: release SOFT_CLOSED lock → mutasi diizinkan kembali
+
+          b. CLOSED → SOFT_CLOSED (dalam grace window):
+             - X-Step-Up-Token WAJIB (DEC-027) — missing → 401 MFA_STEP_UP_REQUIRED
+             - UPDATE status_periode='SOFT_CLOSED',
+               UPDATE mst.kurs SET locked_flag=FALSE WHERE periode_id={id} (unlock FX)
+             - reopened_flag=TRUE, step_up_token_ref=hash(token)
+             - PeriodeLockMiddleware: downgrade CLOSED → SOFT_CLOSED
+               (mutasi hanya CORRECTION_PERIODE_CLOSED, tidak full open)
+
+        Both paths (in-transaction):
+          - INSERT sys.closing_checklist_snapshot (REOPEN_APPROVE)
+          - INSERT aud.audit_log action=PERIODE.REOPENED
+            after_jsonb: { previous_status, new_status, reason, mfa_method (jika ada) }
+          - Notifikasi ke ROLE-AKUN-CTL + ROLE-RISK + ROLE-AKUN:
+            "PERHATIAN: Periode PRD-2026-06 telah di-REOPEN oleh CFO."
+
+        Permission: periode.reopen.approve (ROLE-CFO)
+        MFA: wajib login MFA (DEC-026) + step-up untuk CLOSED→SOFT_CLOSED (DEC-027)
+        Rate limit: 5 req/min per user
+      tags: [periode-reopen]
+      parameters:
+        - $ref: "#/components/parameters/PeriodeIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - name: X-Step-Up-Token
+          in: header
+          required: false
+          schema:
+            type: string
+          description: |
+            Step-up MFA token dari POST /auth/step-up.
+            WAJIB jika target_status = SOFT_CLOSED (CLOSED → SOFT_CLOSED).
+            Tidak diperlukan jika target_status = OPEN (SOFT_CLOSED → OPEN).
+            Token TTL: 5 menit. Scope: "reopen_closed".
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowApproveBody"
+            example:
+              comment: "Reopen disetujui. Koreksi jurnal FVOCI akan dilakukan sebelum hard-close ulang."
+              signatureMethod: "JWT_STEP_UP"
+      responses:
+        "200":
+          description: Reopen approved — status_periode diubah ke target
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/ReopenApproveResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  periodeId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  periodeKode: "PRD-2026-06"
+                  previousStatus: "SOFT_CLOSED"
+                  newStatus: "OPEN"
+                  reopenedAt: "2026-07-03T08:00:00+07:00"
+                  reopenedBy: "f6a7b8c9-d0e1-2345-f012-456789012345"
+                  fxRateUnlocked: false
+                  message: "Periode PRD-2026-06 berhasil di-reopen ke OPEN. Mutasi transaksi diizinkan kembali."
+                meta:
+                  traceId: "01HXY..."
+        "401":
+          description: JWT invalid atau step-up MFA hilang/expired (untuk CLOSED→SOFT_CLOSED)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                mfa_step_up_required:
+                  summary: X-Step-Up-Token hilang untuk CLOSED→SOFT_CLOSED
+                  value:
+                    error:
+                      code: MFA_STEP_UP_REQUIRED
+                      message: "Reopen CLOSED → SOFT_CLOSED wajib step-up MFA (DEC-027). Lakukan challenge via POST /auth/step-up dengan scope 'reopen_closed'."
+                      details: []
+                      traceId: "01HXY..."
+                mfa_expired:
+                  summary: Step-up token expired
+                  value:
+                    error:
+                      code: MFA_STEP_UP_EXPIRED
+                      message: "Step-up MFA token sudah expired (maksimal 5 menit). Ulangi step-up challenge."
+                      details: []
+                      traceId: "01HXY..."
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          description: Tidak ada pending reopen request atau transisi tidak valid
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: WORKFLOW_INVALID_TRANSITION
+                  message: "Tidak ada reopen request yang menunggu approval untuk periode PRD-2026-06. Ajukan /reopen-request terlebih dahulu."
+                  details: []
+                  traceId: "01HXY..."
+        "423":
+          description: Grace window sudah berakhir (diperiksa ulang saat approve)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: PERIODE_GRACE_EXPIRED
+                  message: "Grace window untuk reopen periode PRD-2026-06 telah berakhir saat approval. Reopen tidak dapat dilanjutkan. Ajukan RFC sesuai RACI BRD §3."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S5 — CLOSING CHECKLIST (real-time, read-only)
+  # ===========================================================================
+
+  /periode-buku/{id}/closing-checklist:
+    get:
+      operationId: periodeS5GetClosingChecklist
+      summary: Evaluasi real-time 4-item closing checklist (tidak menyimpan snapshot)
+      description: |
+        AC: S5-AC1, S5-AC4
+
+        Mengembalikan evaluasi real-time 4-item checklist untuk periode yang sedang OPEN,
+        SOFT_CLOSED, atau HARD_CLOSE_PENDING. Tidak menyimpan snapshot (snapshot hanya
+        di-persist saat actual workflow transition).
+
+        Untuk periode CLOSED: tidak re-run checklist — mengembalikan last snapshot dari
+        sys.closing_checklist_snapshot (karena kondisi historis mungkin tidak representatif).
+
+        Response juga menyertakan:
+          - last_snapshot: detail snapshot terakhir dari sys.closing_checklist_snapshot
+          - mv_refresh: status Asynq job MV refresh (untuk periode CLOSED, dari sys.job)
+          - action_url per item yang gagal: link ke resource terkait untuk tindak lanjut
+
+        Item GL_DELIVERED yang gagal menyertakan action_url:
+          /jurnal/gl-delivery-dlq?filter[periode_id]={kode}
+
+        Audit event: PERIODE.CHECKLIST.READ (monitoring akses, in-transaction)
+
+        Permission: periode.read
+        Roles: ROLE-AKUN-CTL, ROLE-CFO, ROLE-RISK, ROLE-AKUN, ROLE-AUDIT
+        Rate limit: 60 req/min per user (read-only)
+      tags: [periode-checklist]
+      parameters:
+        - $ref: "#/components/parameters/PeriodeIdPath"
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      responses:
+        "200":
+          description: Closing checklist (real-time atau last snapshot untuk CLOSED)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/ClosingChecklistResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              examples:
+                open_with_failure:
+                  summary: S5-AC1 — OPEN, 1 item gagal (GL_DELIVERED)
+                  value:
+                    data:
+                      periodeId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                      periodeKode: "PRD-2026-06"
+                      statusPeriode: "OPEN"
+                      evaluatedAt: "2026-06-30T16:45:00+07:00"
+                      allPassed: false
+                      isRealTimeEval: true
+                      items:
+                        - key: "PENDING_APPROVAL_ZERO"
+                          label: "0 transaksi/jurnal masih PENDING_APPROVAL"
+                          passed: true
+                          detail: "Total PENDING_APPROVAL: 0"
+                          actionUrl: null
+                        - key: "JURNAL_BALANCED"
+                          label: "Semua jurnal seimbang (delta ≤ IDR 0.01)"
+                          passed: true
+                          detail: "248 jurnal checked. Max delta: IDR 0.0000"
+                          actionUrl: null
+                        - key: "GL_DELIVERED"
+                          label: "Tidak ada gl_host_status = FAILED yang belum diselesaikan"
+                          passed: false
+                          detail: "3 jurnal masih FAILED. Header IDs: [uuid1, uuid2, uuid3]"
+                          actionUrl: "/jurnal/gl-delivery-dlq?filter[periode_id]=PRD-2026-06"
+                        - key: "RECON_PASS"
+                          label: "GL rekonsiliasi harian terakhir COMPLETED (strict)"
+                          passed: true
+                          detail: "Last recon: 2026-06-29 — COMPLETED. Delta IDR 0.0000"
+                          actionUrl: null
+                      lastSnapshot:
+                        snapshotId: "prev-snap-uuid"
+                        transition: "SOFT_CLOSE_REQUEST"
+                        evaluatedAt: "2026-06-29T14:00:00+07:00"
+                        allPassed: true
+                      mvRefresh: null
+                    meta:
+                      traceId: "01HXY..."
+                closed_historical:
+                  summary: S5-AC4 — CLOSED, return last snapshot + MV refresh status
+                  value:
+                    data:
+                      periodeId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                      periodeKode: "PRD-2026-05"
+                      statusPeriode: "CLOSED"
+                      evaluatedAt: "2026-07-01T10:00:00+07:00"
+                      allPassed: true
+                      isRealTimeEval: false
+                      items:
+                        - key: "PENDING_APPROVAL_ZERO"
+                          label: "0 transaksi/jurnal masih PENDING_APPROVAL"
+                          passed: true
+                          detail: "From snapshot HARD_CLOSE_APPROVE 2026-06-02"
+                          actionUrl: null
+                        - key: "JURNAL_BALANCED"
+                          label: "Semua jurnal seimbang"
+                          passed: true
+                          detail: "From snapshot HARD_CLOSE_APPROVE 2026-06-02"
+                          actionUrl: null
+                        - key: "GL_DELIVERED"
+                          label: "Tidak ada GL delivery FAILED"
+                          passed: true
+                          detail: "From snapshot HARD_CLOSE_APPROVE 2026-06-02"
+                          actionUrl: null
+                        - key: "RECON_PASS"
+                          label: "GL rekonsiliasi terakhir COMPLETED"
+                          passed: true
+                          detail: "From snapshot HARD_CLOSE_APPROVE 2026-06-02"
+                          actionUrl: null
+                      lastSnapshot:
+                        snapshotId: "last-snap-uuid"
+                        transition: "HARD_CLOSE_APPROVE"
+                        evaluatedAt: "2026-06-02T09:29:00+07:00"
+                        allPassed: true
+                      mvRefresh:
+                        jobId: "job_MV_REFRESH_01HABC"
+                        status: "completed"
+                        completedAt: "2026-06-02T10:00:00+07:00"
+                    meta:
+                      traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S5 — STATUS PERIODE REPORT (list + sort + filter + export)
+  # ===========================================================================
+
+  /reports/status-periode:
+    get:
+      operationId: periodeS5GetStatusPeriodeReport
+      summary: Status seluruh periode buku — DataTable dengan sort + filter + export
+      description: |
+        AC: S5-AC2, S5-AC3
+
+        Cursor-paginated list seluruh periode buku dengan status, closing checklist terakhir,
+        dan MV refresh history. Query langsung dari mst.periode_buku JOIN
+        sys.closing_checklist_snapshot — tidak via MV (data relatif kecil, max ~120 per 10 tahun).
+
+        Default sort: tanggal_akhir DESC.
+
+        Allowed filter cols: status_periode, tahun_buku, bulan, tipe_periode.
+        Allowed sort cols: tanggal_akhir, tanggal_mulai, tanggal_soft_close, tanggal_hard_close,
+                           status_periode, tahun_buku.
+
+        Export:
+          - CSV + XLSX. Inline jika ≤ 10k row; async jika > 10k row (→ 202 + jobId).
+          - Trigger via query param: ?export=csv atau ?export=xlsx
+          - Audit event: PERIODE.EXPORT (action PERIODE.STATUS_REPORT.EXPORT) per export
+
+        ROLE-MAKER-TR (tanpa permission periode.read) → 403 FORBIDDEN — S5-AC2.
+        ROLE-AUDIT bisa akses (permission periode.read + periode.export).
+
+        Permission: periode.read (list) + periode.export (export)
+        Rate limit: 60 req/min per user (read); 10 req/min per user (export)
+      tags: [periode-checklist]
+      parameters:
+        - $ref: "./_common.yaml#/components/parameters/cursor"
+        - $ref: "./_common.yaml#/components/parameters/limit"
+        - $ref: "./_common.yaml#/components/parameters/sortParam"
+        - $ref: "./_common.yaml#/components/parameters/searchParam"
+        - name: "filter[status_periode]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [OPEN, SOFT_CLOSED, HARD_CLOSE_PENDING, CLOSED]
+          description: "Filter berdasarkan status_periode."
+        - name: "filter[tahun_buku]"
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 2020
+            maximum: 2099
+          description: "Filter berdasarkan tahun buku. Format: YYYY."
+          example: 2026
+        - name: "filter[bulan]"
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 12
+          description: "Filter berdasarkan bulan (1-12)."
+        - name: "filter[tipe_periode]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [BULANAN, KUARTALAN, TAHUNAN]
+          description: "Filter berdasarkan tipe periode."
+        - name: export
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [csv, xlsx]
+          description: "Export format. Jika > 10k row → 202 + jobId (async ke MinIO)."
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      responses:
+        "200":
+          description: List status periode + pagination
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/StatusPeriodeListItem"
+                  pagination:
+                    $ref: "./_common.yaml#/components/schemas/PaginationResponse"
+                  appliedSort:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        col:
+                          type: string
+                        dir:
+                          type: string
+                          enum: [asc, desc]
+                  appliedFilter:
+                    type: object
+                    additionalProperties: true
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  - periodeId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                    periodeKode: "PRD-2026-06"
+                    tipePeriode: "BULANAN"
+                    tahunBuku: 2026
+                    bulan: 6
+                    tanggalMulai: "2026-06-01"
+                    tanggalAkhir: "2026-06-30"
+                    statusPeriode: "CLOSED"
+                    tanggalSoftClose: "2026-06-30T17:05:22+07:00"
+                    tanggalHardClose: "2026-07-02T09:30:00+07:00"
+                    softCloseBy: "c3d4e5f6-a7b8-9012-cdef-123456789012"
+                    hardCloseBy: "f6a7b8c9-d0e1-2345-f012-456789012345"
+                    reopenedFlag: false
+                    graceExpiresAt: "2026-07-04T09:30:00+07:00"
+                    checklistLastSnapshot:
+                      transition: "HARD_CLOSE_APPROVE"
+                      allPassed: true
+                      evaluatedAt: "2026-07-02T09:29:00+07:00"
+                    mvRefreshStatus: "completed"
+                    mvRefreshAt: "2026-07-02T09:35:00+07:00"
+                  - periodeId: "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+                    periodeKode: "PRD-2026-07"
+                    tipePeriode: "BULANAN"
+                    tahunBuku: 2026
+                    bulan: 7
+                    tanggalMulai: "2026-07-01"
+                    tanggalAkhir: "2026-07-31"
+                    statusPeriode: "OPEN"
+                    tanggalSoftClose: null
+                    tanggalHardClose: null
+                    softCloseBy: null
+                    hardCloseBy: null
+                    reopenedFlag: false
+                    graceExpiresAt: null
+                    checklistLastSnapshot: null
+                    mvRefreshStatus: null
+                    mvRefreshAt: null
+                pagination:
+                  nextCursor: null
+                  hasMore: false
+                  totalEstimate: 12
+                  limit: 50
+                appliedSort:
+                  - col: "tanggal_akhir"
+                    dir: "desc"
+                appliedFilter:
+                  tahun_buku: 2026
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: Sort/filter parameter tidak valid
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: INVALID_SORT_COL
+                  message: "Sort kolom 'nama' tidak diizinkan. Kolom yang valid: tanggal_akhir, tanggal_mulai, tanggal_soft_close, tanggal_hard_close, status_periode, tahun_buku."
+                  details: []
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  /reports/status-periode/export:
+    get:
+      operationId: periodeS5ExportStatusPeriode
+      summary: Export status periode report ke CSV atau XLSX — S5-AC3
+      description: |
+        AC: S5-AC3
+
+        Export status periode report. Menghormati filter + sort aktif dari query params.
+
+        Inline export (≤ 10k row / ≤ 5 MB):
+          - Return 200 dengan Content-Disposition: attachment + file stream
+          - Header X-Total-Rows: {count}
+
+        Async export (> 10k row atau estimasi > 5 MB):
+          - Return 202 dengan jobId → monitor via GET /api/v1/jobs/{jobId}
+          - File tersimpan di MinIO exports/{tenant}/{userId}/{date}/{jobId}.{format}
+          - Notifikasi download link (TTL 24 jam) saat selesai
+
+        CSV: UTF-8 with BOM, header row Bahasa Indonesia, CRLF line ending.
+        XLSX: header bold + freeze, kolom uang format #,##0.0000, tanggal YYYY-MM-DD.
+
+        Audit event: PERIODE.EXPORT (action PERIODE.STATUS_REPORT.EXPORT).
+
+        Permission: periode.export
+        Rate limit: 10 req/min per user
+      tags: [periode-checklist]
+      parameters:
+        - name: format
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [csv, xlsx]
+          description: "Format export."
+        - name: "filter[status_periode]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [OPEN, SOFT_CLOSED, HARD_CLOSE_PENDING, CLOSED]
+        - name: "filter[tahun_buku]"
+          in: query
+          required: false
+          schema:
+            type: integer
+        - name: sort
+          in: query
+          required: false
+          schema:
+            type: string
+        - $ref: "#/components/parameters/XTraceIdHeader"
+      responses:
+        "200":
+          description: File stream inline (≤ 10k row)
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              example: "attachment; filename=\"status-periode-2026-20260617.csv\""
+            X-Total-Rows:
+              schema:
+                type: integer
+              description: Total baris dalam export
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        "202":
+          description: Export async dijadwalkan (> 10k row)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: object
+                    required: [jobId, statusUrl]
+                    properties:
+                      jobId:
+                        type: string
+                        example: "job_EXPORT_PERIODE_01HXYZ"
+                      statusUrl:
+                        type: string
+                        example: "/api/v1/jobs/job_EXPORT_PERIODE_01HXYZ"
+                      streamUrl:
+                        type: string
+                        example: "/api/v1/jobs/job_EXPORT_PERIODE_01HXYZ/stream"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT RSA-2048 signed oleh Keycloak (DEC-025). Access token TTL 15 menit.
+        Claims wajib: sub, preferred_username, roles[], permissions[], tenant_id,
+        mfa_verified, exp, iat, nbf.
+        Permission check di service layer pakai {entity}.{action}, bukan role string.
+
+  parameters:
+    PeriodeIdPath:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: |
+        UUID mst.periode_buku.id ATAU periode_id_kode string (mis. "PRD-2026-06").
+        Server resolve: jika UUID format → query by id; jika non-UUID → query by periode_id_kode.
+      example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+    IdempotencyKeyHeader:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+        pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      description: |
+        UUID v4 unik per request. Wajib di semua mutating endpoints (DEC-021).
+        TTL replay window: 24 jam.
+        Same key + same payload → IDEMPOTENCY_REPLAY 200.
+        Same key + beda payload → IDEMPOTENCY_MISMATCH 422.
+      example: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+
+    XStepUpTokenHeader:
+      name: X-Step-Up-Token
+      in: header
+      required: true
+      schema:
+        type: string
+      description: |
+        Token dari POST /auth/step-up. Wajib di /hard-close-approve (DEC-027).
+        Token TTL: 5 menit. Scope: "hard_close".
+        Missing → 401 MFA_STEP_UP_REQUIRED.
+        Expired (> 5 menit) → 401 MFA_STEP_UP_EXPIRED.
+        Server simpan referensi hash di mst.periode_buku.step_up_token_ref (bukan plaintext).
+
+    XTraceIdHeader:
+      name: X-Trace-Id
+      in: header
+      required: false
+      schema:
+        type: string
+      description: Trace ID untuk distributed tracing. Gateway inject otomatis.
+
+  schemas:
+
+    # ---- Request bodies ---------------------------------------------------
+
+    SoftCloseRequestBody:
+      type: object
+      required: [rowVersion]
+      properties:
+        catatan:
+          type: string
+          maxLength: 1000
+          description: "Catatan soft-close request (opsional, untuk audit context)."
+          example: "Soft close request periode Juni 2026. Semua transaksi telah diverifikasi."
+        rowVersion:
+          type: integer
+          minimum: 1
+          description: |
+            Versi row saat ini dari mst.periode_buku.row_version.
+            Wajib untuk optimistic lock (S1-AC4). Jika mismatch → 409 CONFLICT.
+
+    HardCloseRequestBody:
+      type: object
+      required: [rowVersion]
+      properties:
+        catatan:
+          type: string
+          maxLength: 1000
+          description: "Catatan hard-close request."
+          example: "Hard close request PRD-2026-06. Semua koreksi selesai."
+        rowVersion:
+          type: integer
+          minimum: 1
+          description: "rowVersion untuk optimistic lock."
+
+    WorkflowApproveBody:
+      type: object
+      required: [signatureMethod]
+      properties:
+        comment:
+          type: string
+          maxLength: 1000
+          description: "Komentar approval/reject."
+          example: "Approved. Semua posisi telah diverifikasi."
+        signatureMethod:
+          type: string
+          enum: [JWT_STEP_UP, JWT_STANDARD]
+          description: "Metode penandatanganan digital. Disimpan di sys.closing_checklist_snapshot."
+
+    RejectBody:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 30
+          maxLength: 1000
+          description: "Alasan penolakan. Wajib minimal 30 karakter untuk audit."
+          example: "Ditemukan perbedaan saldo FVOCI antara laporan BLIPS dan sistem rekap Treasury."
+
+    ReopenRequestBody:
+      type: object
+      required: [targetStatus, reason, rowVersion]
+      properties:
+        targetStatus:
+          type: string
+          enum: [OPEN, SOFT_CLOSED]
+          description: |
+            Status target setelah reopen.
+            'OPEN' → hanya dari SOFT_CLOSED (tidak butuh step-up MFA).
+            'SOFT_CLOSED' → hanya dari CLOSED dalam grace window (step-up MFA wajib di /reopen-approve).
+            'CLOSED → OPEN' tidak diizinkan di P5-M4.
+        reason:
+          type: string
+          minLength: 30
+          maxLength: 2000
+          description: |
+            Alasan reopen. Wajib minimal 30 karakter (audit compliance).
+            Disimpan di mst.periode_buku.reopen_reason + aud.audit_log.after_jsonb.
+          example: "Ditemukan jurnal FVOCI yang salah booking OCI periode Juni 2026. Koreksi material. Persetujuan ALCO sudah diperoleh via email referensi ALCO/2026/VI/001."
+        rowVersion:
+          type: integer
+          minimum: 1
+          description: "rowVersion untuk optimistic lock."
+
+    # ---- Checklist item ---------------------------------------------------
+
+    ChecklistItem:
+      type: object
+      required: [key, label, passed, detail]
+      properties:
+        key:
+          type: string
+          enum:
+            - PENDING_APPROVAL_ZERO
+            - JURNAL_BALANCED
+            - GL_DELIVERED
+            - RECON_PASS
+          description: |
+            Identifier checklist item. Stabil — tidak berubah antar minor version.
+            - PENDING_APPROVAL_ZERO: COUNT(entity PENDING*) = 0
+            - JURNAL_BALANCED: ABS(debit - kredit) ≤ IDR 0.01 per header
+            - GL_DELIVERED: tidak ada gl_host_status = FAILED (DEAD_LETTER dikecualikan)
+            - RECON_PASS: sys.gl_reconciliation_report terakhir status = COMPLETED strict
+        label:
+          type: string
+          description: Label yang bisa ditampilkan di UI.
+        passed:
+          type: boolean
+          description: Hasil evaluasi item ini.
+        detail:
+          type: string
+          description: Detail hasil evaluasi (jumlah, ID yang bermasalah, dll).
+          example: "3 jurnal masih FAILED. Header IDs: [uuid1, uuid2, uuid3]"
+        actionUrl:
+          type: string
+          nullable: true
+          description: |
+            URL untuk tindak lanjut jika item gagal. Null jika passed=true.
+            Contoh: "/jurnal/gl-delivery-dlq?filter[periode_id]=PRD-2026-06"
+
+    ChecklistResult:
+      type: object
+      required: [evaluatedAt, allPassed, items]
+      properties:
+        evaluatedAt:
+          type: string
+          format: date-time
+          description: Waktu evaluasi checklist.
+          example: "2026-06-30T16:45:00+07:00"
+        allPassed:
+          type: boolean
+          description: true jika semua 4 item passed.
+        items:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items:
+            $ref: "#/components/schemas/ChecklistItem"
+
+    LastSnapshotSummary:
+      type: object
+      nullable: true
+      required: [snapshotId, transition, evaluatedAt, allPassed]
+      properties:
+        snapshotId:
+          type: string
+          format: uuid
+          description: UUID sys.closing_checklist_snapshot.id
+        transition:
+          type: string
+          enum: [SOFT_CLOSE_REQUEST, SOFT_CLOSE_APPROVE, HARD_CLOSE_REQUEST, HARD_CLOSE_APPROVE, REOPEN_REQUEST, REOPEN_APPROVE]
+        evaluatedAt:
+          type: string
+          format: date-time
+        allPassed:
+          type: boolean
+
+    MvRefreshStatus:
+      type: object
+      nullable: true
+      properties:
+        jobId:
+          type: string
+          nullable: true
+          example: "job_MV_REFRESH_01HXYZ"
+        status:
+          type: string
+          enum: [queued, running, completed, failed, cancelled]
+          nullable: true
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    # ---- Response schemas --------------------------------------------------
+
+    SoftCloseRequestResponse:
+      type: object
+      required: [periodeId, periodeKode, transition, checklistSnapshotId, checklist, allPassed, nextStep]
+      properties:
+        periodeId:
+          type: string
+          format: uuid
+        periodeKode:
+          type: string
+          example: "PRD-2026-06"
+        transition:
+          type: string
+          enum: [SOFT_CLOSE_REQUEST]
+        checklistSnapshotId:
+          type: string
+          format: uuid
+          description: UUID sys.closing_checklist_snapshot yang baru di-INSERT.
+        checklist:
+          $ref: "#/components/schemas/ChecklistResult"
+        allPassed:
+          type: boolean
+        nextStep:
+          type: string
+          example: "Menunggu approval ROLE-AKUN-CTL lain via /soft-close-approve"
+
+    SoftCloseApproveResponse:
+      type: object
+      required: [periodeId, periodeKode, statusPeriode, tanggalSoftClose, approvedBy, checklistSnapshotId, message]
+      properties:
+        periodeId:
+          type: string
+          format: uuid
+        periodeKode:
+          type: string
+          example: "PRD-2026-06"
+        statusPeriode:
+          type: string
+          enum: [SOFT_CLOSED]
+        tanggalSoftClose:
+          type: string
+          format: date-time
+        approvedBy:
+          type: string
+          format: uuid
+        checklistSnapshotId:
+          type: string
+          format: uuid
+        message:
+          type: string
+          example: "Periode PRD-2026-06 berhasil di-soft-close. Mutasi transaksi/jurnal diblokir."
+
+    HardCloseRequestResponse:
+      type: object
+      required: [periodeId, periodeKode, transition, statusPeriode, checklistSnapshotId, checklist, nextStep]
+      properties:
+        periodeId:
+          type: string
+          format: uuid
+        periodeKode:
+          type: string
+          example: "PRD-2026-06"
+        transition:
+          type: string
+          enum: [HARD_CLOSE_REQUEST]
+        statusPeriode:
+          type: string
+          enum: [HARD_CLOSE_PENDING]
+        checklistSnapshotId:
+          type: string
+          format: uuid
+        checklist:
+          $ref: "#/components/schemas/ChecklistResult"
+        nextStep:
+          type: string
+          example: "Menunggu approval CFO via /hard-close-approve. Step-up MFA diperlukan."
+
+    HardCloseApproveResponse:
+      type: object
+      required: [periodeId, periodeKode, statusPeriode, tanggalHardClose, graceExpiresAt, approvedBy, checklistSnapshotId, message]
+      properties:
+        periodeId:
+          type: string
+          format: uuid
+        periodeKode:
+          type: string
+          example: "PRD-2026-06"
+        statusPeriode:
+          type: string
+          enum: [CLOSED]
+        tanggalHardClose:
+          type: string
+          format: date-time
+        graceExpiresAt:
+          type: string
+          format: date-time
+          description: "Batas waktu reopen CLOSED → SOFT_CLOSED. Setelah ini → PERIODE_GRACE_EXPIRED."
+          example: "2026-07-04T09:30:00+07:00"
+        approvedBy:
+          type: string
+          format: uuid
+        checklistSnapshotId:
+          type: string
+          format: uuid
+        mvRefreshJobId:
+          type: string
+          nullable: true
+          description: "Asynq job ID untuk MV refresh (P5-M13). Null jika tidak applicable."
+          example: "job_MV_REFRESH_01HXYZ"
+        mvRefreshStatusUrl:
+          type: string
+          nullable: true
+          example: "/api/v1/jobs/job_MV_REFRESH_01HXYZ"
+        message:
+          type: string
+          example: "Periode PRD-2026-06 berhasil HARD CLOSED. FX rate terkunci. MV refresh dijadwalkan."
+
+    PeriodeStateTransitionResponse:
+      type: object
+      required: [periodeId, periodeKode, previousStatus, newStatus, transition, actorId, transitionedAt]
+      properties:
+        periodeId:
+          type: string
+          format: uuid
+        periodeKode:
+          type: string
+        previousStatus:
+          $ref: "#/components/schemas/StatusPeriode"
+        newStatus:
+          $ref: "#/components/schemas/StatusPeriode"
+        transition:
+          type: string
+          description: "Nama transisi yang terjadi."
+        reason:
+          type: string
+          nullable: true
+          description: "Alasan (untuk reject/reopen)."
+        actorId:
+          type: string
+          format: uuid
+        transitionedAt:
+          type: string
+          format: date-time
+
+    ReopenRequestResponse:
+      type: object
+      required: [periodeId, periodeKode, currentStatus, targetStatus, checklistSnapshotId, stepUpMfaRequired, nextStep]
+      properties:
+        periodeId:
+          type: string
+          format: uuid
+        periodeKode:
+          type: string
+        currentStatus:
+          $ref: "#/components/schemas/StatusPeriode"
+        targetStatus:
+          type: string
+          enum: [OPEN, SOFT_CLOSED]
+        checklistSnapshotId:
+          type: string
+          format: uuid
+        stepUpMfaRequired:
+          type: boolean
+          description: "true jika targetStatus=SOFT_CLOSED (CLOSED→SOFT_CLOSED path — butuh step-up MFA)."
+        nextStep:
+          type: string
+          example: "Lanjutkan dengan POST /reopen-approve. Step-up MFA diperlukan untuk CLOSED → SOFT_CLOSED."
+
+    ReopenApproveResponse:
+      type: object
+      required: [periodeId, periodeKode, previousStatus, newStatus, reopenedAt, reopenedBy, fxRateUnlocked, message]
+      properties:
+        periodeId:
+          type: string
+          format: uuid
+        periodeKode:
+          type: string
+        previousStatus:
+          $ref: "#/components/schemas/StatusPeriode"
+        newStatus:
+          $ref: "#/components/schemas/StatusPeriode"
+        reopenedAt:
+          type: string
+          format: date-time
+        reopenedBy:
+          type: string
+          format: uuid
+        fxRateUnlocked:
+          type: boolean
+          description: "true jika CLOSED → SOFT_CLOSED dan mst.kurs.locked_flag di-set FALSE."
+        message:
+          type: string
+
+    ClosingChecklistResponse:
+      type: object
+      required: [periodeId, periodeKode, statusPeriode, evaluatedAt, allPassed, isRealTimeEval, items]
+      properties:
+        periodeId:
+          type: string
+          format: uuid
+        periodeKode:
+          type: string
+          example: "PRD-2026-06"
+        statusPeriode:
+          $ref: "#/components/schemas/StatusPeriode"
+        evaluatedAt:
+          type: string
+          format: date-time
+          description: "Waktu evaluasi. Untuk CLOSED: waktu query (bukan re-eval)."
+        allPassed:
+          type: boolean
+        isRealTimeEval:
+          type: boolean
+          description: "true = evaluasi real-time DB. false = diambil dari last snapshot (periode CLOSED)."
+        items:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items:
+            $ref: "#/components/schemas/ChecklistItem"
+        lastSnapshot:
+          $ref: "#/components/schemas/LastSnapshotSummary"
+        mvRefresh:
+          $ref: "#/components/schemas/MvRefreshStatus"
+
+    StatusPeriodeListItem:
+      type: object
+      required: [periodeId, periodeKode, tipePeriode, tahunBuku, bulan, tanggalMulai, tanggalAkhir, statusPeriode, reopenedFlag]
+      properties:
+        periodeId:
+          type: string
+          format: uuid
+        periodeKode:
+          type: string
+          example: "PRD-2026-06"
+        tipePeriode:
+          type: string
+          enum: [BULANAN, KUARTALAN, TAHUNAN]
+        tahunBuku:
+          type: integer
+          example: 2026
+        bulan:
+          type: integer
+          minimum: 1
+          maximum: 12
+          nullable: true
+          description: "Null untuk periode KUARTALAN dan TAHUNAN."
+        tanggalMulai:
+          type: string
+          format: date
+          example: "2026-06-01"
+        tanggalAkhir:
+          type: string
+          format: date
+          example: "2026-06-30"
+        statusPeriode:
+          $ref: "#/components/schemas/StatusPeriode"
+        tanggalSoftClose:
+          type: string
+          format: date-time
+          nullable: true
+        tanggalHardClose:
+          type: string
+          format: date-time
+          nullable: true
+        softCloseBy:
+          type: string
+          format: uuid
+          nullable: true
+          description: "UUID ROLE-AKUN-CTL approver yang meng-approve soft-close."
+        hardCloseBy:
+          type: string
+          format: uuid
+          nullable: true
+          description: "UUID ROLE-CFO yang meng-approve hard-close."
+        reopenedFlag:
+          type: boolean
+          description: "TRUE jika periode pernah di-reopen minimal 1 kali."
+        graceExpiresAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Batas waktu reopen dari CLOSED. Null jika status bukan CLOSED atau belum pernah CLOSED."
+        checklistLastSnapshot:
+          $ref: "#/components/schemas/LastSnapshotSummary"
+        mvRefreshStatus:
+          type: string
+          enum: [queued, running, completed, failed, cancelled]
+          nullable: true
+          description: "Status Asynq MV refresh job terakhir. Null jika belum pernah CLOSED."
+        mvRefreshAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    # ---- Enums ------------------------------------------------------------
+
+    StatusPeriode:
+      type: string
+      enum:
+        - OPEN
+        - SOFT_CLOSED
+        - HARD_CLOSE_PENDING
+        - CLOSED
+      description: |
+        Status periode buku.
+        - OPEN: periode aktif, mutasi diizinkan penuh
+        - SOFT_CLOSED: mutasi diblokir kecuali GL delivery retry + CORRECTION_PERIODE_CLOSED (DEC-036)
+        - HARD_CLOSE_PENDING: menunggu CFO step-up MFA approval
+        - CLOSED: terminal (dalam grace window), reopen ke SOFT_CLOSED masih mungkin

@@ -370,6 +370,20 @@ components:
         - JURNAL_DLQ_DISCARD_REASON_TOO_SHORT # 422 — discard/reject reason < 30 karakter
         - JURNAL_DLQ_REPLAY_PERIODE_HARD_CLOSED # 423 — replay tidak bisa karena periode masih HARD_CLOSED
         - JURNAL_MAPPING_WORKFLOW_GATE       # 422 — regulated code tanpa 6-eyes path (misconfiguration)
+        # APP-D P5-M4 — Periode Buku Close Workflow
+        - CLOSING_CHECKLIST_FAILED       # 422 — pre-condition closing checklist gagal (≥1 item tidak lolos)
+        - CLOSING_CHECKLIST_STALE        # 422 — checklist > SOFT_CLOSE_CHECKLIST_STALE_HOURS sejak request; re-run dilakukan
+        - PERIODE_SOFT_CLOSED            # 423 — mutasi ditolak karena periode SOFT_CLOSED atau HARD_CLOSE_PENDING
+        - MFA_STEP_UP_REQUIRED           # 401 — hard-close approve atau reopen CLOSED tanpa X-Step-Up-Token
+        - MFA_STEP_UP_EXPIRED            # 401 — X-Step-Up-Token sudah > 5 menit (re-challenge diperlukan)
+        - PERIODE_GRACE_EXPIRED          # 423 — grace window untuk reopen CLOSED berakhir; eskalasi RFC ke Direksi
+        - SOFT_CLOSE_PENDING_EXISTS      # 409 — sudah ada soft-close request pending untuk periode ini
+        # APP-D P5-M5 — FX Rate Management
+        - FX_RATE_LOCKED                 # 423 — mutasi pada kurs dengan locked_flag=TRUE (periode CLOSED)
+        - KURS_DUPLICATE_DATE            # 409 — conflict (kode_mata_uang, tanggal_berlaku) sudah APPROVED/PENDING
+        - KURS_UPLOAD_VALIDATION_FAILED  # 422 — upload XLSX/CSV gagal validasi (format, range, holiday)
+        - KLASIFIKASI_NOT_LOCKED         # 422 — FX treatment query saat klasifikasi PSAK 71 belum final
+        - KURS_PERIODE_MISMATCH          # 422 — tanggal_berlaku tidak dalam periode OPEN manapun
         # APP-D P5-M3 — GL Host Delivery
         - GL_DELIVERY_HOST_UNREACHABLE       # 502 — GL Host tidak bisa di-reach (5xx, timeout, network)
         - GL_DELIVERY_INVALID_RESPONSE       # 502 — response GL Host tidak sesuai kontrak

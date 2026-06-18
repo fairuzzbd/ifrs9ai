@@ -40,6 +40,7 @@ func testClaims() *auth.Claims {
 			"kurs.approve",
 			"kurs.reject",
 			"kurs.jisdor_sync",
+			"kurs.upload", // P5-M5
 		},
 		TenantID:    "TUGURE",
 		MFAVerified: false,

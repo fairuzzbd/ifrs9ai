@@ -214,6 +214,35 @@ const (
 	CodeRollForwardInvalidPriorPeriod      Code = "ROLL_FORWARD_INVALID_PRIOR_PERIOD"      // 422 — alias PERIODE_MISMATCH
 	CodeRollForwardMismatch                Code = "ROLL_FORWARD_MISMATCH"                  // 422 — reconcile delta ≥ IDR 1.0000
 
+	// P5-M3 GL Delivery codes (APP-D-GL-001..016).
+	// State machine: docs/state-machines/p5-m3-gl-delivery.md §6.
+	CodeGLDeliveryJurnalNotFound         Code = "GL_DELIVERY_JURNAL_NOT_FOUND"          // 404 — jrnl.header or DLQ entry not found
+	CodeGLDeliveryInvalidTransition      Code = "GL_DELIVERY_INVALID_TRANSITION"        // 422 — gl_host_status transition not allowed
+	CodeGLDeliveryReasonTooShort         Code = "GL_DELIVERY_REASON_TOO_SHORT"          // 400 — reason < 30 chars
+	CodeGLDeliveryMaxAttemptsExceeded    Code = "GL_DELIVERY_MAX_ATTEMPTS_EXCEEDED"     // 422 — total attempts ≥ max
+	CodeGLDeliveryPermissionDenied       Code = "GL_DELIVERY_PERMISSION_DENIED"         // 403 — permission denied
+	CodeGLDeliveryHostUnreachable        Code = "GL_DELIVERY_HOST_UNREACHABLE"          // delivery: 5xx/timeout (stored in DLQ error_code)
+	CodeGLDeliveryHost4XX                Code = "GL_DELIVERY_HOST_4XX"                  // delivery: 4xx domain error (stored in DLQ error_code)
+	CodeGLDeliveryInvalidResponse        Code = "GL_DELIVERY_INVALID_RESPONSE"          // delivery: unparseable response
+	CodeGLDeliveryTimeout                Code = "GL_DELIVERY_TIMEOUT"                   // delivery: HTTP timeout
+	CodeGLDeliveryAuthFailed             Code = "GL_DELIVERY_AUTH_FAILED"               // delivery: auth rejected (401/403)
+	CodeGLDLQReplayInvalidState          Code = "GL_DLQ_REPLAY_INVALID_STATE"           // 422 — DLQ entry not in FAILED status
+	CodeGLReconciliationReportNotFound   Code = "GL_RECONCILIATION_REPORT_NOT_FOUND"    // 404 — no report for date
+	CodeGLReconciliationDateInvalid      Code = "GL_RECONCILIATION_DATE_INVALID"        // 422 — not a business day or invalid format
+	CodeGLReconciliationInProgress       Code = "GL_RECONCILIATION_IN_PROGRESS"         // 409 — recon already running for date
+	CodeGLReconciliationHostFailed       Code = "GL_RECONCILIATION_HOST_FAILED"         // 500 — GL Host unreachable during recon
+	CodeGLStatusTerminalImmutable        Code = "GL_STATUS_TERMINAL_IMMUTABLE"          // 423 — DELIVERED/DEAD_LETTER is immutable
+
+	// P5-M4 Periode Buku Close Workflow codes (APP-D-CLOSE-001..007).
+	// State machine: docs/state-machines/p5-m4-periode-close.md §6.
+	CodeClosingChecklistFailed Code = "CLOSING_CHECKLIST_FAILED"  // 422 — pre-condition failed
+	CodeClosingChecklistStale  Code = "CLOSING_CHECKLIST_STALE"   // 422 — stale + re-run needed
+	CodePeriodeSoftClosed      Code = "PERIODE_SOFT_CLOSED"       // 423 — mutations blocked (SOFT_CLOSED)
+	CodeMFAStepUpRequired      Code = "MFA_STEP_UP_REQUIRED"      // 401 — step-up token missing
+	CodeMFAStepUpExpired       Code = "MFA_STEP_UP_EXPIRED"       // 401 — step-up token > 5 min
+	CodePeriodeGraceExpired    Code = "PERIODE_GRACE_EXPIRED"     // 423 — grace window expired
+	CodeSoftClosePendingExists Code = "SOFT_CLOSE_PENDING_EXISTS" // 409 — duplicate pending request
+
 	// P5-M2 Jurnal Engine codes (APP-D-JRNL-001..016).
 	// State machine: docs/state-machines/p5-m2-jurnal-engine.md §6.
 	CodeJurnalEventNotMapped             Code = "JURNAL_EVENT_NOT_MAPPED"               // 422 — no APPROVED_ACTIVE mapping for eventCode
@@ -375,6 +404,37 @@ func (c Code) HTTPStatus() int {
 		return http.StatusForbidden
 	case CodePenempatanPeriodeHardClosed:
 		return 423 // Locked
+	// P5-M3 GL Delivery codes.
+	case CodeGLDeliveryJurnalNotFound, CodeGLReconciliationReportNotFound:
+		return http.StatusNotFound
+	case CodeGLDeliveryPermissionDenied:
+		return http.StatusForbidden
+	case CodeGLReconciliationInProgress:
+		return http.StatusConflict
+	case CodeGLStatusTerminalImmutable:
+		return 423 // Locked
+	case CodeGLDeliveryInvalidTransition, CodeGLDeliveryMaxAttemptsExceeded,
+		CodeGLDLQReplayInvalidState, CodeGLReconciliationDateInvalid:
+		return http.StatusUnprocessableEntity
+	case CodeGLDeliveryReasonTooShort:
+		return http.StatusBadRequest
+
+	// P5-M4 Periode Close Workflow codes.
+	case CodeMFAStepUpRequired, CodeMFAStepUpExpired:
+		return http.StatusUnauthorized // 401
+	case CodeClosingChecklistFailed, CodeClosingChecklistStale:
+		return http.StatusUnprocessableEntity // 422
+	case CodePeriodeSoftClosed, CodePeriodeGraceExpired:
+		return 423 // Locked
+	case CodeSoftClosePendingExists:
+		return http.StatusConflict // 409
+
+	// P5-M5 FX Rate codes.
+	case "FX_RATE_LOCKED":
+		return 423 // Locked
+	case "KURS_UPLOAD_VALIDATION_FAILED", "KURS_PERIODE_MISMATCH", "KLASIFIKASI_NOT_LOCKED":
+		return http.StatusUnprocessableEntity
+
 	// P5-M2 Jurnal Engine codes.
 	case CodeJurnalInstrumenNotFound, CodeJurnalHeaderNotFound, CodeJurnalDlqNotFound:
 		return http.StatusNotFound

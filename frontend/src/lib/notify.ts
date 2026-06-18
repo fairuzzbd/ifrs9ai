@@ -82,6 +82,60 @@ const ERROR_MESSAGE_MAP: Record<string, string> = {
     "Tidak bisa replay jurnal ke periode yang sudah hard-closed.",
   JURNAL_MAPPING_WORKFLOW_GATE:
     "Mapping jurnal belum disetujui atau tidak aktif. Tidak bisa digunakan untuk posting.",
+
+  // --- Periode Close (P5-M4) ---
+  CLOSING_CHECKLIST_FAILED:
+    "Closing checklist belum semua lulus. Selesaikan item yang gagal sebelum melanjutkan.",
+  CLOSING_CHECKLIST_STALE:
+    "Data checklist sudah lebih dari 24 jam. Sistem akan mengevaluasi ulang secara otomatis.",
+  PERIODE_SOFT_CLOSED:
+    "Periode buku sudah soft-closed. Mutasi transaksi dan jurnal tidak diizinkan. GL delivery retry masih diperbolehkan.",
+  MFA_STEP_UP_REQUIRED:
+    "Aksi ini memerlukan verifikasi step-up MFA. Silakan verifikasi TOTP terlebih dahulu.",
+  MFA_STEP_UP_EXPIRED:
+    "Token step-up MFA sudah expired (> 5 menit). Harap ulangi verifikasi dari awal.",
+  PERIODE_GRACE_EXPIRED:
+    "Grace window 48 jam sudah berakhir. Periode yang sudah CLOSED tidak dapat di-reopen lagi.",
+  SOFT_CLOSE_PENDING_EXISTS:
+    "Sudah ada request soft-close yang menunggu approval. Tidak bisa mengajukan request baru.",
+
+  // --- FX Rate (P5-M5) ---
+  FX_RATE_LOCKED:
+    "Kurs sudah dikunci karena periode hard-closed. Tidak bisa ditambah atau diubah. Hubungi CFO untuk reopen dalam grace window.",
+  KURS_DUPLICATE_DATE:
+    "Kurs untuk tanggal dan mata uang ini sudah ada (APPROVED atau PENDING_APPROVAL). Tidak bisa di-override via manual upload. Jika perlu koreksi, hubungi Finance Controller.",
+  KURS_UPLOAD_VALIDATION_FAILED:
+    "File upload kurs gagal validasi. Periksa detail per baris — perbaiki file lalu upload ulang.",
+  KLASIFIKASI_NOT_LOCKED:
+    "Instrumen belum memiliki klasifikasi PSAK 71 yang final (locked). FX treatment tidak dapat ditentukan. Selesaikan SPPI Test + BM Assessment + Klasifikasi Approval terlebih dahulu.",
+  KURS_PERIODE_MISMATCH:
+    "Tanggal berlaku kurs tidak berada dalam periode buku manapun yang OPEN. Pastikan tanggal benar atau hubungi Finance Controller untuk membuka periode.",
+
+  // --- GL Delivery (P5-M3) ---
+  GL_DELIVERY_JURNAL_NOT_FOUND:
+    "Jurnal header tidak ditemukan.",
+  GL_DELIVERY_REASON_TOO_SHORT:
+    "Alasan retry / discard wajib minimal 30 karakter.",
+  GL_DELIVERY_INVALID_TRANSITION:
+    "Jurnal memiliki status DEAD_LETTER dan tidak dapat di-retry. Hubungi ROLE-IT-ADMIN.",
+  GL_DELIVERY_MAX_ATTEMPTS_EXCEEDED:
+    "Batas maksimum percobaan delivery tercapai (5/5). Hubungi ROLE-IT-ADMIN untuk tindak lanjut.",
+  GL_DELIVERY_PERMISSION_DENIED:
+    "Anda tidak memiliki izin untuk tindakan ini. Hanya ROLE-IT-ADMIN yang dapat mendiscard entry GL Delivery DLQ.",
+  GL_DELIVERY_HOST_4XX:
+    "GL Host menolak payload (domain error). Perbaiki penyebab kegagalan sebelum retry.",
+  GL_DELIVERY_HOST_UNREACHABLE:
+    "GL Host tidak dapat dijangkau (infra error). Coba retry setelah GL Host pulih.",
+  GL_DLQ_REPLAY_INVALID_STATE:
+    "DLQ entry tidak bisa di-replay dari status saat ini. Pastikan entry berstatus FAILED.",
+  GL_RECONCILIATION_REPORT_NOT_FOUND:
+    "Belum ada laporan rekonsiliasi untuk tanggal ini. Jalankan rekonsiliasi manual.",
+  GL_RECONCILIATION_DATE_INVALID:
+    "Tanggal tidak valid atau merupakan hari libur. Rekonsiliasi hanya untuk hari kerja.",
+  GL_RECONCILIATION_IN_PROGRESS:
+    "Rekonsiliasi untuk tanggal ini sedang berjalan. Tunggu proses selesai sebelum menjalankan ulang.",
+  GL_RECONCILIATION_HOST_FETCH_FAILED:
+    "Gagal mengambil data dari GL Host saat rekonsiliasi. Periksa koneksi GL Host.",
 };
 
 function formatError(err: ApiError | { code: string; message: string; traceId: string }): string {
