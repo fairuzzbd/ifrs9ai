@@ -370,6 +370,27 @@ components:
         - JURNAL_DLQ_DISCARD_REASON_TOO_SHORT # 422 — discard/reject reason < 30 karakter
         - JURNAL_DLQ_REPLAY_PERIODE_HARD_CLOSED # 423 — replay tidak bisa karena periode masih HARD_CLOSED
         - JURNAL_MAPPING_WORKFLOW_GATE       # 422 — regulated code tanpa 6-eyes path (misconfiguration)
+        # APP-D P5-M4 — Periode Buku Close Workflow
+        - CLOSING_CHECKLIST_FAILED       # 422 — pre-condition closing checklist gagal (≥1 item tidak lolos)
+        - CLOSING_CHECKLIST_STALE        # 422 — checklist > SOFT_CLOSE_CHECKLIST_STALE_HOURS sejak request; re-run dilakukan
+        - PERIODE_SOFT_CLOSED            # 423 — mutasi ditolak karena periode SOFT_CLOSED atau HARD_CLOSE_PENDING
+        - MFA_STEP_UP_REQUIRED           # 401 — hard-close approve atau reopen CLOSED tanpa X-Step-Up-Token
+        - MFA_STEP_UP_EXPIRED            # 401 — X-Step-Up-Token sudah > 5 menit (re-challenge diperlukan)
+        - PERIODE_GRACE_EXPIRED          # 423 — grace window untuk reopen CLOSED berakhir; eskalasi RFC ke Direksi
+        - SOFT_CLOSE_PENDING_EXISTS      # 409 — sudah ada soft-close request pending untuk periode ini
+        # APP-D P5-M5 — FX Rate Management
+        - FX_RATE_LOCKED                 # 423 — mutasi pada kurs dengan locked_flag=TRUE (periode CLOSED)
+        - KURS_DUPLICATE_DATE            # 409 — conflict (kode_mata_uang, tanggal_berlaku) sudah APPROVED/PENDING
+        - KURS_UPLOAD_VALIDATION_FAILED  # 422 — upload XLSX/CSV gagal validasi (format, range, holiday)
+        - KLASIFIKASI_NOT_LOCKED         # 422 — FX treatment query saat klasifikasi PSAK 71 belum final
+        - KURS_PERIODE_MISMATCH          # 422 — tanggal_berlaku tidak dalam periode OPEN manapun
+        # APP-B P5-M7 — Renewal Deposito
+        - RENEWAL_INSTRUMEN_NOT_ELIGIBLE   # 422 — instrumen lama status bukan ACTIVE/MATURING
+        - RENEWAL_SKEMA_INVALID            # 422 — skema bukan POKOK_SAJA atau POKOK_PLUS_BUNGA
+        - RENEWAL_TENOR_OUT_OF_RANGE       # 422 — tenor_bulan < 1 atau > 60
+        - RENEWAL_RATE_OUT_OF_RANGE        # 422 — rate_persen < 0 atau > 30
+        - RENEWAL_BUNGA_BERSIH_TOO_SMALL   # 422 — bunga bersih < 100k IDR (POKOK_PLUS_BUNGA)
+        - RENEWAL_PPH_CALC_MISMATCH        # 422 — preview vs final PPh tidak match
         # APP-D P5-M3 — GL Host Delivery
         - GL_DELIVERY_HOST_UNREACHABLE       # 502 — GL Host tidak bisa di-reach (5xx, timeout, network)
         - GL_DELIVERY_INVALID_RESPONSE       # 502 — response GL Host tidak sesuai kontrak
@@ -387,6 +408,13 @@ components:
         - GL_RECONCILIATION_HOST_FETCH_FAILED # 502 — GL Host tidak bisa di-reach saat fetch daily-summary
         - GL_RECONCILIATION_IN_PROGRESS      # 409 — rekonsiliasi untuk tanggal ini sedang berjalan
         - GL_DLQ_REPLAY_INVALID_STATE        # 422 — DLQ entry status bukan FAILED (replay dari ABANDONED, dll)
+        # APP-B P5-M6 — MTM Daily Job + Manual Upload
+        - MTM_PRICE_STALE              # 422 — stale_price_flag=TRUE; harga_age_days > MTM_PRICE_STALE_DAYS OR kurs FCY tidak tersedia; jurnal tidak dapat diposting otomatis
+        - MTM_PRICE_DEVIATION_REJECTED # 422 — informational: digunakan dalam notifikasi uploader saat override-reject baris dengan deviation_flag=TRUE (bukan HTTP error dari reject endpoint yang return 200)
+        - MTM_BATCH_NOT_FOUND          # 404 — upload_batch_id tidak ditemukan di sys.upload_batch scope MTM_UPLOAD
+        - MTM_OVERRIDE_SOD_VIOLATION   # 403 — override_approver_id = uploader_id; SoD violation saat override-approve/reject; details berisi uploader_id untuk tracing; DEC-017
+        - MTM_INSTRUMEN_AC_SKIP        # 422 — instrumen berklasifikasi AC dimasukkan ke upload MTM; tidak ada MTM untuk AC per PSAK 71 amortised cost method
+        - MTM_PERIODE_LOCKED           # 423 — mutasi trx.mtm saat locked_flag=TRUE (periode CLOSED); mirror FX_RATE_LOCKED pattern P5-M5; raised by MtmLockMiddleware + tg_mtm_locked_check trigger
         # APP-B P5-M1 — Penempatan Deposito
         - PENEMPATAN_INSTRUMEN_NOT_FOUND           # 404 — instrumen_id tidak ada atau soft-deleted
         - PENEMPATAN_INSTRUMEN_INVALID_KLASIFIKASI # 422 — klasifikasi instrumen belum APPROVED di mst.instrumen
