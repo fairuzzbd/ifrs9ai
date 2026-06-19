@@ -64,6 +64,9 @@ import (
 
 	"blips-ifrs9.tugu-re.com/internal/app-b/penempatan"
 	jurnal "blips-ifrs9.tugu-re.com/internal/app-d/jurnal"
+	"blips-ifrs9.tugu-re.com/internal/jrnl/gldelivery"
+	"blips-ifrs9.tugu-re.com/internal/periode/closeflow"
+	"blips-ifrs9.tugu-re.com/internal/trx/mtm"
 )
 
 // version adalah versi service yang dilaporkan probe liveness.
@@ -413,6 +416,9 @@ func main() {
 	kursHandler := kurs.NewHandler(kursSvc, wfHandler)
 	kurs.RegisterRoutes(v1, kursHandler)
 
+	// P5-M5: JISDOR fetch worker. Registered on Asynq mux in the Redis block below.
+	fxJisdorWorker := kurs.NewFxJisdorWorker(kursSvc, logger)
+
 	// -----------------------------------------------------------------------
 	// Master Data — LGD Basel (APP-C-MSTR-ECL-001, 6-eyes + step-up MFA)
 	// -----------------------------------------------------------------------
@@ -471,6 +477,46 @@ func main() {
 	periodeBukuSvc := periodebuku.NewService(periodeBukuRepo, auditWriter, logger)
 	periodeBukuHandler := periodebuku.NewHandler(periodeBukuSvc, wfHandler)
 	periodebuku.RegisterRoutes(v1, periodeBukuHandler)
+
+	// -----------------------------------------------------------------------
+	// P5-M4: Periode Buku Close Workflow (APP-D-CLOSE-001..007)
+	// Routes (all under /api/v1/periode-buku/:id/):
+	//   POST   /soft-close-request          — ROLE-AKUN-CTL submit soft-close (M4-001)
+	//   POST   /soft-close-approve          — ROLE-CFO approve soft-close (M4-002)
+	//   POST   /hard-close-request          — ROLE-CFO request hard-close (M4-003)
+	//   POST   /hard-close-approve          — ROLE-CFO approve (step-up MFA) (M4-004)
+	//   POST   /hard-close-reject           — ROLE-CFO reject hard-close (M4-005)
+	//   POST   /reopen-request              — ROLE-CFO request reopen (M4-006)
+	//   POST   /reopen-approve              — ROLE-CFO approve reopen (M4-006)
+	//   GET    /checklist                   — closing checklist status (M4-007)
+	//   GET    /reports/status-periode      — list all periods status (M4-007)
+	//
+	// State machine: OPEN → SOFT_CLOSED → HARD_CLOSE_PENDING → CLOSED
+	// Reopen paths: SOFT_CLOSED → OPEN (grace window), CLOSED → SOFT_CLOSED (grace window + step-up).
+	// DEC-017 SoD: approver ≠ requester. DEC-027 step-up MFA for hard-close-approve + CLOSED reopen.
+	// DEC-018 audit in-tx. DEC-021 Idempotency-Key wajib.
+	// PeriodeLockMiddleware: blocks all mutations on SOFT_CLOSED/HARD_CLOSE_PENDING/CLOSED routes.
+	// Asynq: ApproveHardClose enqueues "reporting:mv_refresh" task (non-fatal if Redis unavailable).
+	// -----------------------------------------------------------------------
+	var closeflowEnqueuer closeflow.AsynqEnqueuer
+	if cfg.RedisURL != "" {
+		closeflowEnqueuer = asynq.NewClient(asynq.RedisClientOpt{Addr: cfg.RedisURL})
+	}
+	closeflowRepo := closeflow.NewRepo(db)
+	closeflowChecklist := closeflow.NewChecklistService(db)
+	closeflowSvc := closeflow.NewService(
+		closeflowRepo,
+		closeflowChecklist,
+		auditWriter,
+		closeflowEnqueuer, // nil when Redis not set → MV refresh skipped (non-fatal)
+		closeflow.DefaultConfig(),
+		logger,
+	)
+	closeflowHandler := closeflow.NewHandler(closeflowSvc)
+	closeflowLockMW := closeflow.NewPeriodeLockMiddleware(closeflowRepo, closeflow.DefaultConfig())
+	// F-02: pass v1 (not router) so closeflow routes inherit Idempotency + Auth middleware.
+	closeflow.RegisterRoutes(v1, closeflowHandler, closeflowLockMW)
+	closeflow.RegisterLockMiddlewareRoutes(v1, closeflowLockMW)
 
 	// -----------------------------------------------------------------------
 	// Master Data — Portofolio (APP-A-MSTR-010)
@@ -859,6 +905,83 @@ func main() {
 	jurnalWorker := jurnal.NewWorker(jurnalPostingSvc, jurnalDLQRepo, logger)
 	_ = jurnalWorker // registered in Redis block below
 
+	// -----------------------------------------------------------------------
+	// APP-B P5-M6 — MTM (Mark-to-Market) Daily Job + Manual Override
+	// Endpoints (all under /api/v1/trx/mtm/):
+	//   GET    /                          — list (cursor, sort, filter, export) (fx_rate.read)
+	//   POST   /upload/batch              — manual upload CSV (fx_rate.create)
+	//   GET    /upload/batch/:batch_id    — batch status (fx_rate.read)
+	//   POST   /cron/trigger              — manual cron trigger (fx_rate.create)
+	//   GET    /alerts/stale-price        — stale-price alert list (fx_rate.read)
+	//   GET    /:id                       — MTM detail (fx_rate.read)
+	//   POST   /:id/override-approve      — ROLE-AKUN-CTL approve override (fx_rate.approve)
+	//   POST   /:id/override-reject       — ROLE-AKUN-CTL reject override (fx_rate.approve)
+	//
+	// Domain: AC instruments skipped (ErrMTMInstrumenACSkip). SoD: override_approver ≠ uploader.
+	// locked_flag=TRUE → HTTP 423 MTM_PERIODE_LOCKED (set by closeflow hard-close hook).
+	// Cron: "0 11 * * 1-5" (18:00 WIB = 11:00 UTC, Mon-Fri).
+	// JurnalPoster: NoopJurnalPoster placeholder until P5-M2 interface stabilises.
+	// AsynqEnqueuer: NoopEnqueuer in dev (no Redis); real asynq.Client wired below when REDIS_URL set.
+	// -----------------------------------------------------------------------
+	mtmRepo := mtm.NewDBRepository(db)
+	mtmJurnalPoster := mtm.NewRealJurnalPoster(logger)
+	// m5 fix: production guard — fatal if NoopJurnalPoster used in production
+	if mtm.IsNoopProduction(mtmJurnalPoster) {
+		log.Fatal("FATAL: APP_ENV=production but MTM JurnalPoster is NoopJurnalPoster. " +
+			"Wire internal/app-d/jurnal.Service before deploying to production.")
+	}
+	mtmSvc := mtm.NewService(mtmRepo, mtmJurnalPoster, auditWriter, logger)
+	mtmWorker := mtm.NewHandler(mtmSvc, logger)
+	_ = mtmWorker // registered in Redis block below
+
+	// HTTP handler: enqueuer set to NoopEnqueuer in dev; overridden in Redis block below.
+	var mtmEnqueuer mtm.AsynqEnqueuer = mtm.NoopEnqueuer{}
+	mtmHandler := mtm.NewHTTPHandler(mtmSvc, mtmEnqueuer)
+	// B4 fix: pass rdb to RegisterRoutes so SensitiveRateLimit can be applied on cron/trigger.
+	mtm.RegisterRoutes(v1, mtmHandler, rdb)
+
+	// -----------------------------------------------------------------------
+	// P5-M3: GL Host REST Delivery — DeliveryService, DLQService, ReconciliationService.
+	// Uses StubAdapter by default (dev mode); RESTAdapter when GL_HOST_URL is set.
+	// All services panic on nil auditWriter (DEC-018).
+	// -----------------------------------------------------------------------
+	glJurnalRepo := gldelivery.NewJurnalGLRepo(db)
+	glDLQRepo := gldelivery.NewDLQRepo(db)
+	glReportRepo := gldelivery.NewReconReportRepo(db)
+	glMismatchRepo := gldelivery.NewReconMismatchRepo(db)
+
+	glCfg := gldelivery.DefaultConfig()
+	var glAdapter gldelivery.GLHostAdapter
+	if glHostURL := os.Getenv("GL_HOST_URL"); glHostURL != "" {
+		restAdapter, adapterErr := gldelivery.NewRESTAdapter(gldelivery.RESTAdapterConfig{
+			BaseURL:        glHostURL,
+			AuthType:       os.Getenv("GL_HOST_AUTH_TYPE"),
+			APIKey:         os.Getenv("GL_HOST_API_KEY"),
+			TimeoutSeconds: 30,
+			PIIFields:      glCfg.PIIFields,
+		})
+		if adapterErr != nil {
+			logger.Warn("P5-M3: GL Host RESTAdapter init failed — using StubAdapter", "error", adapterErr)
+			glAdapter = gldelivery.NewStubAdapter()
+		} else {
+			glAdapter = restAdapter
+			logger.Info("P5-M3: GL Host RESTAdapter active", "url", glHostURL)
+		}
+	} else {
+		glAdapter = gldelivery.NewStubAdapter()
+		logger.Warn("P5-M3: GL_HOST_URL not set — GL delivery using StubAdapter (dev mode)")
+	}
+
+	glDeliverySvc := gldelivery.NewDeliveryService(glJurnalRepo, glDLQRepo, glAdapter, auditWriter, nil /* enqueuer wired below */, glCfg, logger)
+	glDLQSvc := gldelivery.NewDLQService(glDLQRepo, glJurnalRepo, glDeliverySvc, auditWriter, nil, logger)
+	glReconSvc := gldelivery.NewReconciliationService(glJurnalRepo, glReportRepo, glMismatchRepo, glAdapter, auditWriter, nil, glCfg, logger)
+
+	glHandler := gldelivery.NewHandler(glDeliverySvc, glDLQSvc, glReconSvc)
+	gldelivery.RegisterRoutes(v1, glHandler, jwtVerifier, db)
+
+	glWorker := gldelivery.NewGLDeliveryWorker(glDeliverySvc, glReconSvc, glCfg, logger)
+	_ = glWorker // registered in Redis block below
+
 	// B1 fix: Register DriftCronHandler on Asynq mux + scheduler.
 	// Previously the handler was instantiated then discarded (_ = ...), making the
 	// drift cron feature completely dead.  Now we:
@@ -891,6 +1014,15 @@ func main() {
 		// P5-M2: jurnal engine subscribers for penempatan events.
 		jurnalWorker.RegisterHandlers(asynqMux)
 
+		// P5-M3: GL Host delivery + reconciliation tasks.
+		glWorker.RegisterHandlers(asynqMux)
+
+		// P5-M5: JISDOR fetch + upload-process tasks.
+		fxJisdorWorker.RegisterHandlers(asynqMux)
+
+		// P5-M6: MTM daily run task.
+		mtmWorker.RegisterHandlers(asynqMux)
+
 		// Asynq Server — pulls tasks from Redis queue and dispatches to mux.
 		asynqServer := asynq.NewServer(asynqRedisOpt, asynq.Config{
 			Concurrency: 5,
@@ -914,6 +1046,35 @@ func main() {
 		if _, err := scheduler.Register("0 19 * * *", penempatan.NewMaturityCheckTask("TUGURE")); err != nil {
 			log.Fatalf("register penempatan maturity cron: %v", err)
 		}
+		// P5-M3: GL reconciliation daily cron — 01:00 UTC (08:00 WIB).
+		glReconTask, glReconTaskErr := gldelivery.NewReconcileDailyTask(time.Now().UTC(), "TUGURE")
+		if glReconTaskErr != nil {
+			log.Fatalf("build gl recon task: %v", glReconTaskErr)
+		}
+		if _, err := scheduler.Register("0 1 * * *", glReconTask); err != nil {
+			log.Fatalf("register gl recon cron: %v", err)
+		}
+
+		// P5-M5: JISDOR daily fetch cron — 03:30 UTC (10:30 WIB), Mon-Fri.
+		// Schedule: "30 3 * * 1-5" (sys.config FX_JISDOR_CRON_SCHEDULE).
+		// Payload date is injected at runtime by the cron task builder (today's date in WIB).
+		jisdorTask, jisdorTaskErr := kurs.NewJisdorFetchTask(time.Now().UTC().Format("2006-01-02"), "TUGURE")
+		if jisdorTaskErr != nil {
+			log.Fatalf("build jisdor fetch task: %v", jisdorTaskErr)
+		}
+		if _, err := scheduler.Register("30 3 * * 1-5", jisdorTask); err != nil {
+			log.Fatalf("register jisdor fetch cron: %v", err)
+		}
+
+		// P5-M6: MTM daily run cron — 11:00 UTC (18:00 WIB), Mon-Fri.
+		// Payload date injected at runtime (today's date in UTC, aligned with WIB business day).
+		mtmTask, mtmTaskErr := mtm.NewDailyRunTask(time.Now().UTC().Format("2006-01-02"), "TUGURE")
+		if mtmTaskErr != nil {
+			log.Fatalf("build mtm daily run task: %v", mtmTaskErr)
+		}
+		if _, err := scheduler.Register("0 11 * * 1-5", mtmTask); err != nil {
+			log.Fatalf("register mtm daily run cron: %v", err)
+		}
 		go func() {
 			if err := scheduler.Run(); err != nil {
 				log.Fatalf("asynq scheduler: %v", err)
@@ -921,6 +1082,9 @@ func main() {
 		}()
 		logger.Info("asynq drift cron registered", "schedule", "0 19 * * * UTC", "task", eir.TaskDriftCron)
 		logger.Info("asynq penempatan maturity cron registered", "schedule", "0 19 * * * UTC", "task", penempatan.MaturityCheckTaskType)
+		logger.Info("asynq GL recon cron registered", "schedule", "0 1 * * * UTC", "task", gldelivery.TaskGLReconcileDaily)
+		logger.Info("asynq JISDOR fetch cron registered", "schedule", "30 3 * * 1-5 UTC (10:30 WIB)", "task", kurs.TaskFxJisdorFetch)
+		logger.Info("asynq MTM daily run cron registered", "schedule", "0 11 * * 1-5 UTC (18:00 WIB)", "task", mtm.TaskMtmDailyRun)
 	} else {
 		logger.Warn("REDIS_URL not set — Asynq drift cron NOT registered (dev mode)")
 	}
