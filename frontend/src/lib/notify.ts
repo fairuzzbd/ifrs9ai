@@ -125,6 +125,20 @@ const ERROR_MESSAGE_MAP: Record<string, string> = {
   MTM_PERIODE_LOCKED:
     "Periode buku sudah hard-closed. Tidak bisa menambah atau mengubah MTM untuk periode ini.",
 
+  // --- Renewal Deposito (P5-M7) ---
+  RENEWAL_INSTRUMEN_NOT_ELIGIBLE:
+    "Instrumen tidak eligible untuk renewal. Pastikan instrumen adalah deposito ACTIVE dengan klasifikasi final.",
+  RENEWAL_SKEMA_INVALID:
+    "Skema renewal tidak valid. Pilih 'Pokok Saja' atau 'Pokok + Bunga'.",
+  RENEWAL_TENOR_OUT_OF_RANGE:
+    "Tenor di luar range 1–60 bulan. Masukkan nilai antara 1 dan 60.",
+  RENEWAL_RATE_OUT_OF_RANGE:
+    "Rate di luar range 0%–30%. Masukkan nilai antara 0 dan 30.",
+  RENEWAL_BUNGA_BERSIH_TOO_SMALL:
+    "Bunga bersih kurang dari minimum IDR 100.000 untuk skema Pokok + Bunga. Gunakan skema Pokok Saja atau pilih instrumen dengan nominal lebih besar.",
+  RENEWAL_PPH_CALC_MISMATCH:
+    "Nilai PPh 20% tidak sesuai kalkulasi server. Muat ulang preview dan gunakan nilai yang ditampilkan sistem.",
+
   // --- GL Delivery (P5-M3) ---
   GL_DELIVERY_JURNAL_NOT_FOUND:
     "Jurnal header tidak ditemukan.",
