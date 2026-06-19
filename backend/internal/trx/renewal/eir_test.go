@@ -1,7 +1,6 @@
 package renewal
 
 import (
-	"math"
 	"testing"
 
 	"github.com/shopspring/decimal"
@@ -38,14 +37,15 @@ func TestNewtonRaphsonIRR_BankDeposit12m(t *testing.T) {
 	r, err := NewtonRaphsonIRR(cfs, initial)
 	require.NoError(t, err)
 
-	// Annualize
-	rF64, _ := r.Float64()
-	eirAnnual := math.Pow(1+rF64, 12) - 1
+	// Annualize via decimal-native helper (no float64 transit — DEC-013).
+	eirAnnual := annualizeMonthlyEIR(r)
 
 	// EIR should be slightly below 6% due to 20% tax on coupon
 	// Expected: ~4.8% (6% × 0.80)
-	assert.InDelta(t, 0.048, eirAnnual, 0.002,
-		"EIR annual should be ~4.8%% for 6%% rate with 20%% PPh, got %f", eirAnnual)
+	minExpected, _ := decimal.NewFromString("0.04600000")
+	maxExpected, _ := decimal.NewFromString("0.05000000")
+	assert.True(t, eirAnnual.GreaterThan(minExpected) && eirAnnual.LessThan(maxExpected),
+		"EIR annual should be ~4.8%% for 6%% rate with 20%% PPh, got %s", eirAnnual.StringFixed(8))
 }
 
 // TestNewtonRaphsonIRR_BankDeposit6m validates a 6-month deposit.

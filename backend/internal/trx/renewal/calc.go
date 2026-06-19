@@ -14,7 +14,6 @@ package renewal
 
 import (
 	"fmt"
-	"math"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -135,9 +134,8 @@ func ComputePreview(
 	}
 
 	// Annualize: EIR_annual = (1 + r_monthly)^12 - 1
-	rMonthlyF64, _ := eirMonthly.Float64()
-	eirAnnualF64 := math.Pow(1+rMonthlyF64, 12) - 1
-	eirAnnualDec := decimal.NewFromFloat(eirAnnualF64).RoundBank(8)
+	// Decimal-native iterative power: no float64 transit (DEC-013).
+	eirAnnualDec := annualizeMonthlyEIR(eirMonthly)
 
 	tanggalJatuhTempoBaru := AddMonths(tanggalEfektifBaru, tenorBaruBulan)
 
@@ -150,4 +148,19 @@ func ComputePreview(
 		EirBaru:               eirAnnualDec,
 		TanggalJatuhTempoBaru: tanggalJatuhTempoBaru,
 	}, nil
+}
+
+// annualizeMonthlyEIR converts a monthly EIR to annual using decimal-native iterative
+// multiplication: EIR_annual = (1 + r_monthly)^12 - 1.
+//
+// This avoids float64 transit (math.Pow) which loses precision at 8dp (DEC-013 / DEC-016).
+// O(12) multiplications; negligible cost at call site.
+func annualizeMonthlyEIR(monthly decimal.Decimal) decimal.Decimal {
+	one := decimal.NewFromInt(1)
+	onePlusR := one.Add(monthly)
+	result := one
+	for i := 0; i < 12; i++ {
+		result = result.Mul(onePlusR)
+	}
+	return result.Sub(one).RoundBank(8)
 }

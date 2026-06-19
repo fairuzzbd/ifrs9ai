@@ -6,6 +6,7 @@ package renewal
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"testing"
 	"time"
 
@@ -224,24 +225,124 @@ func TestRepo_GetPeriodeByTanggal_DBError(t *testing.T) {
 
 // ─── List ─────────────────────────────────────────────────────────────────────
 
+// listCols is the column set returned by repo.List (matches SELECT in impl).
+var listCols = []string{
+	"id", "instrumen_lama_id", "instrumen_baru_id", "skema", "tenor_baru_bulan",
+	"rate_baru_persen", "tanggal_efektif_baru", "tanggal_jatuh_tempo_baru",
+	"pokok_lama", "pokok_baru", "bunga_kotor", "pph_amount", "bunga_bersih",
+	"eir_baru_str", "status", "maker_id", "approver_id",
+	"approve_reason", "reject_reason", "jurnal_header_id", "periode_bulanan_id",
+	"created_at", "created_by", "updated_at", "updated_by", "row_version", "tenant_id",
+}
+
+// addListRow adds a minimal valid row to a sqlmock Rows set.
+func addListRow(rows *sqlmock.Rows, id uuid.UUID, createdAt time.Time) *sqlmock.Rows {
+	return rows.AddRow(
+		id, instrumenID, nil, "POKOK_SAJA", int16(12),
+		"7.0000", time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), time.Date(2027, 7, 1, 0, 0, 0, 0, time.UTC),
+		"1000000000.0000", "1000000000.0000", "29753424.6575", "5950684.9315", "23802739.7260",
+		"0.04800000",
+		"PENDING_APPROVAL", makerUUID, nil,
+		nil, nil, nil, nil,
+		createdAt, makerUUID, createdAt, makerUUID, int64(1), "TUGURE",
+	)
+}
+
+// TestRepo_List_Empty validates empty result set + no hasMore.
 func TestRepo_List_Empty(t *testing.T) {
 	repo, mock, db := newMockRepo(t)
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT id`).
-		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "instrumen_lama_id", "instrumen_baru_id", "skema", "tenor_baru_bulan",
-			"rate_baru_persen", "tanggal_efektif_baru", "tanggal_jatuh_tempo_baru",
-			"pokok_lama", "pokok_baru", "bunga_kotor", "pph_amount", "bunga_bersih",
-			"eir_baru", "status", "maker_id", "approver_id",
-			"approve_reason", "reject_reason", "jurnal_header_id", "periode_bulanan_id",
-			"created_at", "created_by", "updated_at", "updated_by", "row_version", "tenant_id",
-		}))
+		WithArgs("TUGURE", 11). // tenant_id + limit+1
+		WillReturnRows(sqlmock.NewRows(listCols))
 
 	rows, hasMore, _, err := repo.List(context.Background(), listquery.Query{}, "", 10)
 	require.NoError(t, err)
 	assert.Empty(t, rows)
 	assert.False(t, hasMore)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestRepo_List_TenantIDBinding asserts tenant_id is passed as first bind param.
+func TestRepo_List_TenantIDBinding(t *testing.T) {
+	repo, mock, db := newMockRepo(t)
+	defer db.Close()
+
+	now := time.Now().UTC()
+	r1 := uuid.New()
+
+	mock.ExpectQuery(`SELECT id`).
+		WithArgs("TUGURE", 6). // tenant_id = $1, limit+1 = $2
+		WillReturnRows(addListRow(sqlmock.NewRows(listCols), r1, now))
+
+	rows, hasMore, count, err := repo.List(context.Background(), listquery.Query{}, "", 5)
+	require.NoError(t, err)
+	assert.False(t, hasMore)
+	assert.Equal(t, 1, count)
+	require.Len(t, rows, 1)
+	assert.Equal(t, r1, rows[0].ID)
+	assert.Equal(t, "TUGURE", rows[0].TenantID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestRepo_List_HasMoreTrue validates limit+1 trick detects next page.
+func TestRepo_List_HasMoreTrue(t *testing.T) {
+	repo, mock, db := newMockRepo(t)
+	defer db.Close()
+
+	now := time.Now().UTC()
+	cols := sqlmock.NewRows(listCols)
+	ids := make([]uuid.UUID, 3) // limit=2 → returns 3 rows (limit+1) → hasMore=true
+	for i := range ids {
+		ids[i] = uuid.New()
+		addListRow(cols, ids[i], now.Add(time.Duration(-i)*time.Second))
+	}
+
+	mock.ExpectQuery(`SELECT id`).
+		WithArgs("TUGURE", 3). // limit=2, fetch limit+1=3
+		WillReturnRows(cols)
+
+	rows, hasMore, count, err := repo.List(context.Background(), listquery.Query{}, "", 2)
+	require.NoError(t, err)
+	assert.True(t, hasMore, "should detect more rows via limit+1 trick")
+	assert.Equal(t, 2, len(rows), "returned slice trimmed to limit")
+	assert.Equal(t, 2, count)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestRepo_List_WithCursor validates cursor-based keyset pagination args.
+func TestRepo_List_WithCursor(t *testing.T) {
+	repo, mock, db := newMockRepo(t)
+	defer db.Close()
+
+	// Build a cursor for a known (created_at, id) pair.
+	cursorTime := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	cursorUUID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	cursor := encodeCursor(cursorTime, cursorUUID)
+
+	now := time.Now().UTC()
+
+	// With cursor the query has 4 args: tenant_id, limit+1, cursorTime, cursorUUID.
+	mock.ExpectQuery(`SELECT id`).
+		WithArgs("TUGURE", 6, cursorTime, cursorUUID).
+		WillReturnRows(addListRow(sqlmock.NewRows(listCols), uuid.New(), now))
+
+	rows, hasMore, _, err := repo.List(context.Background(), listquery.Query{}, cursor, 5)
+	require.NoError(t, err)
+	assert.False(t, hasMore)
+	require.Len(t, rows, 1)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestRepo_List_InvalidCursor returns an error without touching DB.
+func TestRepo_List_InvalidCursor(t *testing.T) {
+	repo, _, db := newMockRepo(t)
+	defer db.Close()
+
+	_, _, _, err := repo.List(context.Background(), listquery.Query{}, "not-valid-base64!!!", 10)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid cursor")
 }
 
 func TestRepo_List_DBError(t *testing.T) {
@@ -254,6 +355,34 @@ func TestRepo_List_DBError(t *testing.T) {
 	_, _, _, err := repo.List(context.Background(), listquery.Query{}, "", 10)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "repo.List")
+}
+
+// ─── F3: encodeCursor / decodeCursor roundtrip ────────────────────────────────
+
+// TestCursorRoundtrip validates encode→decode identity.
+func TestCursorRoundtrip(t *testing.T) {
+	ts := time.Date(2026, 6, 15, 10, 30, 0, 123456789, time.UTC)
+	id := uuid.MustParse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+
+	encoded := encodeCursor(ts, id)
+	decodedT, decodedID, err := decodeCursor(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, ts.UTC().Format(time.RFC3339Nano), decodedT.UTC().Format(time.RFC3339Nano))
+	assert.Equal(t, id, decodedID)
+}
+
+func TestDecodeCursor_BadBase64(t *testing.T) {
+	_, _, err := decodeCursor("!!!not-base64!!!")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "base64 decode")
+}
+
+func TestDecodeCursor_MissingPipe(t *testing.T) {
+	// Encode a string that has no "|" separator.
+	noPipe := base64.StdEncoding.EncodeToString([]byte("2026-01-01T00:00:00Z"))
+	_, _, err := decodeCursor(noPipe)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cursor format invalid")
 }
 
 // ─── BeginTx ─────────────────────────────────────────────────────────────────

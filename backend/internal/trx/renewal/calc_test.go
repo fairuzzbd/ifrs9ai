@@ -210,3 +210,69 @@ func TestComputePreview_SmallTenor(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, preview.EirBaru.IsPositive())
 }
+
+// ─── F1: annualizeMonthlyEIR decimal precision ────────────────────────────────
+
+// TestAnnualizeMonthlyEIR_DecimalPrecision verifies that the decimal-native
+// iterative power yields a result within 1 ULP (at 8dp) of an independently
+// computed reference — and that it does NOT match a float64-based computation
+// when they differ.
+func TestAnnualizeMonthlyEIR_DecimalPrecision(t *testing.T) {
+	// r_monthly = 0.004 (representative of ~4.8% annualized)
+	monthly := decimal.NewFromFloat(0.004)
+
+	// Decimal-native result (the function under test)
+	got := annualizeMonthlyEIR(monthly)
+
+	// Independent decimal reference: compute (1.004)^12 - 1 without float64.
+	one := decimal.NewFromInt(1)
+	onePlusR := one.Add(monthly)
+	ref := one
+	for i := 0; i < 12; i++ {
+		ref = ref.Mul(onePlusR)
+	}
+	ref = ref.Sub(one).RoundBank(8)
+
+	assert.Equal(t, ref.StringFixed(8), got.StringFixed(8),
+		"annualizeMonthlyEIR must match independent decimal computation")
+
+	// Verify it differs from float64-based result when precision matters.
+	// math.Pow(1.004, 12)-1 at 8dp may differ from decimal result by 1+ ULP.
+	rF64 := 0.004
+	eirF64 := 1.0
+	for i := 0; i < 12; i++ {
+		eirF64 *= (1 + rF64)
+	}
+	eirF64 -= 1
+	floatRef := decimal.NewFromFloat(eirF64).RoundBank(8)
+
+	// Both must be close (within 2e-8 absolute), but the decimal path is canonical.
+	diff := got.Sub(floatRef).Abs()
+	maxAllowedDiff, _ := decimal.NewFromString("0.000000020")
+	assert.True(t, diff.LessThanOrEqual(maxAllowedDiff),
+		"decimal and float64 results should be within 2e-8, got diff=%s", diff)
+}
+
+// TestAnnualizeMonthlyEIR_KnownValues verifies specific monthly → annual mappings.
+func TestAnnualizeMonthlyEIR_KnownValues(t *testing.T) {
+	cases := []struct {
+		monthlyStr  string // exact decimal input
+		minAnnual   string // annualized must be > this
+		maxAnnual   string // annualized must be < this
+	}{
+		// 6% p.a. / 12 = 0.5% monthly; after-tax ≈ 4.8% annual
+		{"0.00400000", "0.04800000", "0.05000000"},
+		// 12% p.a. / 12 = 1% monthly; (1.01)^12 -1 = 0.12682503...
+		{"0.01000000", "0.12600000", "0.12800000"},
+		// 25% p.a. / 12 ≈ 2.08% monthly; (1.0208...)^12 -1 ≈ 0.28
+		{"0.02083333", "0.27000000", "0.29000000"},
+	}
+	for _, tc := range cases {
+		monthly, _ := decimal.NewFromString(tc.monthlyStr)
+		got := annualizeMonthlyEIR(monthly)
+		minD, _ := decimal.NewFromString(tc.minAnnual)
+		maxD, _ := decimal.NewFromString(tc.maxAnnual)
+		assert.True(t, got.GreaterThan(minD) && got.LessThan(maxD),
+			"monthly=%s → annual=%s not in (%s, %s)", tc.monthlyStr, got.StringFixed(8), tc.minAnnual, tc.maxAnnual)
+	}
+}

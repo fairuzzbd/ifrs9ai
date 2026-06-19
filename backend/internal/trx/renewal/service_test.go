@@ -658,3 +658,47 @@ func TestService_GetPreview_HappyPath(t *testing.T) {
 	assert.NotEmpty(t, preview.PokokBaru)
 	assert.NotEmpty(t, preview.EirBaru)
 }
+
+// ─── F3: BungaKotor field in RenewalPostRequest ───────────────────────────────
+
+// TestService_Approve_BungaKotorPopulated verifies that the Post call receives
+// BungaKotor == BungaBersih + PphAmount (F3 compliance requirement).
+func TestService_Approve_BungaKotorPopulated(t *testing.T) {
+	renewal := goodRenewal(StatusPendingApproval)
+	repo := &stubRepo{
+		renewal:       renewal,
+		instrumenInfo: goodInstrumen(),
+		periode:       goodPeriode(),
+	}
+
+	poster := NewJurnalPosterStub(nil)
+	instCreator := NewInstrumenCreatorStub()
+	eirWriter := NewEIRScheduleWriterStub()
+	svc := NewService(repo, poster, instCreator, eirWriter, nil, nil)
+
+	req := ApproveRenewalRequest{
+		Comment:        "Approve — check BungaKotor populated in Post call.",
+		SignatureMethod: "JWT_STEP_UP",
+	}
+
+	_, err := svc.Approve(approverCtx(), renewalID, req)
+	require.NoError(t, err)
+
+	calls := poster.Calls()
+	require.Len(t, calls, 1, "exactly one Post call expected")
+	postReq := calls[0]
+
+	// BungaKotor must equal BungaBersih + PphAmount (identity invariant).
+	sum := postReq.BungaBersih.Add(postReq.PphAmount).RoundBank(4)
+	assert.Equal(t, sum.StringFixed(4), postReq.BungaKotor.StringFixed(4),
+		"BungaKotor == BungaBersih + PphAmount invariant violated")
+
+	// All three must be positive.
+	assert.True(t, postReq.BungaKotor.IsPositive(), "BungaKotor must be positive")
+	assert.True(t, postReq.BungaBersih.IsPositive(), "BungaBersih must be positive")
+	assert.True(t, postReq.PphAmount.IsPositive(), "PphAmount must be positive")
+
+	// BungaKotor must be > BungaBersih (tax was withheld).
+	assert.True(t, postReq.BungaKotor.GreaterThan(postReq.BungaBersih),
+		"BungaKotor must be > BungaBersih (PPh withheld)")
+}

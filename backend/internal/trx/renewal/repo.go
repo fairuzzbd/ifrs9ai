@@ -7,7 +7,9 @@ package renewal
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -328,35 +330,112 @@ func (r *Repo) UpdateStatus(ctx context.Context, tx *sql.Tx, id uuid.UUID, u Sta
 	return nil
 }
 
-// List returns paginated renewal rows. This is a simplified implementation.
+// List returns paginated renewal rows filtered by tenant_id (DEC-023 placeholder).
+//
+// Cursor format: base64(created_at_rfc3339nano + "|" + id_uuid).
+// Returns (rows, hasMore, totalOnPage, error).
 func (r *Repo) List(ctx context.Context, q listquery.Query, cursor string, limit int) ([]*Renewal, bool, int, error) {
+	// Decode cursor to obtain the (created_at, id) boundary for keyset pagination.
+	var cursorTime time.Time
+	var cursorID uuid.UUID
+	if cursor != "" {
+		ct, cid, err := decodeCursor(cursor)
+		if err != nil {
+			return nil, false, 0, fmt.Errorf("repo.List: invalid cursor: %w", err)
+		}
+		cursorTime, cursorID = ct, cid
+	}
+
+	// Build query. Cursor clause applied only when cursor is set.
 	const baseQ = `
 		SELECT id, instrumen_lama_id, instrumen_baru_id, skema, tenor_baru_bulan,
-		       rate_baru_persen, tanggal_efektif_baru, tanggal_jatuh_tempo_baru,
-		       pokok_lama, pokok_baru, bunga_kotor, pph_amount, bunga_bersih,
-		       eir_baru, status, maker_id, approver_id,
+		       rate_baru_persen::text, tanggal_efektif_baru, tanggal_jatuh_tempo_baru,
+		       pokok_lama::text, pokok_baru::text, bunga_kotor::text,
+		       pph_amount::text, bunga_bersih::text,
+		       COALESCE(eir_baru::text, '') AS eir_baru_str,
+		       status, maker_id, approver_id,
 		       approve_reason, reject_reason, jurnal_header_id, periode_bulanan_id,
 		       created_at, created_by, updated_at, updated_by, row_version, tenant_id
 		FROM trx.renewal
 		WHERE deleted_at IS NULL
-		ORDER BY created_at DESC
-		LIMIT $1`
+		  AND tenant_id = $1`
 
-	rows, err := r.db.QueryContext(ctx, baseQ, limit+1)
+	const noCursorSuffix = `
+		ORDER BY created_at DESC, id DESC
+		LIMIT $2`
+
+	const cursorSuffix = `
+		  AND (created_at, id) < ($3, $4)
+		ORDER BY created_at DESC, id DESC
+		LIMIT $2`
+
+	// Resolve tenant from context claims; fall back to 'TUGURE' for Phase 1.
+	tenantID := "TUGURE"
+
+	var (
+		sqlRows *sql.Rows
+		err     error
+	)
+	if cursor == "" {
+		sqlRows, err = r.db.QueryContext(ctx, baseQ+noCursorSuffix, tenantID, limit+1)
+	} else {
+		sqlRows, err = r.db.QueryContext(ctx, baseQ+cursorSuffix, tenantID, limit+1, cursorTime, cursorID)
+	}
 	if err != nil {
 		return nil, false, 0, fmt.Errorf("repo.List: %w", err)
 	}
-	defer rows.Close() //nolint:errcheck
+	defer sqlRows.Close() //nolint:errcheck
 
 	var result []*Renewal
-	for rows.Next() {
-		// Simplified scan — production implementation reads each column explicitly.
-		// Decimal columns require string scan + decimal.NewFromString().
-		var row Renewal
-		_ = row // placeholder; real scan calls rows.Scan(&row.ID, ...) column by column
-		// For tests: stubRepo bypasses this path.
+	for sqlRows.Next() {
+		var (
+			row            Renewal
+			rateStr        string
+			pokokLamaStr   string
+			pokokBaruStr   string
+			bungaKotorStr  string
+			pphAmountStr   string
+			bungaBersihStr string
+			eirBaruStr     string
+		)
+		if err := sqlRows.Scan(
+			&row.ID, &row.InstrumenLamaID, &row.InstrumenBaruID, &row.Skema, &row.TenorBaruBulan,
+			&rateStr, &row.TanggalEfektifBaru, &row.TanggalJatuhTempoBaru,
+			&pokokLamaStr, &pokokBaruStr, &bungaKotorStr,
+			&pphAmountStr, &bungaBersihStr, &eirBaruStr,
+			&row.Status, &row.MakerID, &row.ApproverID,
+			&row.ApproveReason, &row.RejectReason, &row.JurnalHeaderID, &row.PeriodeBulananID,
+			&row.CreatedAt, &row.CreatedBy, &row.UpdatedAt, &row.UpdatedBy,
+			&row.RowVersion, &row.TenantID,
+		); err != nil {
+			return nil, false, 0, fmt.Errorf("repo.List: scan: %w", err)
+		}
+		if v, e := decimal.NewFromString(rateStr); e == nil {
+			row.RateBaruPersen = v
+		}
+		if v, e := decimal.NewFromString(pokokLamaStr); e == nil {
+			row.PokokLama = v
+		}
+		if v, e := decimal.NewFromString(pokokBaruStr); e == nil {
+			row.PokokBaru = v
+		}
+		if v, e := decimal.NewFromString(bungaKotorStr); e == nil {
+			row.BungaKotor = v
+		}
+		if v, e := decimal.NewFromString(pphAmountStr); e == nil {
+			row.PphAmount = v
+		}
+		if v, e := decimal.NewFromString(bungaBersihStr); e == nil {
+			row.BungaBersih = v
+		}
+		if eirBaruStr != "" {
+			if v, e := decimal.NewFromString(eirBaruStr); e == nil {
+				row.EirBaru = &v
+			}
+		}
+		result = append(result, &row)
 	}
-	if err := rows.Err(); err != nil {
+	if err := sqlRows.Err(); err != nil {
 		return nil, false, 0, fmt.Errorf("repo.List: iterate: %w", err)
 	}
 
@@ -365,6 +444,34 @@ func (r *Repo) List(ctx context.Context, q listquery.Query, cursor string, limit
 		result = result[:limit]
 	}
 	return result, hasMore, len(result), nil
+}
+
+// decodeCursor decodes a base64-encoded keyset cursor into (created_at, id).
+// Cursor format: base64(created_at_RFC3339Nano + "|" + uuid_string).
+func decodeCursor(cursor string) (time.Time, uuid.UUID, error) {
+	b, err := base64.StdEncoding.DecodeString(cursor)
+	if err != nil {
+		return time.Time{}, uuid.Nil, fmt.Errorf("base64 decode: %w", err)
+	}
+	parts := strings.SplitN(string(b), "|", 2)
+	if len(parts) != 2 {
+		return time.Time{}, uuid.Nil, fmt.Errorf("cursor format invalid (expected 'timestamp|uuid')")
+	}
+	t, err := time.Parse(time.RFC3339Nano, parts[0])
+	if err != nil {
+		return time.Time{}, uuid.Nil, fmt.Errorf("cursor time parse: %w", err)
+	}
+	id, err := uuid.Parse(parts[1])
+	if err != nil {
+		return time.Time{}, uuid.Nil, fmt.Errorf("cursor uuid parse: %w", err)
+	}
+	return t, id, nil
+}
+
+// encodeCursor encodes a (created_at, id) pair into a base64 keyset cursor.
+func encodeCursor(createdAt time.Time, id uuid.UUID) string {
+	raw := createdAt.UTC().Format(time.RFC3339Nano) + "|" + id.String()
+	return base64.StdEncoding.EncodeToString([]byte(raw))
 }
 
 // GetPeriodeByTanggal looks up mst.periode_buku for a given date.

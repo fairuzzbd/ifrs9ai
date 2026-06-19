@@ -22,6 +22,14 @@ import (
 )
 
 // RenewalPostRequest carries data needed to post one RENEWAL_DEPOSITO jurnal entry.
+//
+// Leg 4 (Beban Bunga Deposito gross) requires BungaKotor separately from BungaBersih so the
+// jurnal engine can book:
+//
+//	Leg 3: D Beban Bunga  / K Hutang PPh = PphAmount
+//	Leg 4: D Beban Bunga  / K Kas        = BungaBersih  (net cash paid)
+//
+// BungaKotor == BungaBersih + PphAmount; carry it explicitly to avoid re-derivation at posting.
 type RenewalPostRequest struct {
 	EventCode       string          // "RENEWAL_DEPOSITO"
 	InstrumenLamaID uuid.UUID
@@ -31,8 +39,9 @@ type RenewalPostRequest struct {
 	TanggalEfektif  time.Time
 	PokokLama       decimal.Decimal
 	PokokBaru       decimal.Decimal
-	BungaBersih     decimal.Decimal
-	PphAmount       decimal.Decimal
+	BungaKotor      decimal.Decimal // gross interest before PPh (Leg 4 reference)
+	BungaBersih     decimal.Decimal // net cash paid to counterparty
+	PphAmount       decimal.Decimal // withholding tax 20%
 	ActorID         uuid.UUID
 	TenantID        string
 	TraceID         string

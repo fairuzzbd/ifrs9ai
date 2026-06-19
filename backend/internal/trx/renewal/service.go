@@ -20,11 +20,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 
 	"blips-ifrs9.tugu-re.com/internal/audit"
 	"blips-ifrs9.tugu-re.com/internal/auth"
@@ -328,9 +326,8 @@ func (s *Service) Approve(ctx context.Context, renewalID uuid.UUID, req ApproveR
 			"Check cashflow inputs for renewal %s.", err, renewalID)
 	}
 	// Annualize: EIR_annual = (1 + r_monthly)^12 - 1
-	rMonthlyF64, _ := eirMonthly.Float64()
-	eirAnnualF64 := math.Pow(1+rMonthlyF64, 12) - 1
-	eirAnnualDec := decimal.NewFromFloat(eirAnnualF64).RoundBank(8)
+	// Decimal-native iterative power: no float64 transit (DEC-013 / DEC-016).
+	eirAnnualDec := annualizeMonthlyEIR(eirMonthly)
 
 	// ── Periode buku check at posting time (S5-AC3) ──────────────────
 	periode, err := s.repo.GetPeriodeByTanggal(ctx, tanggalEfektif)
@@ -406,6 +403,8 @@ func (s *Service) Approve(ctx context.Context, renewalID uuid.UUID, req ApproveR
 	}
 
 	// Step 6: POST jurnal RENEWAL_DEPOSITO (S5)
+	// BungaKotor passed explicitly so the jurnal engine can derive Leg 4 (gross beban bunga)
+	// without re-computing from bungaBersih + pphAmount (avoids rounding drift in M2 adapter).
 	postResult, postErr := s.poster.Post(ctx, tx, RenewalPostRequest{
 		EventCode:       "RENEWAL_DEPOSITO",
 		InstrumenLamaID: renewal.InstrumenLamaID,
@@ -415,6 +414,7 @@ func (s *Service) Approve(ctx context.Context, renewalID uuid.UUID, req ApproveR
 		TanggalEfektif:  tanggalEfektif,
 		PokokLama:       inst.Pokok,
 		PokokBaru:       pokokBaru,
+		BungaKotor:      bungaKotor,
 		BungaBersih:     bungaBersih,
 		PphAmount:       pph,
 		ActorID:         approverID,
