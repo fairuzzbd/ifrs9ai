@@ -155,6 +155,22 @@ const ERROR_MESSAGE_MAP: Record<string, string> = {
   PENJUALAN_FVOCI_ELECTION_NO_RECYCLING_WARN:
     "Penjualan FVOCI Election berhasil. Gain/loss tetap di OCI per PSAK 71 §B5.7.1 — tidak direkognisi di P&L.",
 
+  // --- Jatuh Tempo + Akrual (P5-M9) ---
+  MATURITY_INSTRUMEN_NOT_ACTIVE:
+    "Instrumen tidak eligible untuk proses jatuh tempo: harus berstatus ACTIVE. Instrumen ini dikirim ke DLQ — proses instrumen lain dilanjutkan.",
+  AKRUAL_STAGING_STALE:
+    "ECL sealed run terakhir lebih dari batas staleness (AKRUAL_STAGING_STALE_DAYS hari). Akrual Stage 3 mungkin tidak akurat. Hubungi ROLE-AKUN-CTL untuk konfirmasi atau trigger ECL rerun.",
+  AKRUAL_FX_RATE_MISSING:
+    "Kurs (FX rate) status APPROVED tidak tersedia untuk mata uang dan tanggal akrual ini. Upload kurs manual via halaman Kurs terlebih dahulu.",
+  AKRUAL_PERIODE_LOCKED:
+    "Periode buku sudah hard-closed. Akrual tidak bisa diposting ke periode ini.",
+  AKRUAL_DUPLICATE:
+    "Duplikat akrual terdeteksi untuk instrumen + tanggal + jenis yang sama (idempotency guard). Tidak ada aksi diperlukan — instrumen lain dilanjutkan.",
+  AKRUAL_EIR_NOT_FOUND:
+    "Tidak ada amortisasi schedule aktif (ecl.amortisasi_schedule) untuk instrumen ini. Hubungi tim APP-C untuk setup EIR schedule terlebih dahulu.",
+  DIVIDEN_VALIDATION_FAILED:
+    "Input dividen tidak valid. Pastikan gross_dividen_IDR lebih dari 0 dan semua field wajib diisi.",
+
   // --- GL Delivery (P5-M3) ---
   GL_DELIVERY_JURNAL_NOT_FOUND:
     "Jurnal header tidak ditemukan.",
