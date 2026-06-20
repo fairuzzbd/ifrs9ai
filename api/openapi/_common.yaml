@@ -391,6 +391,14 @@ components:
         - RENEWAL_RATE_OUT_OF_RANGE        # 422 — rate_persen < 0 atau > 30
         - RENEWAL_BUNGA_BERSIH_TOO_SMALL   # 422 — bunga bersih < 100k IDR (POKOK_PLUS_BUNGA)
         - RENEWAL_PPH_CALC_MISMATCH        # 422 — preview vs final PPh tidak match
+        # APP-B P5-M8 — Penjualan / Pencairan
+        - PENJUALAN_INSTRUMEN_NOT_ACTIVE              # 422 — instrumen status bukan ACTIVE (sudah DISPOSED/MATURED)
+        - PENJUALAN_QTY_EXCEEDS_HOLDING               # 422 — qty_terjual > qty_holding_pre
+        - PENJUALAN_KLASIFIKASI_NOT_LOCKED            # 422 — klasifikasi PSAK 71 belum final
+        - PENJUALAN_HARGA_INVALID                     # 422 — harga_jual_per_unit < 0 atau invalid
+        - PENJUALAN_PERIODE_LOCKED                    # 423 — tidak bisa POST karena periode CLOSED
+        - PENJUALAN_BM_VIOLATION_BLOCK                # 422 — BM frequency breach hard threshold (10% per 12-month rolling)
+        - PENJUALAN_FVOCI_ELECTION_NO_RECYCLING_WARN  # 200 (warn) — FVOCI Election cumulative OCI tidak di-recycle ke P&L per §B5.7.1
         # APP-D P5-M3 — GL Host Delivery
         - GL_DELIVERY_HOST_UNREACHABLE       # 502 — GL Host tidak bisa di-reach (5xx, timeout, network)
         - GL_DELIVERY_INVALID_RESPONSE       # 502 — response GL Host tidak sesuai kontrak
