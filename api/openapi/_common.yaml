@@ -399,6 +399,14 @@ components:
         - PENJUALAN_PERIODE_LOCKED                    # 423 — tidak bisa POST karena periode CLOSED
         - PENJUALAN_BM_VIOLATION_BLOCK                # 422 — BM frequency breach hard threshold (10% per 12-month rolling)
         - PENJUALAN_FVOCI_ELECTION_NO_RECYCLING_WARN  # 200 (warn) — FVOCI Election cumulative OCI tidak di-recycle ke P&L per §B5.7.1
+        # APP-B P5-M9 — Jatuh Tempo + Akrual EIR + Dividen
+        - MATURITY_INSTRUMEN_NOT_ACTIVE  # 422 — instrumen bukan ACTIVE saat maturity processing
+        - AKRUAL_STAGING_STALE           # 422 — ECL sealed run untuk staging lebih tua dari AKRUAL_STAGING_STALE_DAYS → PENDING_STALE_REVIEW
+        - AKRUAL_FX_RATE_MISSING         # 422 — FX rate APPROVED tidak tersedia untuk tanggal_akrual (FCY instrument)
+        - AKRUAL_PERIODE_LOCKED          # 423 — periode_buku bukan OPEN, akrual tidak bisa diposting
+        - AKRUAL_DUPLICATE               # 409 — (instrumen_id, tanggal_akrual, jenis) sudah ada → idempotency guard
+        - AKRUAL_EIR_NOT_FOUND           # 422 — instrumen tidak memiliki amortisasi_schedule aktif atau EIR = 0
+        - DIVIDEN_VALIDATION_FAILED      # 422 — gross_dividen ≤ 0 atau tanggal_terima kosong
         # APP-D P5-M3 — GL Host Delivery
         - GL_DELIVERY_HOST_UNREACHABLE       # 502 — GL Host tidak bisa di-reach (5xx, timeout, network)
         - GL_DELIVERY_INVALID_RESPONSE       # 502 — response GL Host tidak sesuai kontrak

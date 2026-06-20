@@ -67,6 +67,9 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/jrnl/gldelivery"
 	"blips-ifrs9.tugu-re.com/internal/periode/closeflow"
 	"blips-ifrs9.tugu-re.com/internal/trx/mtm"
+
+	// P5-M9: Jatuh Tempo + Akrual EIR + Dividen
+	"blips-ifrs9.tugu-re.com/internal/trx/akrualmaturity"
 )
 
 // version adalah versi service yang dilaporkan probe liveness.
@@ -982,6 +985,42 @@ func main() {
 	glWorker := gldelivery.NewGLDeliveryWorker(glDeliverySvc, glReconSvc, glCfg, logger)
 	_ = glWorker // registered in Redis block below
 
+	// -----------------------------------------------------------------------
+	// APP-B P5-M9 — Jatuh Tempo + Akrual EIR + Dividen
+	// Routes:
+	//   GET  /api/v1/transaksi/akrual                       — list akrual (akrual.read)
+	//   GET  /api/v1/transaksi/akrual/dashboard             — MTD/YTD dashboard (akrual.read)
+	//   POST /api/v1/transaksi/akrual/cron-trigger          — manual cron trigger (sys.cron.trigger)
+	//   GET  /api/v1/transaksi/akrual/:id                   — akrual detail (akrual.read)
+	//   POST /api/v1/transaksi/akrual/:id/override-stale    — override stale ECL (akrual.override_stale)
+	//   GET  /api/v1/transaksi/jatuh-tempo                  — list jatuh tempo (maturity.read)
+	//   POST /api/v1/transaksi/jatuh-tempo/cron-trigger     — manual cron trigger (sys.cron.trigger)
+	//
+	// Cron schedule (WIB, registered in Asynq block below):
+	//   MATURITY_PROCESS_JOB : 09:00 WIB = 02:00 UTC → "0 2 * * *"
+	//   DAILY_ACCRUAL_JOB    : 09:15 WIB = 02:15 UTC → "15 2 * * *"
+	//   AMORTISASI_PD_JOB    : 10:00 WIB = 03:00 UTC → "0 3 * * *"
+	//
+	// Stage 3: ECL from latest sealed ecl.ecl_calc_run (M8 B1 pattern).
+	// POCI: credit-adjusted EIR from ecl.amortisasi_schedule.
+	// FCY: IDR conversion via sys.fx_rate APPROVED (tanggal_akrual).
+	// Stale guard: AKRUAL_STAGING_STALE_DAYS (default 30) config param.
+	// SoD dividen: approver_id ≠ maker_id (DEC-017).
+	// Idempotency: partial unique index (instrumen_id, tanggal_akrual, jenis).
+	// Decisions: DEC-010, DEC-013, DEC-016, DEC-017, DEC-018, DEC-021, DEC-022.
+	//
+	// NOTE: P5-M7 (Renewal) and P5-M8 (Penjualan) wiring pending — their packages
+	// compile independently but RegisterRoutes not yet called from main.go.
+	// -----------------------------------------------------------------------
+	akrualRepo := akrualmaturity.NewRepo(db)
+	akrualPoster := akrualmaturity.NewNoopJurnalPoster(logger)
+	akrualUpdater := akrualmaturity.NewInstrumenStatusUpdaterStub() // Phase 5 wire: production adapter
+	akrualSvc := akrualmaturity.NewService(akrualRepo, akrualPoster, akrualUpdater, auditWriter, logger)
+	akrualHandler := akrualmaturity.NewHTTPHandler(akrualSvc)
+	akrualWorker := akrualmaturity.NewWorker(akrualSvc, rdb, logger)
+	akrualmaturity.RegisterRoutes(v1, akrualHandler, rdb)
+	_ = akrualWorker // handlers registered on asynqMux below
+
 	// B1 fix: Register DriftCronHandler on Asynq mux + scheduler.
 	// Previously the handler was instantiated then discarded (_ = ...), making the
 	// drift cron feature completely dead.  Now we:
@@ -1022,6 +1061,9 @@ func main() {
 
 		// P5-M6: MTM daily run task.
 		mtmWorker.RegisterHandlers(asynqMux)
+
+		// P5-M9: Akrual + Maturity + Amortisasi cron tasks.
+		akrualWorker.RegisterHandlers(asynqMux)
 
 		// Asynq Server — pulls tasks from Redis queue and dispatches to mux.
 		asynqServer := asynq.NewServer(asynqRedisOpt, asynq.Config{
@@ -1075,6 +1117,34 @@ func main() {
 		if _, err := scheduler.Register("0 11 * * 1-5", mtmTask); err != nil {
 			log.Fatalf("register mtm daily run cron: %v", err)
 		}
+
+		// P5-M9: Akrual + Maturity + Amortisasi daily crons.
+		// MATURITY_PROCESS_JOB  → 09:00 WIB = 02:00 UTC
+		// DAILY_ACCRUAL_JOB     → 09:15 WIB = 02:15 UTC
+		// AMORTISASI_PD_JOB     → 10:00 WIB = 03:00 UTC
+		today := time.Now().UTC().Format("2006-01-02")
+		maturityTask, maturityTaskErr := akrualmaturity.NewMaturityTask(time.Now().UTC(), "cron-"+today+"-maturity")
+		if maturityTaskErr != nil {
+			log.Fatalf("build maturity task: %v", maturityTaskErr)
+		}
+		if _, err := scheduler.Register(akrualmaturity.CronMaturity, maturityTask); err != nil {
+			log.Fatalf("register maturity cron: %v", err)
+		}
+		akrualCronTask, akrualCronTaskErr := akrualmaturity.NewAkrualTask(time.Now().UTC(), "cron-"+today+"-akrual")
+		if akrualCronTaskErr != nil {
+			log.Fatalf("build akrual task: %v", akrualCronTaskErr)
+		}
+		if _, err := scheduler.Register(akrualmaturity.CronAkrual, akrualCronTask); err != nil {
+			log.Fatalf("register akrual cron: %v", err)
+		}
+		amortisasiCronTask, amortisasiCronTaskErr := akrualmaturity.NewAmortisasiTask(time.Now().UTC(), "cron-"+today+"-amortisasi")
+		if amortisasiCronTaskErr != nil {
+			log.Fatalf("build amortisasi task: %v", amortisasiCronTaskErr)
+		}
+		if _, err := scheduler.Register(akrualmaturity.CronAmortisasi, amortisasiCronTask); err != nil {
+			log.Fatalf("register amortisasi cron: %v", err)
+		}
+
 		go func() {
 			if err := scheduler.Run(); err != nil {
 				log.Fatalf("asynq scheduler: %v", err)
@@ -1085,6 +1155,9 @@ func main() {
 		logger.Info("asynq GL recon cron registered", "schedule", "0 1 * * * UTC", "task", gldelivery.TaskGLReconcileDaily)
 		logger.Info("asynq JISDOR fetch cron registered", "schedule", "30 3 * * 1-5 UTC (10:30 WIB)", "task", kurs.TaskFxJisdorFetch)
 		logger.Info("asynq MTM daily run cron registered", "schedule", "0 11 * * 1-5 UTC (18:00 WIB)", "task", mtm.TaskMtmDailyRun)
+		logger.Info("asynq maturity process cron registered", "schedule", akrualmaturity.CronMaturity+" UTC (09:00 WIB)", "task", akrualmaturity.TaskMaturityProcess)
+		logger.Info("asynq daily accrual cron registered", "schedule", akrualmaturity.CronAkrual+" UTC (09:15 WIB)", "task", akrualmaturity.TaskDailyAccrual)
+		logger.Info("asynq amortisasi cron registered", "schedule", akrualmaturity.CronAmortisasi+" UTC (10:00 WIB)", "task", akrualmaturity.TaskAmortisasiPD)
 	} else {
 		logger.Warn("REDIS_URL not set — Asynq drift cron NOT registered (dev mode)")
 	}
