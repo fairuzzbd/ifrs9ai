@@ -445,6 +445,13 @@ components:
         - PENEMPATAN_PERIODE_HARD_CLOSED           # 423 — periode bukan OPEN saat create atau approve
         - PENEMPATAN_TERMINATE_FORBIDDEN_NOT_ACTIVE # 422 — /terminate pada status bukan APPROVED_ACTIVE
         - ERR_CALC_2010                            # 422 — field wajib EIR belum terisi (preview only)
+        # APP-C P5-M10 — POCI Delta ECL
+        - POCI_BASELINE_MISSING              # 422/404 — ecl.poci_baseline tidak ada saat compute delta; per-instrument error log (tidak halt run)
+        - POCI_BASELINE_IMMUTABLE_VIOLATION  # 422 — upaya insert/update kedua ke poci_baseline untuk instrumen yang sudah ada baseline (DEC-018 WORM)
+        - POCI_DELTA_DUPLICATE              # 409 — unique constraint (calc_run_id, instrumen_id) violation di poci_delta_log; idempotency guard saat retry job
+        - POCI_INSTRUMEN_NOT_POCI           # 422 — endpoint POCI-specific dipanggil untuk instrumen dengan is_poci = FALSE
+        - POCI_PERIODE_LOCKED               # 423 — mst.periode_buku.status_periode = 'CLOSED' saat posting jurnal POCI delta; blocking
+        - POCI_JURNAL_DIRECTION_MISMATCH    # 422 — delta_ecl > 0 tapi direction = 'DECREASE' atau sebaliknya; bug guard; reject posting + alert
 
     # ---- Timestamps -------------------------------------------------------
     TimestampISO:
