@@ -36,7 +36,9 @@ type Repository interface {
 
 	// GetAmortizedCarryingByInstrumen returns the amortized carrying amount from
 	// ecl.amortisasi_schedule for the given instrumen and date.
-	GetAmortizedCarryingByInstrumen(ctx context.Context, instrumenID uuid.UUID, tanggal time.Time) (decimal.Decimal, error)
+	// For Stage 3 instruments, returns net carrying (gross - sealed ECL allowance) per PSAK 71 §5.4.1(b).
+	// For Stage 1/2, returns gross carrying. stageUsed is 0 when no ECL context is found.
+	GetAmortizedCarryingByInstrumen(ctx context.Context, instrumenID uuid.UUID, tanggal time.Time) (carryingAmount decimal.Decimal, stageUsed int, err error)
 
 	// GetRolling12mDisposalIDR returns the total proceed_idr for POSTED disposals
 	// in the same portofolio within the last 12 months (excluding current).
@@ -58,7 +60,8 @@ type Repository interface {
 	List(ctx context.Context, q listquery.Query, cursor string, limit int) ([]*Penjualan, bool, int, error)
 
 	// ListBMAlerts returns instrumen with bm_violation_risk=TRUE.
-	ListBMAlerts(ctx context.Context) ([]*BMAlertItem, error)
+	// warnT and blockT are read from sys.config_param by the service and passed here to avoid hardcoded literals.
+	ListBMAlerts(ctx context.Context, warnT, blockT decimal.Decimal) ([]*BMAlertItem, error)
 
 	// GetPeriodeByTanggal looks up mst.periode_buku. Returns nil if not found.
 	GetPeriodeByTanggal(ctx context.Context, tanggal time.Time) (*PeriodeBuku, error)
@@ -269,8 +272,12 @@ func (r *Repo) GetOCICumulativeByInstrumen(ctx context.Context, instrumenID uuid
 }
 
 // GetAmortizedCarryingByInstrumen returns amortized carrying from ecl.amortisasi_schedule.
-func (r *Repo) GetAmortizedCarryingByInstrumen(ctx context.Context, instrumenID uuid.UUID, tanggal time.Time) (decimal.Decimal, error) {
-	const q = `
+// For Stage 3: cost_basis = gross - sealed_ECL per PSAK 71 §5.4.1(b).
+// For Stage 1/2: returns gross carrying as-is.
+// If no sealed ECL run exists for the instrument, falls back to gross carrying (stageUsed=0).
+func (r *Repo) GetAmortizedCarryingByInstrumen(ctx context.Context, instrumenID uuid.UUID, tanggal time.Time) (carryingAmount decimal.Decimal, stageUsed int, err error) {
+	// Step 1: get gross carrying from amortisasi_schedule.
+	const qCarrying = `
 		SELECT COALESCE(carrying_amount::text, '0')
 		FROM ecl.amortisasi_schedule
 		WHERE instrumen_id = $1
@@ -279,19 +286,58 @@ func (r *Repo) GetAmortizedCarryingByInstrumen(ctx context.Context, instrumenID 
 		ORDER BY schedule_version DESC
 		LIMIT 1`
 
-	var s string
-	err := r.db.QueryRowContext(ctx, q, instrumenID, tanggal).Scan(&s)
+	var grossStr string
+	err = r.db.QueryRowContext(ctx, qCarrying, instrumenID, tanggal).Scan(&grossStr)
 	if err == sql.ErrNoRows {
-		return decimal.Zero, nil
+		return decimal.Zero, 0, nil
 	}
 	if err != nil {
-		return decimal.Zero, fmt.Errorf("repo.GetAmortizedCarryingByInstrumen: %w", err)
+		return decimal.Zero, 0, fmt.Errorf("repo.GetAmortizedCarryingByInstrumen: %w", err)
 	}
-	v, e := decimal.NewFromString(s)
+	gross, e := decimal.NewFromString(grossStr)
 	if e != nil {
-		return decimal.Zero, fmt.Errorf("repo.GetAmortizedCarryingByInstrumen: parse '%s': %w", s, e)
+		return decimal.Zero, 0, fmt.Errorf("repo.GetAmortizedCarryingByInstrumen: parse gross '%s': %w", grossStr, e)
 	}
-	return v, nil
+
+	// Step 2: look up latest sealed ECL run for this instrument to determine stage and ECL allowance.
+	// Sealed runs have sealed_at IS NOT NULL. Join calc_result_line on instrumen_id.
+	const qECL = `
+		SELECT crl.ecl_stage, COALESCE(crl.ecl_allowance::text, '0')
+		FROM ecl.calc_result_line crl
+		JOIN ecl.ecl_calc_run run ON run.id = crl.ecl_calc_run_id
+		WHERE crl.instrumen_id = $1
+		  AND run.sealed_at IS NOT NULL
+		  AND run.deleted_at IS NULL
+		  AND crl.deleted_at IS NULL
+		ORDER BY run.sealed_at DESC, run.created_at DESC
+		LIMIT 1`
+
+	var stage int
+	var eclStr string
+	err = r.db.QueryRowContext(ctx, qECL, instrumenID).Scan(&stage, &eclStr)
+	if err == sql.ErrNoRows {
+		// No sealed ECL run — fall back to gross carrying.
+		return gross, 0, nil
+	}
+	if err != nil {
+		return decimal.Zero, 0, fmt.Errorf("repo.GetAmortizedCarryingByInstrumen: ecl lookup: %w", err)
+	}
+
+	if stage != 3 {
+		// Stage 1 or 2: return gross carrying.
+		return gross, stage, nil
+	}
+
+	// Stage 3: net carrying = gross - ecl_allowance per PSAK 71 §5.4.1(b).
+	ecl, e2 := decimal.NewFromString(eclStr)
+	if e2 != nil {
+		return decimal.Zero, stage, fmt.Errorf("repo.GetAmortizedCarryingByInstrumen: parse ecl '%s': %w", eclStr, e2)
+	}
+	net := gross.Sub(ecl)
+	if net.IsNegative() {
+		net = decimal.Zero
+	}
+	return net, stage, nil
 }
 
 // GetRolling12mDisposalIDR returns cumulative posted disposal proceeds for a portofolio in last 12 months.
@@ -317,6 +363,11 @@ func (r *Repo) GetRolling12mDisposalIDR(ctx context.Context, portofolioID uuid.U
 }
 
 // GetPortofolioNilai returns total nilai instrumen in a portfolio.
+// TODO(DEC-BM-TOTAL-BASIS): Portfolio total uses acquisition cost (qty × harga_perolehan).
+// PSAK 71 BM Test denominator semantics (carrying vs fair value vs face value) requires
+// ALCO/Decision Log clarification. Track via business-analyst follow-up. Current basis
+// may understate denominator for above-par instruments (over-flag) and overstate for
+// below-par instruments (under-flag). M9 should reconcile.
 func (r *Repo) GetPortofolioNilai(ctx context.Context, portofolioID uuid.UUID) (decimal.Decimal, error) {
 	const q = `
 		SELECT COALESCE(SUM(qty_holding * harga_perolehan), 0)::text
@@ -608,14 +659,15 @@ func (r *Repo) List(ctx context.Context, q listquery.Query, cursor string, limit
 }
 
 // ListBMAlerts returns BMAlertItem rows for instrumen with bm_violation_risk=TRUE.
-func (r *Repo) ListBMAlerts(ctx context.Context) ([]*BMAlertItem, error) {
+// warnT and blockT must be provided by the caller (read from sys.config_param) to avoid hardcoded literals.
+func (r *Repo) ListBMAlerts(ctx context.Context, warnT, blockT decimal.Decimal) ([]*BMAlertItem, error) {
 	const q = `
 		SELECT p.instrumen_id::text, i.kode_instrumen,
 		       i.portofolio_id::text, COALESCE(pt.nama_portofolio, '') AS portofolio_nama,
 		       COALESCE(p.bm_violation_pct::text, '0') AS pct,
-		       '5.0' AS warn_threshold,
-		       '10.0' AS block_threshold,
-		       CASE WHEN p.bm_violation_pct > 10 THEN 'BM_VIOLATION_BLOCK' ELSE 'BM_VIOLATION_RISK' END AS flag_status,
+		       $1::text AS warn_threshold,
+		       $2::text AS block_threshold,
+		       CASE WHEN p.bm_violation_pct > $2::NUMERIC THEN 'BM_VIOLATION_BLOCK' ELSE 'BM_VIOLATION_RISK' END AS flag_status,
 		       p.updated_at
 		FROM trx.penjualan p
 		JOIN mst.instrumen i ON i.id = p.instrumen_id
@@ -627,7 +679,7 @@ func (r *Repo) ListBMAlerts(ctx context.Context) ([]*BMAlertItem, error) {
 		         p.bm_violation_pct, p.updated_at
 		ORDER BY p.bm_violation_pct DESC NULLS LAST`
 
-	rows, err := r.db.QueryContext(ctx, q)
+	rows, err := r.db.QueryContext(ctx, q, warnT.StringFixed(4), blockT.StringFixed(4))
 	if err != nil {
 		return nil, fmt.Errorf("repo.ListBMAlerts: %w", err)
 	}

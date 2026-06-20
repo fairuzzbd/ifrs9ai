@@ -206,6 +206,19 @@ func TestRepo_HasActivePenjualan_False(t *testing.T) {
 	assert.False(t, has)
 }
 
+func TestRepo_HasActivePenjualan_Error(t *testing.T) {
+	db, mock, cleanup := newMockDB(t)
+	defer cleanup()
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*)")).
+		WithArgs(testInstID2).
+		WillReturnError(fmt.Errorf("db error"))
+
+	repo := NewRepo(db)
+	_, err := repo.HasActivePenjualan(context.Background(), testInstID2)
+	require.Error(t, err)
+}
+
 // ─── GetOCICumulativeByInstrumen ─────────────────────────────────────────────
 
 func TestRepo_GetOCICumulativeByInstrumen_Found(t *testing.T) {
@@ -238,18 +251,65 @@ func TestRepo_GetOCICumulativeByInstrumen_NotFound(t *testing.T) {
 
 // ─── GetAmortizedCarryingByInstrumen ─────────────────────────────────────────
 
-func TestRepo_GetAmortizedCarrying_Found(t *testing.T) {
+func TestRepo_GetAmortizedCarrying_Stage1_GrossCarrying(t *testing.T) {
 	db, mock, cleanup := newMockDB(t)
 	defer cleanup()
 
+	// Query 1: amortisasi_schedule returns gross carrying.
 	mock.ExpectQuery(`FROM ecl.amortisasi_schedule`).
 		WithArgs(testInstID2, anyArg).
 		WillReturnRows(sqlmock.NewRows([]string{"carrying"}).AddRow("900000000.0000"))
+	// Query 2: ECL lookup returns Stage 1, ecl_allowance=0.
+	mock.ExpectQuery(`FROM ecl.calc_result_line`).
+		WithArgs(testInstID2).
+		WillReturnRows(sqlmock.NewRows([]string{"ecl_stage", "ecl_allowance"}).AddRow(1, "0.0000"))
 
 	repo := NewRepo(db)
-	c, err := repo.GetAmortizedCarryingByInstrumen(context.Background(), testInstID2, time.Now())
+	c, stage, err := repo.GetAmortizedCarryingByInstrumen(context.Background(), testInstID2, time.Now())
 	require.NoError(t, err)
-	assert.Equal(t, "900000000.0000", c.StringFixed(4))
+	assert.Equal(t, "900000000.0000", c.StringFixed(4), "Stage 1: must return gross carrying")
+	assert.Equal(t, 1, stage)
+}
+
+func TestRepo_GetAmortizedCarrying_Stage3_NetCarrying(t *testing.T) {
+	db, mock, cleanup := newMockDB(t)
+	defer cleanup()
+
+	// Query 1: gross carrying from schedule.
+	mock.ExpectQuery(`FROM ecl.amortisasi_schedule`).
+		WithArgs(testInstID2, anyArg).
+		WillReturnRows(sqlmock.NewRows([]string{"carrying"}).AddRow("900000000.0000"))
+	// Query 2: ECL lookup returns Stage 3 with ECL allowance.
+	mock.ExpectQuery(`FROM ecl.calc_result_line`).
+		WithArgs(testInstID2).
+		WillReturnRows(sqlmock.NewRows([]string{"ecl_stage", "ecl_allowance"}).AddRow(3, "100000000.0000"))
+
+	repo := NewRepo(db)
+	c, stage, err := repo.GetAmortizedCarryingByInstrumen(context.Background(), testInstID2, time.Now())
+	require.NoError(t, err)
+	// net = 900M - 100M = 800M
+	assert.Equal(t, "800000000.0000", c.StringFixed(4), "Stage 3: must return net carrying (gross - sealed ECL)")
+	assert.Equal(t, 3, stage)
+}
+
+func TestRepo_GetAmortizedCarrying_NoSealedECL_FallsBackToGross(t *testing.T) {
+	db, mock, cleanup := newMockDB(t)
+	defer cleanup()
+
+	// Query 1: amortisasi_schedule has carrying.
+	mock.ExpectQuery(`FROM ecl.amortisasi_schedule`).
+		WithArgs(testInstID2, anyArg).
+		WillReturnRows(sqlmock.NewRows([]string{"carrying"}).AddRow("900000000.0000"))
+	// Query 2: no sealed ECL run exists.
+	mock.ExpectQuery(`FROM ecl.calc_result_line`).
+		WithArgs(testInstID2).
+		WillReturnError(sql.ErrNoRows)
+
+	repo := NewRepo(db)
+	c, stage, err := repo.GetAmortizedCarryingByInstrumen(context.Background(), testInstID2, time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, "900000000.0000", c.StringFixed(4), "No sealed ECL: must fall back to gross carrying")
+	assert.Equal(t, 0, stage, "stageUsed must be 0 when no sealed ECL context found")
 }
 
 func TestRepo_GetAmortizedCarrying_NotFound(t *testing.T) {
@@ -261,9 +321,46 @@ func TestRepo_GetAmortizedCarrying_NotFound(t *testing.T) {
 		WillReturnError(sql.ErrNoRows)
 
 	repo := NewRepo(db)
-	c, err := repo.GetAmortizedCarryingByInstrumen(context.Background(), testInstID2, time.Now())
+	c, stage, err := repo.GetAmortizedCarryingByInstrumen(context.Background(), testInstID2, time.Now())
 	require.NoError(t, err)
 	assert.True(t, c.IsZero())
+	assert.Equal(t, 0, stage)
+}
+
+func TestRepo_GetAmortizedCarrying_ECLLookupError(t *testing.T) {
+	db, mock, cleanup := newMockDB(t)
+	defer cleanup()
+
+	mock.ExpectQuery(`FROM ecl.amortisasi_schedule`).
+		WithArgs(testInstID2, anyArg).
+		WillReturnRows(sqlmock.NewRows([]string{"carrying"}).AddRow("900000000.0000"))
+	mock.ExpectQuery(`FROM ecl.calc_result_line`).
+		WithArgs(testInstID2).
+		WillReturnError(fmt.Errorf("db timeout"))
+
+	repo := NewRepo(db)
+	_, _, err := repo.GetAmortizedCarryingByInstrumen(context.Background(), testInstID2, time.Now())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ecl lookup")
+}
+
+func TestRepo_GetAmortizedCarrying_Stage3_ECLExceedsGross_ClampsToZero(t *testing.T) {
+	db, mock, cleanup := newMockDB(t)
+	defer cleanup()
+
+	mock.ExpectQuery(`FROM ecl.amortisasi_schedule`).
+		WithArgs(testInstID2, anyArg).
+		WillReturnRows(sqlmock.NewRows([]string{"carrying"}).AddRow("100000.0000"))
+	// ECL allowance exceeds gross — net would be negative; must clamp to zero.
+	mock.ExpectQuery(`FROM ecl.calc_result_line`).
+		WithArgs(testInstID2).
+		WillReturnRows(sqlmock.NewRows([]string{"ecl_stage", "ecl_allowance"}).AddRow(3, "200000.0000"))
+
+	repo := NewRepo(db)
+	c, stage, err := repo.GetAmortizedCarryingByInstrumen(context.Background(), testInstID2, time.Now())
+	require.NoError(t, err)
+	assert.True(t, c.IsZero(), "net carrying must clamp to zero when ECL > gross")
+	assert.Equal(t, 3, stage)
 }
 
 // ─── GetRolling12mDisposalIDR ─────────────────────────────────────────────────
@@ -566,7 +663,7 @@ func TestRepo_ListBMAlerts_Empty(t *testing.T) {
 		}))
 
 	repo := NewRepo(db)
-	alerts, err := repo.ListBMAlerts(context.Background())
+	alerts, err := repo.ListBMAlerts(context.Background(), decimal.NewFromInt(5), decimal.NewFromInt(10))
 	require.NoError(t, err)
 	assert.Empty(t, alerts)
 }
@@ -588,7 +685,7 @@ func TestRepo_ListBMAlerts_Found(t *testing.T) {
 		))
 
 	repo := NewRepo(db)
-	alerts, err := repo.ListBMAlerts(context.Background())
+	alerts, err := repo.ListBMAlerts(context.Background(), decimal.NewFromInt(5), decimal.NewFromInt(10))
 	require.NoError(t, err)
 	require.Len(t, alerts, 1)
 	assert.Equal(t, "OBL-001", alerts[0].InstrumenKode)

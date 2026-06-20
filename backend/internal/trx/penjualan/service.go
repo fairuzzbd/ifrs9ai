@@ -441,12 +441,17 @@ func (s *Service) Approve(ctx context.Context, penjualanID uuid.UUID, req Approv
 			if preview.OCIRecycled != nil {
 				ociAmt = preview.OCIRecycled.StringFixed(4)
 			}
+			ociCumulative := "0"
+			if pj.OCICumulativeTotal != nil {
+				ociCumulative = pj.OCICumulativeTotal.StringFixed(4)
+			}
 			_ = s.audit.WithTx(tx).Write(ctx, audit.Event{
 				Action:     ociAuditAction,
 				EntityType: "trx.penjualan",
 				EntityID:   penjualanID,
 				After: map[string]any{
 					"instrumen_id":   pj.InstrumenID.String(),
+					"oci_cumulative": ociCumulative,
 					"oci_recycled":   ociAmt,
 					"direction":      ociDir,
 					"klasifikasi":    string(pj.KlasifikasiSnapshot),
@@ -772,8 +777,16 @@ func (s *Service) GetList(ctx context.Context, q listquery.Query, cursor string,
 }
 
 // ListBMAlerts returns instrumen with BM violation risk.
+// Thresholds are read from sys.config_param so the alert table reflects live ALCO-configured values.
 func (s *Service) ListBMAlerts(ctx context.Context) ([]*BMAlertItem, error) {
-	return s.repo.ListBMAlerts(ctx)
+	warnT, blockT, err := s.repo.GetBMConfigThresholds(ctx)
+	if err != nil {
+		s.logger.WarnContext(ctx, "ListBMAlerts: BM config unavailable, using defaults",
+			"error", err)
+		warnT = decimal.NewFromInt(5)
+		blockT = decimal.NewFromInt(10)
+	}
+	return s.repo.ListBMAlerts(ctx, warnT, blockT)
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
@@ -796,7 +809,7 @@ func (s *Service) computePreview(
 	case string(KlasifikasiFVTPL):
 		// FVTPL: use MTM fair value (oci_cumulative not applicable; use proceed as fallback if no MTM)
 		// For FVTPL, carrying amount = latest fair value from trx.mtm
-		mtmCarrying, err := s.repo.GetAmortizedCarryingByInstrumen(ctx, instrumenID, time.Now())
+		mtmCarrying, _, err := s.repo.GetAmortizedCarryingByInstrumen(ctx, instrumenID, time.Now())
 		if err != nil || mtmCarrying.IsZero() {
 			// Fallback: use harga_perolehan if MTM unavailable
 			totalCostBasis = inst.HargaPerolehan
@@ -807,13 +820,18 @@ func (s *Service) computePreview(
 		// FVOCI_ELECTION: cost_basis = original acquisition cost
 		totalCostBasis = inst.HargaPerolehan
 	default:
-		// AC, FVOCI, POCI: amortized carrying from ecl.amortisasi_schedule
-		carrying, err := s.repo.GetAmortizedCarryingByInstrumen(ctx, instrumenID, time.Now())
+		// AC, FVOCI, POCI: amortized carrying from ecl.amortisasi_schedule.
+		// For Stage 3: carrying is net (gross - sealed ECL) per PSAK 71 §5.4.1(b).
+		carrying, stageUsed, err := s.repo.GetAmortizedCarryingByInstrumen(ctx, instrumenID, time.Now())
 		if err != nil || carrying.IsZero() {
 			// Fallback to harga_perolehan
 			totalCostBasis = inst.HargaPerolehan
 		} else {
 			totalCostBasis = carrying
+		}
+		if stageUsed == 0 && err == nil {
+			s.logger.WarnContext(ctx, "GetAmortizedCarryingByInstrumen: no sealed ECL run found, using gross carrying",
+				"instrumen_id", instrumenID)
 		}
 	}
 
@@ -850,7 +868,15 @@ func (s *Service) computePreview(
 		if !portNilai.IsZero() {
 			pct, _ := ComputeBMFrequency(cumIDR, proceed, portNilai)
 			bmFreqImpactPct = &pct
-			warnT, blockT, _ := s.repo.GetBMConfigThresholds(ctx)  //nolint:errcheck
+			warnT, blockT, configErr := s.repo.GetBMConfigThresholds(ctx)
+			if configErr != nil {
+				// Defaults match seed values; if ALCO override active and config read fails,
+				// preview may show stale thresholds — flagged in log.
+				warnT = decimal.NewFromInt(5)
+				blockT = decimal.NewFromInt(10)
+				s.logger.WarnContext(ctx, "BM config unavailable in preview, using defaults",
+					"error", configErr)
+			}
 			bmWarn, bmBlock := ValidateBMThresholds(pct, warnT, blockT)
 			if bmBlock {
 				msg := fmt.Sprintf("Perhatian: disposal ini akan menyebabkan BM HTC disposal %.2f%% (block threshold: %.2f%%).",
