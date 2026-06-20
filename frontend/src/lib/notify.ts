@@ -139,6 +139,22 @@ const ERROR_MESSAGE_MAP: Record<string, string> = {
   RENEWAL_PPH_CALC_MISMATCH:
     "Nilai PPh 20% tidak sesuai kalkulasi server. Muat ulang preview dan gunakan nilai yang ditampilkan sistem.",
 
+  // --- Penjualan/Pencairan (P5-M8) ---
+  PENJUALAN_INSTRUMEN_NOT_ACTIVE:
+    "Instrumen tidak eligible untuk penjualan: harus berstatus ACTIVE dengan klasifikasi PSAK 71 terkunci.",
+  PENJUALAN_QTY_EXCEEDS_HOLDING:
+    "Qty terjual melebihi qty holding saat ini. Periksa saldo instrumen dan kurangi qty terjual.",
+  PENJUALAN_KLASIFIKASI_NOT_LOCKED:
+    "Klasifikasi PSAK 71 instrumen belum final (locked). Selesaikan SPPI Test + BM Assessment + Klasifikasi Approval terlebih dahulu.",
+  PENJUALAN_HARGA_INVALID:
+    "Harga jual per unit tidak valid. Pastikan harga lebih dari 0 dan format angka benar.",
+  PENJUALAN_PERIODE_LOCKED:
+    "Periode buku sudah hard-closed. Penjualan tidak bisa diposting ke periode ini. Hubungi Finance Controller.",
+  PENJUALAN_BM_VIOLATION_BLOCK:
+    "Penjualan menyebabkan disposal kumulatif 12-bulan melampaui hard limit. Approval ROLE-RISK diperlukan sebelum penjualan ini bisa diposting.",
+  PENJUALAN_FVOCI_ELECTION_NO_RECYCLING_WARN:
+    "Penjualan FVOCI Election berhasil. Gain/loss tetap di OCI per PSAK 71 §B5.7.1 — tidak direkognisi di P&L.",
+
   // --- GL Delivery (P5-M3) ---
   GL_DELIVERY_JURNAL_NOT_FOUND:
     "Jurnal header tidak ditemukan.",
