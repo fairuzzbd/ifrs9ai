@@ -250,11 +250,11 @@ func (w *Worker) HandleAmortisasiPD(ctx context.Context, t *asynq.Task) error {
 		"job_id", p.JobID,
 	)
 
-	// Amortisation uses the same RunDailyAkrualCron pipeline — the service layer
-	// already handles AmortisasiPremium / AmortisasiDiskon jenis via ComputeAmortisasi
-	// when amortisasi_schedule rows exist. This job triggers a second pass on that date
-	// for any instruments that failed during the 09:15 run due to schedule lock.
-	result, runErr := w.svc.RunDailyAkrualCron(ctx, tanggal)
+	// M3 fix: use dedicated RunDailyAmortisasiCron pipeline, not RunDailyAkrualCron.
+	// RunDailyAkrualCron posts BUNGA rows; amortisasi requires AMORTISASI_PREMIUM /
+	// AMORTISASI_DISKON rows via processOneAmortisasi which skips instruments with
+	// zero amortisasi_harian and checks idempotency by jenis separately.
+	result, runErr := w.svc.RunDailyAmortisasiCron(ctx, tanggal)
 	if runErr != nil {
 		w.logger.WarnContext(ctx, "AMORTISASI_PD_JOB completed with service-level skip",
 			"tanggal", p.Tanggal,

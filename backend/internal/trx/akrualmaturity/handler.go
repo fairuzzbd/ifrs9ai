@@ -18,6 +18,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
 
 	domainerrors "blips-ifrs9.tugu-re.com/internal/common/errors"
 	"blips-ifrs9.tugu-re.com/internal/common/listquery"
@@ -26,12 +27,14 @@ import (
 
 // HTTPHandler is the akrualmaturity HTTP handler.
 type HTTPHandler struct {
-	svc *Service
+	svc         *Service
+	asynqClient *asynq.Client // nil in dev/test without Redis — returns 501
 }
 
 // NewHTTPHandler creates a new akrualmaturity HTTPHandler.
-func NewHTTPHandler(svc *Service) *HTTPHandler {
-	return &HTTPHandler{svc: svc}
+// asynqClient may be nil; cron-trigger endpoints return 501 when nil.
+func NewHTTPHandler(svc *Service, asynqClient *asynq.Client) *HTTPHandler {
+	return &HTTPHandler{svc: svc, asynqClient: asynqClient}
 }
 
 // AllowedAkrualSortCols is the whitelist for sort on GET /transaksi/akrual.
@@ -148,25 +151,45 @@ func (h *HTTPHandler) GetDashboard(c *gin.Context) {
 
 // TriggerAkrualCron handles POST /api/v1/transaksi/akrual/cron-trigger.
 // STATIC — must be registered before /:id.
-// Returns 202 Accepted + mock jobId (real Asynq enqueue in main.go).
+// Returns 501 when Asynq client is not configured (dev/test without Redis).
 // Permission: sys.cron.trigger (ROLE-IT-ADMIN)
 func (h *HTTPHandler) TriggerAkrualCron(c *gin.Context) {
+	if h.asynqClient == nil {
+		c.JSON(501, gin.H{
+			"error": gin.H{
+				"code":    "ASYNQ_NOT_CONFIGURED",
+				"message": "Asynq client not configured — Redis unavailable in this environment.",
+			},
+		})
+		return
+	}
+
 	tanggal := time.Now().UTC()
 	if s := c.Query("tanggal"); s != "" {
 		if t, err := ParseDateStrict(s); err == nil {
 			tanggal = t
 		}
 	}
-	// Enqueue via service — for now returns a synthetic job ID.
-	// Production: inject Asynq client and enqueue actual job.
-	jobID := uuid.New().String()
+
+	jobID := "job_" + uuid.New().String()
+	task, err := NewAkrualTask(tanggal, jobID)
+	if err != nil {
+		response.Error(c, domainerrors.New(domainerrors.CodeInternal, "gagal membuat task: "+err.Error()))
+		return
+	}
+	info, err := h.asynqClient.Enqueue(task, asynq.Queue("default"))
+	if err != nil {
+		response.Error(c, domainerrors.New(domainerrors.CodeInternal, "gagal enqueue task: "+err.Error()))
+		return
+	}
+
 	c.JSON(202, gin.H{
 		"data": gin.H{
-			"jobId":      "job_" + jobID,
-			"type":       "DAILY_ACCRUAL_JOB",
-			"statusUrl":  "/api/v1/jobs/job_" + jobID,
-			"streamUrl":  "/api/v1/jobs/job_" + jobID + "/stream",
-			"tanggal":    tanggal.Format("2006-01-02"),
+			"jobId":     info.ID,
+			"type":      "DAILY_ACCRUAL_JOB",
+			"statusUrl": "/api/v1/jobs/" + info.ID,
+			"streamUrl": "/api/v1/jobs/" + info.ID + "/stream",
+			"tanggal":   tanggal.Format("2006-01-02"),
 		},
 		"meta": gin.H{"traceId": traceIDFromCtx(c)},
 	})
@@ -267,8 +290,19 @@ func (h *HTTPHandler) ListJatuhTempo(c *gin.Context) {
 
 // TriggerMaturityCron handles POST /api/v1/transaksi/jatuh-tempo/cron-trigger.
 // STATIC — must be registered before any /:id route.
+// Returns 501 when Asynq client is not configured (dev/test without Redis).
 // Permission: sys.cron.trigger (ROLE-IT-ADMIN)
 func (h *HTTPHandler) TriggerMaturityCron(c *gin.Context) {
+	if h.asynqClient == nil {
+		c.JSON(501, gin.H{
+			"error": gin.H{
+				"code":    "ASYNQ_NOT_CONFIGURED",
+				"message": "Asynq client not configured — Redis unavailable in this environment.",
+			},
+		})
+		return
+	}
+
 	var body struct {
 		Tanggal string `json:"tanggal"`
 	}
@@ -281,13 +315,24 @@ func (h *HTTPHandler) TriggerMaturityCron(c *gin.Context) {
 		}
 	}
 
-	jobID := uuid.New().String()
+	jobID := "job_" + uuid.New().String()
+	task, err := NewMaturityTask(tanggal, jobID)
+	if err != nil {
+		response.Error(c, domainerrors.New(domainerrors.CodeInternal, "gagal membuat task: "+err.Error()))
+		return
+	}
+	info, err := h.asynqClient.Enqueue(task, asynq.Queue("critical"))
+	if err != nil {
+		response.Error(c, domainerrors.New(domainerrors.CodeInternal, "gagal enqueue task: "+err.Error()))
+		return
+	}
+
 	c.JSON(202, gin.H{
 		"data": gin.H{
-			"jobId":     "job_" + jobID,
+			"jobId":     info.ID,
 			"type":      "MATURITY_PROCESS_JOB",
-			"statusUrl": "/api/v1/jobs/job_" + jobID,
-			"streamUrl": "/api/v1/jobs/job_" + jobID + "/stream",
+			"statusUrl": "/api/v1/jobs/" + info.ID,
+			"streamUrl": "/api/v1/jobs/" + info.ID + "/stream",
 			"tanggal":   tanggal.Format("2006-01-02"),
 		},
 		"meta": gin.H{"traceId": traceIDFromCtx(c)},

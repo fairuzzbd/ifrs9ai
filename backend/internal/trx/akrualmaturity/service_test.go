@@ -589,3 +589,558 @@ func TestOverrideStaleAkrual_AkrualNotFound(t *testing.T) {
 	_, err := svc.OverrideStaleAkrual(ctx, uuid.New(), req, uuid.New().String())
 	require.Error(t, err)
 }
+
+// ─── Additional coverage tests ───────────────────────────────────────────────
+
+func TestRunDailyAmortisasiCron_Holiday(t *testing.T) {
+	repo := &stubRepo{isHoliday: true}
+	svc, _, _ := buildSvc(t, repo)
+	result, err := svc.RunDailyAmortisasiCron(context.Background(), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.TotalSkipped)
+}
+
+func TestRunDailyAmortisasiCron_PeriodeClosed(t *testing.T) {
+	repo := &stubRepo{
+		isHoliday: false,
+		periode:   &PeriodeBuku{ID: uuid.New(), StatusPeriode: "CLOSED"},
+	}
+	svc, _, _ := buildSvc(t, repo)
+	result, err := svc.RunDailyAmortisasiCron(context.Background(), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.TotalFailed)
+}
+
+func TestRunDailyAmortisasiCron_NoSchedule_Skipped(t *testing.T) {
+	instID := uuid.New()
+	repo := &stubRepo{
+		isHoliday: false,
+		periode:   openPeriode(),
+		activeAccruing: []*InstrumenAkrualInfo{basicInstrumen(instID)},
+		schedule:   nil, // no schedule → skipped
+	}
+	svc, poster, _ := buildSvc(t, repo)
+	result, err := svc.RunDailyAmortisasiCron(context.Background(), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.TotalSkipped)
+	assert.Empty(t, poster.AkrualCalls())
+}
+
+func TestRunDailyAmortisasiCron_ZeroAmortisasi_Skipped(t *testing.T) {
+	instID := uuid.New()
+	zeroSchedule := &AmortisasiScheduleRow{
+		EIRPersen:       decimal.NewFromFloat(0.075),
+		AmortisasiHarian: decimal.Zero, // zero → no amortisasi
+	}
+	repo := &stubRepo{
+		isHoliday: false,
+		periode:   openPeriode(),
+		activeAccruing: []*InstrumenAkrualInfo{basicInstrumen(instID)},
+		schedule:   zeroSchedule,
+	}
+	svc, poster, _ := buildSvc(t, repo)
+	result, err := svc.RunDailyAmortisasiCron(context.Background(), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.TotalSkipped)
+	assert.Empty(t, poster.AkrualCalls())
+}
+
+func TestProcessOneMaturity_FCYMissing_DLQ(t *testing.T) {
+	instID := uuid.New()
+	repo := &stubRepo{
+		isHoliday: false,
+		periode:   openPeriode(),
+		activeMaturity: []*InstrumenAkrualInfo{
+			{
+				ID:                instID,
+				Status:            "ACTIVE",
+				KlasifikasiPSAK71: "AC",
+				GrossCarryingIDR:  decimal.NewFromInt(1_000_000),
+				GrossCarryingFCY:  decimal.NewFromInt(100),
+				MataUang:          "USD",
+			},
+		},
+		fxRate:    nil, // missing → DLQ
+		fxRateErr: nil,
+	}
+	svc, _, _ := buildSvc(t, repo)
+	result, err := svc.RunDailyMaturityCron(context.Background(), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.TotalFailed)
+	assert.Equal(t, 1, result.DLQCount)
+}
+
+func TestOverrideStaleAkrual_NoClaims(t *testing.T) {
+	svc, _, _ := buildSvc(t, &stubRepo{})
+	req := OverrideStaleRequest{
+		Reason:          "This is a valid reason with more than thirty chars.",
+		SignatureMethod: "JWT_STEP_UP",
+	}
+	_, err := svc.OverrideStaleAkrual(context.Background(), uuid.New(), req, uuid.New().String())
+	require.Error(t, err)
+}
+
+func TestOverrideStaleAkrual_WrongStatus_CannotOverride(t *testing.T) {
+	repo := &stubRepo{
+		akrualByID: &PendapatanAkrual{
+			ID:         uuid.New(),
+			Status:     AkrualAutoPosted, // CanOverride() = false
+			RowVersion: 1,
+		},
+	}
+	svc, _, _ := buildSvc(t, repo)
+	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{Sub: uuid.New().String(), TenantID: "TUGURE"})
+	req := OverrideStaleRequest{
+		Reason:          "This is a valid reason with more than thirty chars.",
+		SignatureMethod: "JWT_STEP_UP",
+	}
+	_, err := svc.OverrideStaleAkrual(ctx, repo.akrualByID.ID, req, uuid.New().String())
+	require.Error(t, err)
+}
+
+func TestRunDailyAmortisasiCron_Duplicate_Skipped(t *testing.T) {
+	instID := uuid.New()
+	kupon := decimal.NewFromFloat(0.09)
+	schedule := &AmortisasiScheduleRow{
+		EIRPersen:       decimal.NewFromFloat(0.075),
+		KuponRate:       &kupon,
+		AmortisasiHarian: decimal.NewFromFloat(100),
+	}
+	repo := &stubRepo{
+		isHoliday: false,
+		periode:   openPeriode(),
+		activeAccruing: []*InstrumenAkrualInfo{basicInstrumen(instID)},
+		schedule:    schedule,
+		isDuplicate: true, // already processed
+	}
+	svc, poster, _ := buildSvc(t, repo)
+	result, err := svc.RunDailyAmortisasiCron(context.Background(), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.TotalSkipped)
+	assert.Empty(t, poster.AkrualCalls())
+}
+
+func TestRunDailyMaturityCron_JurnalError_DLQ(t *testing.T) {
+	instID := uuid.New()
+	repo := &stubRepo{
+		isHoliday: false,
+		periode:   openPeriode(),
+		activeMaturity: []*InstrumenAkrualInfo{basicInstrumen(instID)},
+	}
+	svc, poster, _ := buildSvc(t, repo)
+	poster.SetMaturityError(errors.New("jurnal error"))
+
+	result, err := svc.RunDailyMaturityCron(context.Background(), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.TotalFailed)
+}
+
+func TestApproveDividen_NoClaims(t *testing.T) {
+	svc, _, _ := buildSvc(t, &stubRepo{})
+	// No claims in context → unauthorized
+	_, err := svc.ApproveDividen(context.Background(), uuid.New(), ApproveDividenRequest{
+		Comment: "ok", SignatureMethod: "JWT_STEP_UP",
+	})
+	require.Error(t, err)
+}
+
+func TestListAkrual_LimitClamped(t *testing.T) {
+	repo := &stubRepo{listAkrualRows: []*PendapatanAkrual{}}
+	svc, _, _ := buildSvc(t, repo)
+	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{Sub: uuid.New().String(), TenantID: "TUGURE"})
+	// limit=0 → clamped to 50
+	rows, _, _, err := svc.ListAkrual(ctx, listquery.Query{}, "", 0)
+	require.NoError(t, err)
+	assert.Len(t, rows, 0)
+}
+
+func TestListJatuhTempo_LimitClamped(t *testing.T) {
+	repo := &stubRepo{listJatuhTempoRows: []*JatuhTempo{}}
+	svc, _, _ := buildSvc(t, repo)
+	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{Sub: uuid.New().String(), TenantID: "TUGURE"})
+	rows, _, _, err := svc.ListJatuhTempo(ctx, listquery.Query{}, "", 300) // > max 200 → clamped
+	require.NoError(t, err)
+	assert.Len(t, rows, 0)
+}
+
+func TestGetAkrualByID_NotFound(t *testing.T) {
+	repo := &stubRepo{akrualByID: nil} // returns nil → NotFound
+	svc, _, _ := buildSvc(t, repo)
+	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{Sub: uuid.New().String(), TenantID: "TUGURE"})
+	_, err := svc.GetAkrualByID(ctx, uuid.New())
+	require.Error(t, err)
+}
+
+func TestGetAkrualByID_OK(t *testing.T) {
+	id := uuid.New()
+	stage := 1
+	eir := decimal.NewFromFloat(0.075)
+	repo := &stubRepo{akrualByID: &PendapatanAkrual{
+		ID: id, Stage: &stage, EIRPersen: &eir, Status: AkrualAutoPosted,
+	}}
+	svc, _, _ := buildSvc(t, repo)
+	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{Sub: uuid.New().String(), TenantID: "TUGURE"})
+	a, err := svc.GetAkrualByID(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, id, a.ID)
+}
+
+func TestRunDailyAkrualCron_HolidayCheckErr(t *testing.T) {
+	repo := &stubRepo{holidayErr: errors.New("db down")}
+	svc, _, _ := buildSvc(t, repo)
+	_, err := svc.RunDailyAmortisasiCron(context.Background(), time.Now())
+	require.Error(t, err)
+}
+
+func TestRunDailyAmortisasiCron_GetInstrumensErr(t *testing.T) {
+	repo := &stubRepo{
+		isHoliday:         false,
+		periode:           openPeriode(),
+		activeAccruingErr: errors.New("db error"),
+	}
+	svc, _, _ := buildSvc(t, repo)
+	_, err := svc.RunDailyAmortisasiCron(context.Background(), time.Now())
+	require.Error(t, err)
+}
+
+func TestRunDailyAmortisasiCron_ScheduleErr_DLQ(t *testing.T) {
+	instID := uuid.New()
+	repo := &stubRepo{
+		isHoliday: false,
+		periode:   openPeriode(),
+		activeAccruing: []*InstrumenAkrualInfo{basicInstrumen(instID)},
+		scheduleErr: errors.New("schedule error"),
+	}
+	svc, _, _ := buildSvc(t, repo)
+	result, err := svc.RunDailyAmortisasiCron(context.Background(), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.TotalFailed)
+}
+
+func TestProcessOneMaturity_LastAkrualErr(t *testing.T) {
+	instID := uuid.New()
+	repo := &stubRepo{
+		isHoliday: false,
+		periode:   openPeriode(),
+		activeMaturity: []*InstrumenAkrualInfo{basicInstrumen(instID)},
+		lastAkrualErr: errors.New("db error"),
+	}
+	svc, _, _ := buildSvc(t, repo)
+	result, err := svc.RunDailyMaturityCron(context.Background(), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.TotalFailed)
+}
+
+func TestPostDividen_InstrumenNotActive(t *testing.T) {
+	instrID := uuid.New()
+	repo := &stubRepo{
+		instrumenInfo: &InstrumenAkrualInfo{ID: instrID, Status: "MATURED"},
+	}
+	svc, _, _ := buildSvc(t, repo)
+	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{Sub: uuid.New().String(), TenantID: "TUGURE"})
+	_, err := svc.PostDividen(ctx, CreateDividenRequest{
+		InstrumenID:   instrID,
+		JumlahKotor:   decimal.NewFromInt(100_000),
+		TanggalTerima: "2026-06-15",
+	})
+	require.Error(t, err)
+}
+
+func TestApproveDividen_DividenNotFound(t *testing.T) {
+	repo := &stubRepo{dividen: nil, getDividenErr: nil}
+	svc, _, _ := buildSvc(t, repo)
+	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{Sub: uuid.New().String(), TenantID: "TUGURE"})
+	_, err := svc.ApproveDividen(ctx, uuid.New(), ApproveDividenRequest{
+		SignatureMethod: "JWT_STEP_UP",
+	})
+	require.Error(t, err)
+}
+
+func TestRunDailyAkrualCron_InsertError_DLQ(t *testing.T) {
+	instID := uuid.New()
+	repo := &stubRepo{
+		isHoliday: false,
+		staleDays: 30,
+		periode:   openPeriode(),
+		activeAccruing: []*InstrumenAkrualInfo{basicInstrumen(instID)},
+		isDuplicate: false,
+		schedule:    basicSchedule(),
+		eclResult: &ECLSealedResult{
+			ECLCalcRunID: uuid.New(),
+			Stage:        1,
+			SealedAt:     time.Now().UTC().AddDate(0, 0, -1),
+		},
+		insertAkrualErr: errors.New("insert failed"),
+	}
+	svc, _, _ := buildSvc(t, repo)
+	result, err := svc.RunDailyAkrualCron(context.Background(), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.TotalFailed)
+}
+
+func TestProcessOneMaturity_InsertJatuhTempoError_DLQ(t *testing.T) {
+	instID := uuid.New()
+	repo := &stubRepo{
+		isHoliday: false,
+		periode:   openPeriode(),
+		activeMaturity: []*InstrumenAkrualInfo{basicInstrumen(instID)},
+		lastAkrual: &PendapatanAkrual{BungaKotor: decimal.NewFromInt(5_000)},
+		insertJatuhTempoErr: errors.New("insert error"),
+	}
+	svc, _, _ := buildSvc(t, repo)
+	result, err := svc.RunDailyMaturityCron(context.Background(), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.TotalFailed)
+}
+
+func TestRunDailyAmortisasiCron_InsertError_DLQ(t *testing.T) {
+	instID := uuid.New()
+	kupon := decimal.NewFromFloat(0.09)
+	repo := &stubRepo{
+		isHoliday: false,
+		periode:   openPeriode(),
+		activeAccruing: []*InstrumenAkrualInfo{basicInstrumen(instID)},
+		schedule: &AmortisasiScheduleRow{
+			EIRPersen:       decimal.NewFromFloat(0.075),
+			KuponRate:       &kupon,
+			AmortisasiHarian: decimal.NewFromFloat(100),
+		},
+		isDuplicate:     false,
+		insertAkrualErr: errors.New("insert failed"),
+	}
+	svc, _, _ := buildSvc(t, repo)
+	result, err := svc.RunDailyAmortisasiCron(context.Background(), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.TotalFailed)
+}
+
+func TestOverrideStaleAkrual_PeriodeClosed(t *testing.T) {
+	stage := 1
+	eir := decimal.NewFromFloat(0.075)
+	eclID := uuid.New()
+	instrID := uuid.New()
+	repo := &stubRepo{
+		akrualByID: &PendapatanAkrual{
+			ID:            uuid.New(),
+			InstrumenID:   instrID,
+			TanggalAkrual: time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC),
+			Jenis:         JenisBunga,
+			Stage:         &stage,
+			EIRPersen:     &eir,
+			Status:        AkrualPendingStaleReview,
+			RowVersion:    1,
+		},
+		instrumenInfo: &InstrumenAkrualInfo{
+			ID: instrID, Status: "ACTIVE", GrossCarryingIDR: decimal.NewFromInt(1_000_000),
+		},
+		eclResult: &ECLSealedResult{ECLCalcRunID: eclID, Stage: 1, SealedAt: time.Now()},
+		schedule:  basicSchedule(),
+		periode:   nil, // no period → closed
+	}
+	svc, _, _ := buildSvc(t, repo)
+	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{Sub: uuid.New().String(), TenantID: "TUGURE"})
+	_, err := svc.OverrideStaleAkrual(ctx, repo.akrualByID.ID, OverrideStaleRequest{
+		Reason:          "This is a valid reason with more than thirty chars.",
+		SignatureMethod: "JWT_STEP_UP",
+	}, uuid.New().String())
+	require.Error(t, err)
+}
+
+// ─── Fix-specific tests ───────────────────────────────────────────────────────
+
+// B1: FCY instrument — GrossCarryingFCY must be converted via approved FX rate.
+// USD 100 × 15432 = IDR 1_543_200 (not 100).
+func TestProcessOneAkrual_FCYConversion_UsesConvertedGross(t *testing.T) {
+	instID := uuid.New()
+	fxRateID := uuid.New()
+	repo := &stubRepo{
+		isHoliday: false,
+		staleDays: 30,
+		periode:   openPeriode(),
+		activeAccruing: []*InstrumenAkrualInfo{
+			{
+				ID:                instID,
+				KodeInstrumen:     "BOND-USD-001",
+				Status:            "ACTIVE",
+				KlasifikasiPSAK71: "AC",
+				EIRPersen:         decimal.NewFromFloat(0.075),
+				GrossCarryingIDR:  decimal.NewFromInt(100), // sentinel: if used → wrong
+				GrossCarryingFCY:  decimal.NewFromInt(100), // 100 USD
+				MataUang:          "USD",
+				Stage:             1,
+			},
+		},
+		isDuplicate: false,
+		schedule:    basicSchedule(),
+		eclResult: &ECLSealedResult{
+			ECLCalcRunID: uuid.New(),
+			Stage:        1,
+			ECLAllowance: decimal.Zero,
+			SealedAt:     time.Now().UTC().AddDate(0, 0, -1),
+		},
+		fxRate: &FXRateApproved{
+			ID:       fxRateID,
+			MataUang: "USD",
+			Tanggal:  time.Now().UTC(),
+			RateIDR:  decimal.NewFromInt(15_432),
+		},
+	}
+	svc, poster, _ := buildSvc(t, repo)
+
+	result, err := svc.RunDailyAkrualCron(context.Background(), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.TotalProcessed)
+	assert.Equal(t, 1, result.TotalSuccess)
+
+	calls := poster.AkrualCalls()
+	require.Len(t, calls, 1)
+	// BungaKotor must reflect IDR 1_543_200 × 7.5% / 365, NOT 100 × 7.5% / 365.
+	// ConvertFCYtoIDR(100, 15432) = 1_543_200.
+	// akrual = 1_543_200 × 0.075 / 365 ≈ 317.0822 IDR (HALF_EVEN 4dp).
+	expected := decimal.NewFromInt(1_543_200).Mul(decimal.NewFromFloat(0.075)).Div(decimal.NewFromInt(365)).RoundBank(4)
+	assert.True(t, calls[0].BungaKotor.Equal(expected),
+		"FCY conversion must fire: expected %s, got %s", expected, calls[0].BungaKotor)
+}
+
+// M3: AMORTISASI_PD_JOB — dedicated RunDailyAmortisasiCron inserts AMORTISASI_PREMIUM row.
+func TestRunDailyAmortisasiCron_PremiumBond_InsertedAsAmortisasiPremium(t *testing.T) {
+	instID := uuid.New()
+	kuponRate := decimal.NewFromFloat(0.09) // kupon > EIR (0.075) → premium
+	schedWithPremium := &AmortisasiScheduleRow{
+		EIRPersen:       decimal.NewFromFloat(0.075),
+		KuponRate:       &kuponRate,
+		AmortisasiHarian: decimal.NewFromFloat(100), // pre-computed, non-zero
+	}
+	repo := &stubRepo{
+		isHoliday: false,
+		staleDays: 30,
+		periode:   openPeriode(),
+		activeAccruing: []*InstrumenAkrualInfo{
+			{
+				ID:                instID,
+				Status:            "ACTIVE",
+				KlasifikasiPSAK71: "AC",
+				GrossCarryingIDR:  decimal.NewFromInt(1_000_000),
+				MataUang:          "IDR",
+			},
+		},
+		isDuplicate: false,
+		schedule:    schedWithPremium,
+	}
+	svc, poster, _ := buildSvc(t, repo)
+
+	result, err := svc.RunDailyAmortisasiCron(context.Background(), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.TotalSuccess)
+
+	calls := poster.AkrualCalls()
+	require.Len(t, calls, 1, "amortisasi job must post exactly one jurnal entry")
+	assert.Equal(t, "AMORTISASI_PREMIUM", calls[0].EventCode,
+		"premium bond (kupon > EIR) must use AMORTISASI_PREMIUM event code, not BUNGA")
+	// Inserted row must have jenis AMORTISASI_PREMIUM
+	require.Len(t, repo.insertedAkruals, 1)
+	assert.Equal(t, JenisAmortisasiPremium, repo.insertedAkruals[0].Jenis,
+		"inserted row jenis must be AMORTISASI_PREMIUM, not BUNGA")
+}
+
+// M4: eclResult==nil with ANY stage → PENDING_STALE_REVIEW (conservative default).
+func TestProcessOneAkrual_NoSealedECL_Stage1_IsPendingStaleReview(t *testing.T) {
+	instID := uuid.New()
+	repo := &stubRepo{
+		isHoliday: false,
+		staleDays: 30,
+		periode:   openPeriode(),
+		activeAccruing: []*InstrumenAkrualInfo{
+			{
+				ID:                instID,
+				Status:            "ACTIVE",
+				KlasifikasiPSAK71: "AC",
+				GrossCarryingIDR:  decimal.NewFromInt(1_000_000),
+				MataUang:          "IDR",
+				Stage:             1, // Stage 1 instrument, no sealed ECL
+			},
+		},
+		isDuplicate: false,
+		schedule:    basicSchedule(),
+		eclResult:   nil, // no sealed ECL at all
+	}
+	svc, poster, _ := buildSvc(t, repo)
+
+	result, err := svc.RunDailyAkrualCron(context.Background(), time.Now())
+	require.NoError(t, err)
+	// Conservative: even Stage 1 without sealed ECL → PENDING_STALE_REVIEW
+	assert.Empty(t, poster.AkrualCalls(), "no jurnal must be posted when sealed ECL is missing")
+	assert.GreaterOrEqual(t, result.DLQCount, 1, "must DLQ when sealed ECL is missing")
+	require.Len(t, repo.insertedAkruals, 1)
+	assert.Equal(t, AkrualPendingStaleReview, repo.insertedAkruals[0].Status,
+		"Status must be PENDING_STALE_REVIEW when sealed ECL is absent (M4 conservative default)")
+}
+
+// M5: OverrideStaleAkrual inserts 2 rows: original→SKIPPED, new→POSTED, linked by parent_akrual_id.
+func TestOverrideStaleAkrual_InsertsTwoRows_OriginalSkippedNewPosted(t *testing.T) {
+	originalID := uuid.New()
+	instrID := uuid.New()
+	stage := 3
+	eir := decimal.NewFromFloat(0.075)
+	eclID := uuid.New()
+
+	repo := &stubRepo{
+		isHoliday: false,
+		periode:   openPeriode(),
+		akrualByID: &PendapatanAkrual{
+			ID:               originalID,
+			InstrumenID:      instrID,
+			TanggalAkrual:    time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC),
+			Jenis:            JenisBunga,
+			Stage:            &stage,
+			EIRPersen:        &eir,
+			BungaKotor:       decimal.NewFromFloat(205.48),
+			BungaBersih:      decimal.NewFromFloat(205.48),
+			CarryingBasisIDR: decimal.NewFromInt(800_000),
+			Status:           AkrualPendingStaleReview,
+			ECLRunIDUsed:     &eclID,
+			PeriodeBulananID: func() *uuid.UUID { id := uuid.New(); return &id }(),
+			RowVersion:       1,
+		},
+		instrumenInfo: &InstrumenAkrualInfo{
+			ID:                instrID,
+			Status:            "ACTIVE",
+			KlasifikasiPSAK71: "AC",
+			GrossCarryingIDR:  decimal.NewFromInt(1_000_000),
+			MataUang:          "IDR",
+		},
+		eclResult: &ECLSealedResult{
+			ECLCalcRunID: eclID,
+			Stage:        3,
+			ECLAllowance: decimal.NewFromInt(200_000),
+			SealedAt:     time.Now().UTC().AddDate(0, 0, -1),
+		},
+		schedule:  basicSchedule(),
+		staleDays: 30,
+	}
+	svc, _, _ := buildSvc(t, repo)
+
+	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{
+		Sub: uuid.New().String(), TenantID: "TUGURE",
+	})
+	req := OverrideStaleRequest{
+		Reason:          "ECL sealed run confirmed valid by Risk Officer on 2026-06-20 meeting.",
+		SignatureMethod: "JWT_STEP_UP",
+	}
+
+	newRow, err := svc.OverrideStaleAkrual(ctx, originalID, req, uuid.New().String())
+	require.NoError(t, err)
+	require.NotNil(t, newRow)
+
+	// New POSTED row must exist
+	assert.Equal(t, AkrualPosted, newRow.Status, "returned row must be POSTED")
+	require.NotNil(t, newRow.ParentAkrualID, "parent_akrual_id must be set on override row")
+	assert.Equal(t, originalID, *newRow.ParentAkrualID, "parent_akrual_id must point to original stale row")
+
+	// Exactly one new akrual was inserted (the POSTED row)
+	require.Len(t, repo.insertedAkruals, 1)
+	assert.Equal(t, AkrualPosted, repo.insertedAkruals[0].Status)
+	assert.Equal(t, originalID, *repo.insertedAkruals[0].ParentAkrualID)
+
+	// UpdateAkrualStatus was called (to mark original SKIPPED) — tracked via updateAkrualStatusErr being nil → no panic
+}

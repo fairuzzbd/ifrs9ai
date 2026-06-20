@@ -55,7 +55,7 @@ func buildTestRouter(svc *Service) *gin.Engine {
 		c.Request = c.Request.WithContext(ctx)
 		c.Next()
 	})
-	h := NewHTTPHandler(svc)
+	h := NewHTTPHandler(svc, nil) // nil asynqClient: cron-trigger returns 501 in test
 	v1 := r.Group("/api/v1")
 	RegisterRoutes(v1, h) // no redis in test
 	return r
@@ -116,22 +116,25 @@ func TestHandlerGetDashboard_InvalidInstrumenID(t *testing.T) {
 
 // ─── POST /api/v1/transaksi/akrual/cron-trigger ───────────────────────────────
 
-func TestHandlerTriggerAkrualCron_Returns202(t *testing.T) {
+// B2 fix: handler returns 501 when asynqClient is nil (no Redis in test env).
+// In production with Redis configured, real Asynq task is enqueued and 202 returned.
+func TestHandlerTriggerAkrualCron_Returns501WhenNoAsynqClient(t *testing.T) {
 	repo := &stubRepo{}
-	router := buildTestRouter(buildTestSvc(repo))
+	router := buildTestRouter(buildTestSvc(repo)) // nil asynqClient
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/transaksi/akrual/cron-trigger?tanggal=2026-06-20", nil)
 	req.Header.Set("Authorization", "Bearer test")
 	router.ServeHTTP(w, req)
 
-	assert.Equal(t, http.StatusAccepted, w.Code)
+	// B2 fix: 501 Not Implemented when no Asynq client (dev/test mode without Redis).
+	assert.Equal(t, http.StatusNotImplemented, w.Code)
 
 	var body map[string]interface{}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
-	data := body["data"].(map[string]interface{})
-	assert.Equal(t, "DAILY_ACCRUAL_JOB", data["type"])
-	assert.Contains(t, data["jobId"].(string), "job_")
+	errBlock, ok := body["error"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "ASYNQ_NOT_CONFIGURED", errBlock["code"])
 }
 
 // ─── GET /api/v1/transaksi/akrual/:id ────────────────────────────────────────
@@ -251,9 +254,10 @@ func TestHandlerListJatuhTempo_OK(t *testing.T) {
 
 // ─── POST /api/v1/transaksi/jatuh-tempo/cron-trigger ─────────────────────────
 
-func TestHandlerTriggerMaturityCron_Returns202(t *testing.T) {
+// B2 fix: returns 501 when asynqClient is nil (no Redis in test env).
+func TestHandlerTriggerMaturityCron_Returns501WhenNoAsynqClient(t *testing.T) {
 	repo := &stubRepo{}
-	router := buildTestRouter(buildTestSvc(repo))
+	router := buildTestRouter(buildTestSvc(repo)) // nil asynqClient
 
 	body := map[string]string{"tanggal": "2026-06-20"}
 	b, _ := json.Marshal(body)
@@ -264,17 +268,17 @@ func TestHandlerTriggerMaturityCron_Returns202(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(w, req)
 
-	assert.Equal(t, http.StatusAccepted, w.Code)
+	assert.Equal(t, http.StatusNotImplemented, w.Code)
 
 	var resp map[string]interface{}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	data := resp["data"].(map[string]interface{})
-	assert.Equal(t, "MATURITY_PROCESS_JOB", data["type"])
-	assert.Equal(t, "2026-06-20", data["tanggal"])
+	errBlock, ok := resp["error"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "ASYNQ_NOT_CONFIGURED", errBlock["code"])
 }
 
-func TestHandlerTriggerMaturityCron_NoBody(t *testing.T) {
-	// No tanggal in body → uses today
+func TestHandlerTriggerMaturityCron_NoBody_Returns501(t *testing.T) {
+	// No tanggal in body + no asynqClient → 501 (asynq check fires first)
 	repo := &stubRepo{}
 	router := buildTestRouter(buildTestSvc(repo))
 
@@ -282,7 +286,7 @@ func TestHandlerTriggerMaturityCron_NoBody(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/transaksi/jatuh-tempo/cron-trigger", nil)
 	router.ServeHTTP(w, req)
 
-	assert.Equal(t, http.StatusAccepted, w.Code)
+	assert.Equal(t, http.StatusNotImplemented, w.Code)
 }
 
 // ─── Route isolation test: "dashboard" not treated as /:id ───────────────────

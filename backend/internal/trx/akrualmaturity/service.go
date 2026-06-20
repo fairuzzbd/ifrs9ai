@@ -186,17 +186,17 @@ func (s *Service) processOneAkrual(ctx context.Context, inst *InstrumenAkrualInf
 			akrualStatus = AkrualPendingStaleReview
 		}
 	} else {
-		// No sealed ECL — treat as Stage 1 unless instrument has a staging marker
-		// (conservative: use Stage 1 if no sealed run available for non-Stage-3 instruments)
-		stage = 1
-		if inst.Stage == 3 {
-			// Stage 3 instrument without sealed ECL: stale
-			staleStagingFlag = true
-			akrualStatus = AkrualPendingStaleReview
-		}
+		// M4 fix: Conservative default — when sealed ECL is missing, route to manual review
+		// regardless of the instrument's current stage field. Stage 1/2 instruments rarely
+		// lack a sealed ECL in steady state; force ROLE-AKUN-CTL eyes-on if it happens.
+		// This avoids the risky alternative of inferring stage from a potentially stale
+		// staging_history field without a corresponding ECL run.
+		stage = 1 // use Stage 1 carrying basis (safest for computation)
+		staleStagingFlag = true
+		akrualStatus = AkrualPendingStaleReview
 	}
 
-	// FX rate for FCY instruments
+	// FX rate for FCY instruments (B1 fix: actually use converted amount)
 	var fxRateID *uuid.UUID
 	grossIDR := inst.GrossCarryingIDR
 
@@ -212,9 +212,18 @@ func (s *Service) processOneAkrual(ctx context.Context, inst *InstrumenAkrualInf
 		}
 		rID := fxRate.ID
 		fxRateID = &rID
-		// grossIDR already in IDR equivalent (gross_carrying stored in IDR in mst.instrumen)
-		// If FCY gross is stored, convert here; for now assume gross_carrying is already IDR
-		_ = fxRate
+		// B1 fix: if GrossCarryingFCY is populated, convert to IDR using approved rate.
+		// GrossCarryingFCY is zero for IDR-only instruments or when not populated by repo.
+		if !inst.GrossCarryingFCY.IsZero() {
+			converted, convErr := ConvertFCYtoIDR(inst.GrossCarryingFCY, fxRate.RateIDR)
+			if convErr != nil {
+				return s.dlqItem(ctx, result, inst.ID, "DAILY_ACCRUAL_JOB", CodeAkrualFXRateMissing,
+					fmt.Sprintf("ConvertFCYtoIDR error: %v", convErr))
+			}
+			grossIDR = converted
+		}
+		// If GrossCarryingFCY is zero, inst.GrossCarryingIDR is already the IDR-equivalent
+		// (stored as IDR in mst.instrumen for instruments without separate FCY carrying field).
 	}
 
 	// Compute akrual
@@ -224,16 +233,11 @@ func (s *Service) processOneAkrual(ctx context.Context, inst *InstrumenAkrualInf
 			fmt.Sprintf("ComputeAkrualBunga error: %v", err))
 	}
 
-	// Compute PPh (deposito only — others handled separately)
-	pph, bersih, _ := func() (decimal.Decimal, decimal.Decimal, error) {
-		// Bunga akrual: PPh only for DEPOSITO klasifikasi
-		if inst.KlasifikasiPSAK71 == "AC" {
-			// AC could be deposito or bond — for now treat as no PPh at accrual time
-			// PPh is settled at maturity for deposito
-			return decimal.Zero, akrualIDR, nil
-		}
-		return decimal.Zero, akrualIDR, nil
-	}()
+	// PPh deposito 20% accrues at maturity, not daily akrual (per FSD-APP-C — confirmed
+	// with finance team). For dividend distributions, PPh is computed at PostDividen call
+	// site. Daily akrual carries zero PPh regardless of instrument type.
+	pph := decimal.Zero
+	bersih := akrualIDR
 
 	now := time.Now().UTC()
 	akrualID := uuid.New()
@@ -443,8 +447,34 @@ func (s *Service) processOneMaturity(ctx context.Context, inst *InstrumenAkrualI
 		bungaLast = lastAkrual.BungaKotor
 	}
 
+	// B1 fix: resolve FCY carrying to IDR for maturity settlement
+	pokokIDR := inst.GrossCarryingIDR
+	var fxRateID *uuid.UUID
+	if inst.MataUang != "IDR" && inst.MataUang != "" {
+		fxRate, fxErr := s.repo.GetFXRateApproved(ctx, inst.MataUang, tanggal)
+		if fxErr != nil {
+			return s.dlqItem(ctx, result, inst.ID, "MATURITY_PROCESS_JOB", CodeAkrualFXRateMissing,
+				fmt.Sprintf("FX rate lookup error: %v", fxErr))
+		}
+		if fxRate == nil {
+			return s.dlqItem(ctx, result, inst.ID, "MATURITY_PROCESS_JOB", CodeAkrualFXRateMissing,
+				fmt.Sprintf("FX rate APPROVED tidak tersedia untuk %s tanggal %s", inst.MataUang, tanggal.Format("2006-01-02")))
+		}
+		rID := fxRate.ID
+		fxRateID = &rID
+		if !inst.GrossCarryingFCY.IsZero() {
+			converted, convErr := ConvertFCYtoIDR(inst.GrossCarryingFCY, fxRate.RateIDR)
+			if convErr != nil {
+				return s.dlqItem(ctx, result, inst.ID, "MATURITY_PROCESS_JOB", CodeAkrualFXRateMissing,
+					fmt.Sprintf("ConvertFCYtoIDR error: %v", convErr))
+			}
+			pokokIDR = converted
+		}
+	}
+	_ = fxRateID // stored in jt below
+
 	// Compute PPh and net kas for DEPOSITO (S1-AC1)
-	pph, netKas, err := ComputeMaturitySettlement(inst.GrossCarryingIDR, bungaLast)
+	pph, netKas, err := ComputeMaturitySettlement(pokokIDR, bungaLast)
 	if err != nil {
 		return s.dlqItem(ctx, result, inst.ID, "MATURITY_PROCESS_JOB", "MATURITY_CALC_ERROR",
 			fmt.Sprintf("ComputeMaturitySettlement: %v", err))
@@ -474,10 +504,11 @@ func (s *Service) processOneMaturity(ctx context.Context, inst *InstrumenAkrualI
 		InstrumenID:         inst.ID,
 		TanggalJatuhTempo:   tanggal,
 		Jenis:               jenis,
-		PokokReturned:       inst.GrossCarryingIDR,
+		PokokReturned:       pokokIDR, // B1 fix: FCY-converted IDR amount
 		BungaReturned:       bungaLast,
 		PPh:                 pph,
 		Proceeds:            netKas,
+		FXRateID:            fxRateID,
 		KlasifikasiSnapshot: inst.KlasifikasiPSAK71,
 		Status:              JatuhTempoPending,
 		CreatedAt:           now,
@@ -513,7 +544,7 @@ func (s *Service) processOneMaturity(ctx context.Context, inst *InstrumenAkrualI
 		JatuhTempoID:        jtID,
 		PeriodeID:           periode.ID,
 		TanggalJatuhTempo:   tanggal,
-		PokokIDR:            inst.GrossCarryingIDR,
+		PokokIDR:            pokokIDR, // B1 fix
 		BungaLastIDR:        bungaLast,
 		PPhIDR:              pph,
 		NetKasIDR:           netKas,
@@ -556,7 +587,7 @@ func (s *Service) processOneMaturity(ctx context.Context, inst *InstrumenAkrualI
 			EntityID:   inst.ID,
 			After: map[string]any{
 				"instrumen_id":  inst.ID.String(),
-				"pokok_idr":     inst.GrossCarryingIDR.StringFixed(4),
+				"pokok_idr":     pokokIDR.StringFixed(4),
 				"bunga_last_idr": bungaLast.StringFixed(4),
 				"pph_idr":       pph.StringFixed(4),
 				"net_kas_idr":   netKas.StringFixed(4),
@@ -666,15 +697,24 @@ func (s *Service) OverrideStaleAkrual(ctx context.Context, akrualID uuid.UUID, r
 		}
 	}()
 
-	// Post jurnal
+	// M5 fix: Audit-immutability pattern.
+	// Step 1: Mark original PENDING_STALE_REVIEW row → SKIPPED (captures the stale fact).
+	// Step 2: INSERT a new POSTED row with parent_akrual_id pointing to original.
+	// This preserves the immutable audit trail per DEC-018 instead of mutating the original row.
+	if err := s.repo.UpdateAkrualStatus(ctx, tx, akrualID, AkrualSkipped, nil, &actorID, &reason, existing.RowVersion, actorID); err != nil {
+		return nil, fmt.Errorf("Service.OverrideStaleAkrual: mark original SKIPPED: %w", err)
+	}
+
+	// Post jurnal for the new POSTED override row
 	eventCode := "AKRUAL_BUNGA"
 	if stage == 3 {
 		eventCode = "AKRUAL_BUNGA_STAGE3"
 	}
+	newAkrualID := uuid.New()
 	postResult, postErr := s.poster.PostAkrual(ctx, tx, AkrualPostRequest{
 		EventCode:           eventCode,
 		InstrumenID:         existing.InstrumenID,
-		AkrualID:            akrualID,
+		AkrualID:            newAkrualID,
 		PeriodeID:           periode.ID,
 		TanggalAkrual:       existing.TanggalAkrual,
 		BungaKotor:          akrualIDR,
@@ -691,32 +731,67 @@ func (s *Service) OverrideStaleAkrual(ctx context.Context, akrualID uuid.UUID, r
 	}
 
 	jurnalID := postResult.JurnalEntryID
+	now := time.Now().UTC()
+	stageVal := stage
 
-	// Update existing akrual → POSTED with override info
-	if err := s.repo.UpdateAkrualStatus(ctx, tx, akrualID, AkrualPosted, &jurnalID, &actorID, &reason, existing.RowVersion, actorID); err != nil {
-		return nil, fmt.Errorf("Service.OverrideStaleAkrual: update status: %w", err)
+	newRow := &PendapatanAkrual{
+		ID:                  newAkrualID,
+		InstrumenID:         existing.InstrumenID,
+		TanggalAkrual:       existing.TanggalAkrual,
+		Jenis:               JenisBunga,
+		Stage:               &stageVal,
+		CarryingBasisIDR:    carryingBasis,
+		EIRPersen:           existing.EIRPersen,
+		BungaKotor:          akrualIDR,
+		PPh:                 decimal.Zero,
+		BungaBersih:         akrualIDR,
+		FXRateID:            existing.FXRateID,
+		MataUang:            inst.MataUang,
+		KlasifikasiSnapshot: inst.KlasifikasiPSAK71,
+		ECLRunIDUsed:        eclRunID,
+		StaleStagingFlag:    false,
+		OverrideUserID:      &actorID,
+		OverrideComment:     &reason,
+		JurnalHeaderID:      &jurnalID,
+		ParentAkrualID:      &akrualID,
+		Status:              AkrualPosted,
+		PeriodeBulananID:    existing.PeriodeBulananID,
+		CreatedAt:           now,
+		CreatedBy:           actorID,
+		UpdatedAt:           now,
+		UpdatedBy:           actorID,
+		RowVersion:          1,
+		TenantID:            "TUGURE",
 	}
 
-	// Audit AKRUAL.POSTED_OVERRIDE in-tx
+	if err := s.repo.InsertAkrual(ctx, tx, newRow); err != nil {
+		return nil, fmt.Errorf("Service.OverrideStaleAkrual: insert new POSTED row: %w", err)
+	}
+
+	// Audit AKRUAL.OVERRIDDEN in-tx (DEC-018)
 	if s.audit != nil {
 		basisLabel := "GROSS"
 		if stage == 3 {
 			basisLabel = "NET_CARRYING"
 		}
 		_ = s.audit.WithTx(tx).Write(ctx, audit.Event{
-			Action:     "AKRUAL.POSTED_OVERRIDE",
+			Action:     "AKRUAL.OVERRIDDEN",
 			EntityType: "trx.pendapatan_akrual",
-			EntityID:   akrualID,
-			Before:     map[string]any{"status": string(AkrualPendingStaleReview)},
+			EntityID:   newAkrualID,
+			Before:     map[string]any{"status": string(AkrualPendingStaleReview), "id": akrualID.String()},
 			After: map[string]any{
-				"status":          "POSTED",
-				"override_by":     actorID.String(),
-				"reason":          reason,
-				"stage":           stage,
-				"basis":           basisLabel,
+				"status":               "POSTED",
+				"parent_akrual_id":     akrualID.String(),
+				"new_id":               newAkrualID.String(),
+				"override_by":          actorID.String(),
+				"reason":               reason,
+				"stage":                stage,
+				"basis":                basisLabel,
 				"akrual_idr_recomputed": akrualIDR.StringFixed(4),
 				"ecl_run_id_used": func() string {
-					if eclRunID != nil { return eclRunID.String() }
+					if eclRunID != nil {
+						return eclRunID.String()
+					}
 					return ""
 				}(),
 			},
@@ -730,15 +805,8 @@ func (s *Service) OverrideStaleAkrual(ctx context.Context, akrualID uuid.UUID, r
 		tx = nil
 	}
 
-	// Fetch and return updated akrual
-	updated, err := s.repo.GetAkrualByID(ctx, akrualID)
-	if err != nil {
-		return nil, fmt.Errorf("Service.OverrideStaleAkrual: fetch updated: %w", err)
-	}
-	updated.CarryingBasisIDR = carryingBasis
-	updated.ECLRunIDUsed = eclRunID
 	_ = idempKey
-	return updated, nil
+	return newRow, nil
 }
 
 // ─── PostDividen ─────────────────────────────────────────────────────────────
@@ -1016,6 +1084,187 @@ func (s *Service) ListJatuhTempo(ctx context.Context, q listquery.Query, cursor 
 		limit = 50
 	}
 	return s.repo.ListJatuhTempo(ctx, q, cursor, limit)
+}
+
+// ─── RunDailyAmortisasiCron ───────────────────────────────────────────────────
+
+// RunDailyAmortisasiCron runs the AMORTISASI_PD_JOB for a given date.
+// M3 fix: dedicated pipeline separate from RunDailyAkrualCron.
+// Posts AMORTISASI_PREMIUM or AMORTISASI_DISKON rows per instrument that has a
+// valid amortisasi_schedule with non-zero amortisasi_harian.
+// Idempotent: IsDuplicateAkrual check per (instrumen_id, tanggal, jenis).
+func (s *Service) RunDailyAmortisasiCron(ctx context.Context, tanggal time.Time) (*CronBatchResult, error) {
+	result := &CronBatchResult{Tanggal: tanggal}
+
+	isHoliday, err := s.repo.IsHoliday(ctx, tanggal)
+	if err != nil {
+		return nil, fmt.Errorf("Service.RunDailyAmortisasiCron: holiday check: %w", err)
+	}
+	if isHoliday {
+		s.logger.InfoContext(ctx, "RunDailyAmortisasiCron: holiday detected, skipping",
+			"tanggal", tanggal.Format("2006-01-02"))
+		result.TotalSkipped = 1
+		return result, nil
+	}
+
+	periode, err := s.repo.GetPeriodeByTanggal(ctx, tanggal)
+	if err != nil {
+		return nil, fmt.Errorf("Service.RunDailyAmortisasiCron: get periode: %w", err)
+	}
+	if periode == nil || periode.StatusPeriode != "OPEN" {
+		statusStr := "tidak ditemukan"
+		if periode != nil {
+			statusStr = periode.StatusPeriode
+		}
+		_ = s.repo.InsertDLQ(ctx, "AMORTISASI_PD_JOB", uuid.Nil,
+			CodeAkrualPeriodeLocked,
+			fmt.Sprintf("Periode untuk tanggal %s status=%s", tanggal.Format("2006-01-02"), statusStr))
+		result.TotalFailed = 1
+		result.DLQCount = 1
+		return result, nil
+	}
+
+	// GetActiveAccruingInstrumens returns instruments eligible for amortisasi
+	// (same set as bunga, filtered by amortisasi_harian below).
+	instruments, err := s.repo.GetActiveAccruingInstrumens(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("Service.RunDailyAmortisasiCron: get instruments: %w", err)
+	}
+
+	for _, inst := range instruments {
+		result.TotalProcessed++
+		if err := s.processOneAmortisasi(ctx, inst, tanggal, periode, result); err != nil {
+			s.logger.WarnContext(ctx, "RunDailyAmortisasiCron: instrument failed",
+				"instrumen_id", inst.ID, "error", err)
+		}
+	}
+	return result, nil
+}
+
+// processOneAmortisasi handles premium/discount amortisation for one instrument.
+func (s *Service) processOneAmortisasi(ctx context.Context, inst *InstrumenAkrualInfo, tanggal time.Time, periode *PeriodeBuku, result *CronBatchResult) error {
+	schedule, err := s.repo.GetAmortisasiSchedule(ctx, inst.ID, tanggal)
+	if err != nil {
+		return s.dlqItem(ctx, result, inst.ID, "AMORTISASI_PD_JOB", CodeAkrualEIRNotFound,
+			fmt.Sprintf("GetAmortisasiSchedule error: %v", err))
+	}
+	if schedule == nil || schedule.AmortisasiHarian.IsZero() {
+		// Instrument has no premium/discount schedule — normal for deposito / par bonds.
+		result.TotalSkipped++
+		return nil
+	}
+
+	amortisasiAmount, jenis, err := ComputeAmortisasi(*schedule, inst.GrossCarryingIDR)
+	if err != nil {
+		return s.dlqItem(ctx, result, inst.ID, "AMORTISASI_PD_JOB", CodeAkrualEIRNotFound,
+			fmt.Sprintf("ComputeAmortisasi error: %v", err))
+	}
+	if amortisasiAmount.IsZero() {
+		result.TotalSkipped++
+		return nil
+	}
+
+	// Idempotency: check for existing amortisasi row of same jenis on this date
+	isDup, err := s.repo.IsDuplicateAkrual(ctx, inst.ID, tanggal, jenis)
+	if err != nil {
+		return s.dlqItem(ctx, result, inst.ID, "AMORTISASI_PD_JOB", CodeAkrualDuplicate,
+			fmt.Sprintf("Duplicate check error: %v", err))
+	}
+	if isDup {
+		result.TotalSkipped++
+		return nil
+	}
+
+	now := time.Now().UTC()
+	akrualID := uuid.New()
+
+	a := &PendapatanAkrual{
+		ID:                  akrualID,
+		InstrumenID:         inst.ID,
+		TanggalAkrual:       tanggal,
+		Jenis:               jenis,
+		CarryingBasisIDR:    inst.GrossCarryingIDR,
+		BungaKotor:          amortisasiAmount,
+		PPh:                 decimal.Zero,
+		BungaBersih:         amortisasiAmount,
+		MataUang:            inst.MataUang,
+		KlasifikasiSnapshot: inst.KlasifikasiPSAK71,
+		StaleStagingFlag:    false,
+		Status:              AkrualAutoPosted,
+		PeriodeBulananID:    &periode.ID,
+		CreatedAt:           now,
+		CreatedBy:           systemActorID,
+		UpdatedAt:           now,
+		UpdatedBy:           systemActorID,
+		RowVersion:          1,
+		TenantID:            "TUGURE",
+	}
+
+	tx, err := s.repo.BeginTx(ctx)
+	if err != nil {
+		return s.dlqItem(ctx, result, inst.ID, "AMORTISASI_PD_JOB", "AMORTISASI_TX_ERROR",
+			fmt.Sprintf("BeginTx: %v", err))
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if err := s.repo.InsertAkrual(ctx, tx, a); err != nil {
+		return s.dlqItem(ctx, result, inst.ID, "AMORTISASI_PD_JOB", "AMORTISASI_INSERT_ERROR",
+			fmt.Sprintf("InsertAkrual: %v", err))
+	}
+
+	eventCode := "AMORTISASI_PREMIUM"
+	if jenis == JenisAmortisasiDiskon {
+		eventCode = "AMORTISASI_DISKON"
+	}
+	postResult, postErr := s.poster.PostAkrual(ctx, tx, AkrualPostRequest{
+		EventCode:           eventCode,
+		InstrumenID:         inst.ID,
+		AkrualID:            akrualID,
+		PeriodeID:           periode.ID,
+		TanggalAkrual:       tanggal,
+		BungaKotor:          amortisasiAmount,
+		PPh:                 decimal.Zero,
+		BungaBersih:         amortisasiAmount,
+		Stage:               1, // amortisasi stage agnostic
+		Jenis:               jenis,
+		KlasifikasiSnapshot: inst.KlasifikasiPSAK71,
+		ActorID:             systemActorID,
+		TenantID:            "TUGURE",
+	})
+	if postErr != nil {
+		return s.dlqItem(ctx, result, inst.ID, "AMORTISASI_PD_JOB", "AMORTISASI_JURNAL_ERROR",
+			fmt.Sprintf("PostAkrual: %v", postErr))
+	}
+	jID := postResult.JurnalEntryID
+	if err := s.repo.UpdateAkrualStatus(ctx, tx, akrualID, AkrualAutoPosted, &jID, nil, nil, 1, systemActorID); err != nil {
+		s.logger.WarnContext(ctx, "processOneAmortisasi: UpdateAkrualStatus failed (non-fatal)", "error", err)
+	}
+
+	if s.audit != nil {
+		_ = s.audit.WithTx(tx).Write(ctx, audit.Event{
+			Action:     "AKRUAL.AMORTISASI_POSTED",
+			EntityType: "trx.pendapatan_akrual",
+			EntityID:   akrualID,
+			After: map[string]any{
+				"instrumen_id":     inst.ID.String(),
+				"jenis":            string(jenis),
+				"amortisasi_idr":   amortisasiAmount.StringFixed(4),
+				"carrying_idr":     inst.GrossCarryingIDR.StringFixed(4),
+			},
+		})
+	}
+
+	if err := tx.Commit(); err != nil {
+		return s.dlqItem(ctx, result, inst.ID, "AMORTISASI_PD_JOB", "AMORTISASI_COMMIT_ERROR",
+			fmt.Sprintf("Commit: %v", err))
+	}
+	tx = nil
+	result.TotalSuccess++
+	return nil
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────

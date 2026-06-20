@@ -6,6 +6,7 @@ package akrualmaturity
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -214,6 +215,54 @@ func TestHandleAmortisasiPD_InvalidTanggal(t *testing.T) {
 	task := makeTask(TaskAmortisasiPD, AmortisasiPayload{Tanggal: "invalid-date"})
 	err := w.HandleAmortisasiPD(context.Background(), task)
 	require.Error(t, err)
+}
+
+func TestHandleAmortisasiPD_EmptyInstruments(t *testing.T) {
+	// Happy path: no instruments → success
+	repo := &stubRepo{
+		isHoliday:      false,
+		periode:        openPeriode(),
+		activeAccruing: nil,
+	}
+	w := buildWorker(repo)
+	task := makeTask(TaskAmortisasiPD, AmortisasiPayload{Tanggal: "2026-06-20"})
+	err := w.HandleAmortisasiPD(context.Background(), task)
+	require.NoError(t, err)
+}
+
+func TestHandleAmortisasiPD_ServiceError_NoTaskError(t *testing.T) {
+	// RunDailyAmortisasiCron returns error (e.g., holiday check DB down)
+	// → worker logs + returns nil (non-fatal)
+	repo := &stubRepo{holidayErr: errors.New("db down")}
+	w := buildWorker(repo)
+	task := makeTask(TaskAmortisasiPD, AmortisasiPayload{Tanggal: "2026-06-20"})
+	err := w.HandleAmortisasiPD(context.Background(), task)
+	require.NoError(t, err, "service-level error must not fail the Asynq task (logged + continued)")
+}
+
+func TestHandleDailyAccrual_InvalidTanggal(t *testing.T) {
+	w := buildWorker(&stubRepo{})
+	task := makeTask(TaskDailyAccrual, AkrualPayload{Tanggal: "not-a-date"})
+	err := w.HandleDailyAccrual(context.Background(), task)
+	require.Error(t, err)
+}
+
+func TestHandleDailyAccrual_ServiceError_NoTaskError(t *testing.T) {
+	// RunDailyAkrualCron returns error → worker returns nil (non-fatal)
+	repo := &stubRepo{holidayErr: errors.New("db down")}
+	w := buildWorker(repo)
+	task := makeTask(TaskDailyAccrual, AkrualPayload{Tanggal: "2026-06-20"})
+	err := w.HandleDailyAccrual(context.Background(), task)
+	require.NoError(t, err, "service-level error must not fail the Asynq task")
+}
+
+func TestHandleMaturityProcess_ServiceError_NoTaskError(t *testing.T) {
+	// RunDailyMaturityCron returns error → worker returns nil (non-fatal)
+	repo := &stubRepo{holidayErr: errors.New("db down")}
+	w := buildWorker(repo)
+	task := makeTask(TaskMaturityProcess, MaturityPayload{Tanggal: "2026-06-20"})
+	err := w.HandleMaturityProcess(context.Background(), task)
+	require.NoError(t, err, "service-level error must not fail the Asynq task")
 }
 
 // ─── Helper ──────────────────────────────────────────────────────────────────

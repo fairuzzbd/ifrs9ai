@@ -17,7 +17,6 @@ import (
 
 var (
 	decZero        = decimal.Zero
-	decHundred     = decimal.NewFromInt(100)
 	decDays365     = decimal.NewFromInt(365)
 	decPPHDeposito = decimal.NewFromFloat(0.20) // 20% bunga deposito
 	decPPHDividen  = decimal.NewFromFloat(0.10) // 10% dividen (UU PPh §17 2c)

@@ -138,6 +138,9 @@ type PendapatanAkrual struct {
 	OverrideUserID     *uuid.UUID      `db:"override_user_id"`
 	OverrideComment    *string         `db:"override_comment"`
 	JurnalHeaderID     *uuid.UUID      `db:"jurnal_header_id"`
+	// ParentAkrualID links a POSTED override row back to its SKIPPED predecessor.
+	// Set when OverrideStaleAkrual inserts a new row (M5 immutability fix, migration 000046).
+	ParentAkrualID     *uuid.UUID      `db:"parent_akrual_id"`
 	Status             AkrualStatus    `db:"status"`
 	PeriodeBulananID   *uuid.UUID      `db:"periode_bulanan_id"`
 	// Audit
@@ -221,6 +224,9 @@ type InstrumenAkrualInfo struct {
 	KlasifikasiLocked   bool
 	MataUang            string
 	GrossCarryingIDR    decimal.Decimal
+	// GrossCarryingFCY holds the gross carrying in original foreign currency.
+	// Non-zero only when MataUang != "IDR". Used by B1 FCY conversion fix.
+	GrossCarryingFCY    decimal.Decimal
 	EIRPersen           decimal.Decimal // annual EIR from amortisasi_schedule
 	Stage               int             // current stage from ecl.staging_history
 	IsPOCI              bool

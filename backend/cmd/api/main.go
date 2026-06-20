@@ -1016,7 +1016,12 @@ func main() {
 	akrualPoster := akrualmaturity.NewNoopJurnalPoster(logger)
 	akrualUpdater := akrualmaturity.NewInstrumenStatusUpdaterStub() // Phase 5 wire: production adapter
 	akrualSvc := akrualmaturity.NewService(akrualRepo, akrualPoster, akrualUpdater, auditWriter, logger)
-	akrualHandler := akrualmaturity.NewHTTPHandler(akrualSvc)
+	// B2 fix: akrualAsynqClient is nil when REDIS_URL is not set; set inside if-block below.
+	var akrualAsynqClient *asynq.Client
+	if cfg.RedisURL != "" {
+		akrualAsynqClient = asynq.NewClient(asynq.RedisClientOpt{Addr: cfg.RedisURL})
+	}
+	akrualHandler := akrualmaturity.NewHTTPHandler(akrualSvc, akrualAsynqClient)
 	akrualWorker := akrualmaturity.NewWorker(akrualSvc, rdb, logger)
 	akrualmaturity.RegisterRoutes(v1, akrualHandler, rdb)
 	_ = akrualWorker // handlers registered on asynqMux below
