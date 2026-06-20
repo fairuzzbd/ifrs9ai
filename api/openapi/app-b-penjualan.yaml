@@ -1,0 +1,1106 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-B Penjualan/Pencairan Instrumen (P5-M8)
+  version: "1.0.0"
+  description: |
+    Modul APP-B — Penjualan/Pencairan (Phase 5, Module 8).
+
+    Cakupan:
+      - Create penjualan request + preview multi-klasifikasi (S1)
+      - List penjualan dengan sort/filter/export (S1)
+      - Detail single penjualan (S1)
+      - Approve penjualan — ROLE-APPR-TR, SoD 4-eyes (S2)
+      - Reject penjualan — ROLE-APPR-TR, reason ≥ 30 char (S2)
+      - Preview recompute — read-only (S1)
+      - BM frequency alerts — flagged HTC instrumen list (S4)
+
+    AC coverage:
+      S1-AC1 (create PARTIAL FVOCI + preview), S1-AC2 (qty exceeds holding),
+      S1-AC3 (instrumen not active), S1-AC4 (FVOCI Election no_recycling_note),
+      S2-AC1 (approve → POSTED all side-effects in-tx), S2-AC2 (SoD violation),
+      S2-AC3 (PERIODE_LOCKED), S2-AC4 (idempotency replay),
+      S3-AC1..AC4 (OCI recycling FVOCI debt + no-recycle FVOCI Election),
+      S4-AC1..AC4 (BM frequency flag + block + HTC&S bypass + sys.parameter),
+      S5-AC1..AC4 (jurnal multi-leg + derecognition + DISPOSED/qty update)
+
+    State machine trx.penjualan.status:
+      PENDING_APPROVAL (on create)
+        → [approve, ROLE-APPR-TR, SoD] → APPROVED → POSTED (atomic side-effects in-tx)
+        → [approve, BM hard block] → PENDING_BM_REVIEW
+        → [reject, ROLE-APPR-TR, comment ≥ 30 char] → REJECTED
+
+    Klasifikasi routing + OCI recycling matrix:
+      AC            → PENJUALAN_AC          (no OCI)
+      FVOCI debt    → PENJUALAN_FVOCI_DEBT + REKLAS_OCI_PL (cumulative OCI → P&L)
+      FVOCI_ELECTION → PENJUALAN_FVOCI_ELECTION (OCI stays in equity — §B5.7.1)
+      FVTPL         → PENJUALAN_FVTPL       (realized G/L direct to P&L)
+      POCI          → PENJUALAN_POCI        (credit-adjusted cost basis)
+
+    Partial disposal:
+      OCI_recycled = oci_cumulative × (qty_terjual / qty_holding_pre)
+      mst.instrumen.qty_holding -= qty_terjual, status remains ACTIVE
+
+    Full disposal:
+      OCI_recycled = oci_cumulative (full)
+      mst.instrumen.status = 'DISPOSED'
+
+    BM frequency check (HTC portofolio only):
+      warn threshold  → sys.config PENJUALAN_BM_WARN_THRESHOLD_PCT  (default 5%)
+      block threshold → sys.config PENJUALAN_BM_BLOCK_THRESHOLD_PCT (default 10%)
+      Non-HTC → check skipped
+
+    Approve side-effects (single DB tx):
+      1. Server re-verify cost_basis dari ecl.amortisasi_schedule
+      2. OCI recycling (S3)
+      3. BM frequency check (S4)
+      4. POST multi-leg jurnal via P5-M2 per event codes
+      5. UPDATE mst.instrumen (qty partial OR status=DISPOSED full)
+      6. UPDATE penjualan status=POSTED + jurnal_header_id
+      7. INSERT aud.audit_log: all events in-tx
+
+    Error codes baru (ditambahkan ke _common.yaml):
+      PENJUALAN_INSTRUMEN_NOT_ACTIVE     422
+      PENJUALAN_QTY_EXCEEDS_HOLDING      422
+      PENJUALAN_KLASIFIKASI_NOT_LOCKED   422
+      PENJUALAN_HARGA_INVALID            400
+      PENJUALAN_PERIODE_LOCKED           423
+      PENJUALAN_BM_VIOLATION_BLOCK       422
+      PENJUALAN_FVOCI_ELECTION_NO_RECYCLING_WARN  200 (embedded warning)
+
+    Performance SLA:
+      POST /trx/penjualan:              ≤ 500 ms
+      GET  /trx/penjualan (list):       ≤ 200 ms (cursor paginated)
+      GET  /trx/penjualan/{id}:         ≤ 100 ms
+      POST /trx/penjualan/{id}/approve: ≤ 1 s (multi-step in-tx)
+      POST /trx/penjualan/{id}/reject:  ≤ 300 ms
+      GET  /trx/penjualan/{id}/preview: ≤ 200 ms
+      GET  /trx/penjualan/bm-frequency-alerts: ≤ 200 ms
+
+    BLOCKING compliance gate: S3 (OCI recycling §B5.7.1) + S4 (BM §4.1.2b) + S5 (jurnal mapping) → ifrs9-compliance-reviewer.
+    BLOCKING security gate: S2 (SoD + audit in-transaction) → security-engineer.
+
+    Dependensi:
+      - P5-M1 (mst.instrumen ACTIVE, klasifikasi locked)
+      - P5-M2 (jurnal engine, 5 event codes PENJUALAN_*)
+      - P5-M4 (periode buku OPEN check)
+      - P5-M6 (trx.mtm — OCI cumulative, FVTPL fair value terkini)
+      - Migration 000044 (trx.penjualan)
+
+servers:
+  - url: /api/v1
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: penjualan-core
+    description: "Create, list, detail penjualan request (ROLE-MAKER-TR)"
+  - name: penjualan-workflow
+    description: "Approve / reject penjualan (ROLE-APPR-TR, 4-eyes SoD)"
+  - name: penjualan-preview
+    description: "Preview recompute + BM alerts — read-only"
+
+paths:
+
+  # ==========================================================================
+  # POST /trx/penjualan — Create penjualan request (S1)
+  # ==========================================================================
+
+  /trx/penjualan:
+    post:
+      operationId: penjualanCreate
+      summary: Create penjualan/pencairan request + preview multi-klasifikasi — ROLE-MAKER-TR
+      description: |
+        AC: S1-AC1, S1-AC2, S1-AC3, S1-AC4
+
+        ROLE-MAKER-TR memilih instrumen ACTIVE (klasifikasi_locked=TRUE), memilih
+        FULL atau PARTIAL, input qty_terjual + harga_jual_per_unit + tanggal_eksekusi.
+        Server compute preview: proceed, cost_basis, realized_gl, oci_recycled (jika FVOCI debt),
+        no_recycling_note (jika FVOCI Election), bm_freq_impact_pct.
+        Status langsung PENDING_APPROVAL.
+
+        Validasi server-side:
+          instrumen_id: mst.instrumen ACTIVE, klasifikasi_locked=TRUE
+          jenis_disposal: PARTIAL | FULL
+          qty_terjual: > 0, ≤ qty_holding_pre (qty aktual dari mst.instrumen)
+          harga_jual_per_unit: > 0
+          tanggal_eksekusi: valid DATE YYYY-MM-DD, periode_buku OPEN
+          Tidak ada penjualan aktif untuk instrumen yang sama
+
+        On success:
+          INSERT trx.penjualan (status=PENDING_APPROVAL)
+          INSERT aud.audit_log action=PENJUALAN.CREATED in-tx
+
+        Permission: penjualan.create
+        Roles: ROLE-MAKER-TR
+        Idempotency-Key: WAJIB (UUID v4)
+        Rate limit: 60 req/min per user
+      tags: [penjualan-core]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePenjualanBody"
+            example:
+              instrumenId: "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+              jenisDisposal: "PARTIAL"
+              qtyTerjual: "500.00000000"
+              hargaJualPerUnit: "1050000.0000"
+              tanggalEksekusi: "2026-07-15"
+      responses:
+        "201":
+          description: Penjualan berhasil dibuat, status PENDING_APPROVAL
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/CreatePenjualanResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  penjualanId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  status: "PENDING_APPROVAL"
+                  preview:
+                    klasifikasiPsak71: "FVOCI"
+                    proceedIdr: "525000000.0000"
+                    costBasis: "498500000.0000"
+                    realizedGl: "26500000.0000"
+                    ociRecycled: "9100000.0000"
+                    noRecyclingNote: null
+                    bmFreqImpactPct: "3.2000"
+                    bmFreqWarning: null
+                  nextStep: "Menunggu approval ROLE-APPR-TR. SoD: approver tidak boleh sama dengan maker."
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: Validasi gagal (harga_jual_per_unit ≤ 0, tanggal format salah)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                harga_invalid:
+                  summary: S1 — harga_jual_per_unit tidak valid
+                  value:
+                    error:
+                      code: PENJUALAN_HARGA_INVALID
+                      message: "harga_jual_per_unit harus lebih dari 0."
+                      details:
+                        - field: "hargaJualPerUnit"
+                          rule: "gt:0"
+                          message: "Harga 0 tidak valid."
+                      traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "422":
+          description: Instrumen tidak eligible, qty melebihi holding, atau klasifikasi belum locked
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                instrumen_not_active:
+                  summary: S1-AC3 — instrumen bukan ACTIVE
+                  value:
+                    error:
+                      code: PENJUALAN_INSTRUMEN_NOT_ACTIVE
+                      message: "OBL-0099 tidak eligible untuk penjualan: status=MATURED. Hanya instrumen ACTIVE yang bisa dijual."
+                      details:
+                        - field: "instrumenId"
+                          rule: "instrumen_active"
+                          message: "status=MATURED."
+                      traceId: "01HXY..."
+                qty_exceeds_holding:
+                  summary: S1-AC2 — qty melebihi holding
+                  value:
+                    error:
+                      code: PENJUALAN_QTY_EXCEEDS_HOLDING
+                      message: "qty_terjual 1500 melebihi qty_holding saat ini: 1000 unit OBL-0077."
+                      details:
+                        - field: "qtyTerjual"
+                          rule: "lte:qty_holding"
+                          message: "qty_terjual 1500 > qty_holding 1000."
+                      traceId: "01HXY..."
+                klasifikasi_not_locked:
+                  summary: klasifikasi belum locked
+                  value:
+                    error:
+                      code: PENJUALAN_KLASIFIKASI_NOT_LOCKED
+                      message: "OBL-0099: klasifikasi_locked=FALSE. Klasifikasi PSAK 71 harus terkunci sebelum penjualan."
+                      details:
+                        - field: "instrumenId"
+                          rule: "klasifikasi_locked"
+                          message: "klasifikasi_locked harus TRUE."
+                      traceId: "01HXY..."
+        "423":
+          description: Periode buku CLOSED untuk tanggal_eksekusi
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: PENJUALAN_PERIODE_LOCKED
+                  message: "Periode PRD-2026-07 sudah hard-closed. Penjualan tidak dapat dibuat."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+    get:
+      operationId: penjualanGetList
+      summary: List penjualan dengan sort, filter, cursor pagination, export
+      description: |
+        Cursor-paginated list trx.penjualan. Default sort: created_at DESC.
+
+        Allowed sort: created_at, tanggal_eksekusi, status, instrumen_id, jenis_disposal.
+        Filter:
+          filter[instrumen_id]     — UUID
+          filter[status]           — enum multi-value
+          filter[jenis_disposal]   — PARTIAL | FULL
+          filter[tanggal_eksekusi] — date range
+          filter[maker_id]         — UUID
+          filter[klasifikasi]      — AC | FVOCI | FVOCI_ELECTION | FVTPL | POCI
+        Export: CSV/XLSX. Dataset > 10k → 202 + async job.
+        Audit: PENJUALAN.EXPORT in-transaction per export call.
+
+        Permission: penjualan.read
+        Roles: ROLE-MAKER-TR, ROLE-APPR-TR, ROLE-RISK, ROLE-AKUN, ROLE-AUDIT
+        Rate limit: 60 req/min (read); 10 req/min (export)
+      tags: [penjualan-core]
+      parameters:
+        - $ref: "./_common.yaml#/components/parameters/cursor"
+        - $ref: "./_common.yaml#/components/parameters/limit"
+        - $ref: "./_common.yaml#/components/parameters/sortParam"
+        - $ref: "./_common.yaml#/components/parameters/searchParam"
+        - name: "filter[instrumen_id]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: "filter[status]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [PENDING_APPROVAL, APPROVED, POSTED, REJECTED, PENDING_BM_REVIEW]
+        - name: "filter[jenis_disposal]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [PARTIAL, FULL]
+        - name: "filter[tanggal_eksekusi]"
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Date range: between:2026-07-01,2026-12-31"
+        - name: "filter[maker_id]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: "filter[klasifikasi]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [AC, FVOCI, FVOCI_ELECTION, FVTPL, POCI]
+        - name: export
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [csv, xlsx]
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List penjualan dengan pagination
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PenjualanListItem"
+                  pagination:
+                    $ref: "./_common.yaml#/components/schemas/PaginationResponse"
+                  appliedSort:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        col: { type: string }
+                        dir: { type: string, enum: [asc, desc] }
+                  appliedFilter:
+                    type: object
+                    additionalProperties: true
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "202":
+          description: Export async — dataset > 10k row
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      jobId: { type: string }
+                      statusUrl: { type: string }
+                      streamUrl: { type: string }
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ==========================================================================
+  # GET /trx/penjualan/bm-frequency-alerts — BM violation risk list (S4)
+  # NOTE: static path before /{id} to avoid Gin routing conflict
+  # ==========================================================================
+
+  /trx/penjualan/bm-frequency-alerts:
+    get:
+      operationId: penjualanBMAlerts
+      summary: List instrumen HTC dengan BM frequency violation risk (S4)
+      description: |
+        Returns instrumen in HTC portofolio where cumulative 12-month disposal
+        qty/value exceeds the warning threshold from sys.config.
+
+        Permission: penjualan.read
+        Roles: ROLE-MAKER-TR, ROLE-APPR-TR, ROLE-RISK
+        Rate limit: 60 req/min
+      tags: [penjualan-preview]
+      parameters:
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List instrumen dengan BM violation risk
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/BMAlertItem"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ==========================================================================
+  # GET /trx/penjualan/{id} — Detail
+  # ==========================================================================
+
+  /trx/penjualan/{id}:
+    get:
+      operationId: penjualanGetDetail
+      summary: Detail single penjualan + preview
+      tags: [penjualan-core]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Detail penjualan
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/PenjualanDetail"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ==========================================================================
+  # GET /trx/penjualan/{id}/preview — Preview recompute (read-only)
+  # ==========================================================================
+
+  /trx/penjualan/{id}/preview:
+    get:
+      operationId: penjualanGetPreview
+      summary: Preview recompute — server-side kalkulasi ulang, read-only
+      description: |
+        Server recomputes proceed, cost_basis, realized_gl, oci_recycled, bm_freq_impact_pct
+        dari data yang tersimpan di trx.penjualan. Tidak ada mutation.
+        Berguna untuk ROLE-APPR-TR memverifikasi sebelum approve.
+
+        Permission: penjualan.read
+        Roles: ROLE-MAKER-TR, ROLE-APPR-TR, ROLE-RISK, ROLE-AUDIT
+        Rate limit: 60 req/min
+      tags: [penjualan-preview]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Preview kalkulasi terkini
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/PenjualanPreview"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ==========================================================================
+  # POST /trx/penjualan/{id}/approve — Approve (ROLE-APPR-TR, SoD)
+  # ==========================================================================
+
+  /trx/penjualan/{id}/approve:
+    post:
+      operationId: penjualanApprove
+      summary: Approve penjualan — ROLE-APPR-TR; SoD approver ≠ maker; in-tx side-effects
+      description: |
+        AC: S2-AC1, S2-AC2, S2-AC3, S2-AC4, S3-AC1..AC4, S4-AC1..AC4, S5-AC1..AC4
+
+        Pre-conditions:
+          - trx.penjualan.status = PENDING_APPROVAL
+          - approver_id ≠ maker_id (SoD DEC-017)
+          - signatureMethod = JWT_STEP_UP (wajib)
+          - mst.periode_buku.status_periode = OPEN untuk tanggal_eksekusi
+
+        Server re-verify cost_basis dari ecl.amortisasi_schedule sebelum posting.
+
+        Semua side-effect dalam satu DB transaksi:
+          1. Server re-verify cost_basis
+          2. OCI recycling: FVOCI debt → jurnal REKLAS_OCI_PL; FVOCI Election → no-op + OCI_NO_RECYCLE audit
+          3. BM frequency check (HTC only): warn → flag + notif ROLE-RISK; block → PENDING_BM_REVIEW
+          4. POST P5-M2 jurnal per klasifikasi event codes
+          5. UPDATE mst.instrumen: FULL → status=DISPOSED; PARTIAL → qty_holding -= qty_terjual
+          6. UPDATE penjualan status=POSTED, jurnal_header_id
+          7. INSERT aud.audit_log: PENJUALAN.APPROVED + PENJUALAN.POSTED + OCI event + BM event + PENJUALAN.DERECOGNIZED (in-tx)
+        Rollback seluruh transaksi jika langkah mana pun gagal.
+
+        Permission: penjualan.approve
+        Roles: ROLE-APPR-TR
+        Idempotency-Key: WAJIB
+        Rate limit: 10 req/min per user (sensitif)
+      tags: [penjualan-workflow]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApprovePenjualanBody"
+            example:
+              comment: "Preview diverifikasi. Harga OBL-0077 sesuai IBPA closing 2026-07-15. Disetujui."
+              signatureMethod: "JWT_STEP_UP"
+      responses:
+        "200":
+          description: Approve berhasil — status POSTED (atau PENDING_BM_REVIEW jika BM block)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/ApprovePenjualanResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  penjualanId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  status: "POSTED"
+                  jurnalEntryId: "d4e5f6a7-b8c9-0123-def0-234567890123"
+                  instrumenStatusAfter: "DISPOSED"
+                  approvedBy: "e5f6a7b8-c9d0-1234-ef01-345678901234"
+                  approvedAt: "2026-07-15T14:00:00+07:00"
+                  ociRecycled: "9100000.0000"
+                  noRecyclingNote: null
+                  bmViolationRisk: false
+                  warnings: []
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: Validasi body gagal
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          description: SoD violation atau permission tidak terpenuhi
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                sod_violation:
+                  summary: S2-AC2 — Maker mencoba approve sendiri
+                  value:
+                    error:
+                      code: SOD_VIOLATION
+                      message: "maker tidak dapat menjadi approver untuk penjualan yang sama (DEC-017)."
+                      details:
+                        - field: "actor.userId"
+                          rule: "sod_approver_ne_maker"
+                          message: "approver_id == maker_id."
+                      traceId: "01HXY..."
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          description: Status tidak valid atau BM violation block
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                workflow_invalid:
+                  value:
+                    error:
+                      code: WORKFLOW_INVALID_TRANSITION
+                      message: "Approve hanya valid dari status PENDING_APPROVAL. Status saat ini: POSTED."
+                      details: []
+                      traceId: "01HXY..."
+                bm_violation_block:
+                  summary: S4-AC2 — BM hard block
+                  value:
+                    error:
+                      code: PENJUALAN_BM_VIOLATION_BLOCK
+                      message: "Penjualan PJL-0099 menyebabkan cumulative disposal 12-bulan PRT-HTC-01 = 12.3% (hard limit: 10%). Approval ROLE-RISK diperlukan."
+                      details:
+                        - field: "portofolioId"
+                          rule: "bm_frequency_block"
+                          message: "12.3% > threshold 10%. Status → PENDING_BM_REVIEW."
+                      traceId: "01HXY..."
+        "423":
+          description: Periode buku CLOSED
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: PENJUALAN_PERIODE_LOCKED
+                  message: "Periode PRD-2026-07 sudah hard-closed. Posting penjualan tidak bisa dilakukan."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ==========================================================================
+  # POST /trx/penjualan/{id}/reject — Reject (ROLE-APPR-TR)
+  # ==========================================================================
+
+  /trx/penjualan/{id}/reject:
+    post:
+      operationId: penjualanReject
+      summary: Reject penjualan — ROLE-APPR-TR; reason ≥ 30 char; SoD enforced
+      description: |
+        Pre-conditions:
+          - trx.penjualan.status = PENDING_APPROVAL
+          - approver_id ≠ maker_id (SoD)
+          - reason ≥ 30 karakter
+          - signatureMethod = JWT_STEP_UP
+
+        On success (in-tx):
+          UPDATE trx.penjualan status=REJECTED
+          INSERT aud.audit_log action=PENJUALAN.REJECTED
+
+        Permission: penjualan.reject
+        Roles: ROLE-APPR-TR
+        Idempotency-Key: WAJIB
+        Rate limit: 10 req/min per user (sensitif)
+      tags: [penjualan-workflow]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RejectPenjualanBody"
+            example:
+              reason: "Harga jual 1.050.000 melebihi IBPA fair value 1.035.000 lebih dari 2%. Harap klarifikasi atau revisi harga."
+              signatureMethod: "JWT_STEP_UP"
+      responses:
+        "200":
+          description: Reject berhasil — status REJECTED
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/RejectPenjualanResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  penjualanId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  status: "REJECTED"
+                  rejectedBy: "e5f6a7b8-c9d0-1234-ef01-345678901234"
+                  rejectedAt: "2026-07-15T15:00:00+07:00"
+                  reason: "Harga jual 1.050.000 melebihi IBPA fair value 1.035.000 lebih dari 2%."
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: reason terlalu pendek (< 30 char) atau signatureMethod invalid
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: VALIDATION_FAILED
+                  message: "reason wajib minimal 30 karakter untuk reject penjualan."
+                  details:
+                    - field: "reason"
+                      rule: "min_length:30"
+                      message: "reason hanya 12 karakter."
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          description: Status tidak valid untuk reject
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: WORKFLOW_INVALID_TRANSITION
+                  message: "Reject hanya valid dari status PENDING_APPROVAL. Status saat ini: POSTED."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+
+    CreatePenjualanBody:
+      type: object
+      required:
+        - instrumenId
+        - jenisDisposal
+        - qtyTerjual
+        - hargaJualPerUnit
+        - tanggalEksekusi
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+          description: "UUID mst.instrumen. status=ACTIVE, klasifikasi_locked=TRUE."
+        jenisDisposal:
+          type: string
+          enum: [PARTIAL, FULL]
+          description: "PARTIAL: qty_terjual < qty_holding. FULL: qty_terjual = qty_holding."
+        qtyTerjual:
+          type: string
+          description: "Qty yang dijual. NUMERIC(20,8). Harus ≤ qty_holding_pre."
+        hargaJualPerUnit:
+          type: string
+          description: "Harga jual per unit IDR. NUMERIC(20,4). Harus > 0."
+        tanggalEksekusi:
+          type: string
+          format: date
+          description: "Tanggal eksekusi penjualan. Harus dalam periode buku OPEN."
+
+    PenjualanPreview:
+      type: object
+      required:
+        - klasifikasiPsak71
+        - proceedIdr
+        - costBasis
+        - realizedGl
+      properties:
+        klasifikasiPsak71:
+          type: string
+          enum: [AC, FVOCI, FVOCI_ELECTION, FVTPL, POCI]
+        proceedIdr:
+          type: string
+          description: "harga_jual_per_unit × qty_terjual. NUMERIC(20,4)."
+        costBasis:
+          type: string
+          description: "Cost basis per klasifikasi. AC/POCI: amortized carrying; FVTPL: MTM terkini. NUMERIC(20,4)."
+        realizedGl:
+          type: string
+          description: "proceed_idr − cost_basis. NUMERIC(20,4). Untuk FVOCI_ELECTION: informational only."
+        ociRecycled:
+          type: string
+          nullable: true
+          description: "OCI yang di-recycle ke P&L (FVOCI debt only). null untuk AC/FVTPL/POCI/FVOCI_ELECTION. NUMERIC(20,4)."
+        noRecyclingNote:
+          type: string
+          nullable: true
+          description: "Pesan informasional untuk FVOCI_ELECTION (§B5.7.1). null untuk klasifikasi lain."
+        bmFreqImpactPct:
+          type: string
+          nullable: true
+          description: "Persentase disposal kumulatif 12-bulan rolling vs total portofolio HTC. NUMERIC(7,4). null jika non-HTC."
+        bmFreqWarning:
+          type: string
+          nullable: true
+          description: "Pesan peringatan BM jika mendekati threshold. null jika tidak ada risiko."
+
+    CreatePenjualanResponse:
+      type: object
+      required: [penjualanId, status, preview]
+      properties:
+        penjualanId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PENDING_APPROVAL]
+        preview:
+          $ref: "#/components/schemas/PenjualanPreview"
+        nextStep:
+          type: string
+
+    ApprovePenjualanBody:
+      type: object
+      required: [comment, signatureMethod]
+      properties:
+        comment:
+          type: string
+          description: "Komentar approve."
+        signatureMethod:
+          type: string
+          enum: [JWT_STEP_UP]
+          description: "Wajib JWT_STEP_UP (DEC-027)."
+
+    RejectPenjualanBody:
+      type: object
+      required: [reason, signatureMethod]
+      properties:
+        reason:
+          type: string
+          minLength: 30
+          description: "Alasan reject. Wajib ≥ 30 karakter."
+        signatureMethod:
+          type: string
+          enum: [JWT_STEP_UP]
+          description: "Wajib JWT_STEP_UP."
+
+    ApprovePenjualanResponse:
+      type: object
+      required: [penjualanId, status, approvedBy, approvedAt]
+      properties:
+        penjualanId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [POSTED, PENDING_BM_REVIEW]
+        jurnalEntryId:
+          type: string
+          format: uuid
+          nullable: true
+          description: "UUID jurnal header dari P5-M2. null jika PENDING_BM_REVIEW."
+        instrumenStatusAfter:
+          type: string
+          nullable: true
+          description: "'DISPOSED' (FULL) atau 'ACTIVE' (PARTIAL). null jika PENDING_BM_REVIEW."
+        approvedBy:
+          type: string
+          format: uuid
+        approvedAt:
+          type: string
+          format: date-time
+        ociRecycled:
+          type: string
+          nullable: true
+          description: "OCI di-recycle ke P&L. null jika tidak applicable."
+        noRecyclingNote:
+          type: string
+          nullable: true
+          description: "Pesan FVOCI_ELECTION no-recycle. null jika tidak applicable."
+        bmViolationRisk:
+          type: boolean
+          description: "true jika BM frequency warning terlampaui (tapi masih di bawah block threshold)."
+        warnings:
+          type: array
+          items:
+            type: string
+          description: "Daftar warning codes (mis. PENJUALAN_FVOCI_ELECTION_NO_RECYCLING_WARN)."
+
+    RejectPenjualanResponse:
+      type: object
+      required: [penjualanId, status, rejectedBy, rejectedAt, reason]
+      properties:
+        penjualanId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [REJECTED]
+        rejectedBy:
+          type: string
+          format: uuid
+        rejectedAt:
+          type: string
+          format: date-time
+        reason:
+          type: string
+
+    PenjualanListItem:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        instrumenId:
+          type: string
+          format: uuid
+        instrumenKode:
+          type: string
+        jenisDisposal:
+          type: string
+          enum: [PARTIAL, FULL]
+        qtyTerjual:
+          type: string
+        qtyHoldingPre:
+          type: string
+        qtyHoldingPost:
+          type: string
+          nullable: true
+        proceedIdr:
+          type: string
+        realizedGl:
+          type: string
+          nullable: true
+        klasifikasiSnapshot:
+          type: string
+        status:
+          type: string
+          enum: [PENDING_APPROVAL, APPROVED, POSTED, REJECTED, PENDING_BM_REVIEW]
+        tanggalEksekusi:
+          type: string
+          format: date
+        makerId:
+          type: string
+          format: uuid
+        approverId:
+          type: string
+          format: uuid
+          nullable: true
+        jurnalHeaderId:
+          type: string
+          format: uuid
+          nullable: true
+        bmViolationRisk:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+
+    PenjualanDetail:
+      allOf:
+        - $ref: "#/components/schemas/PenjualanListItem"
+        - type: object
+          properties:
+            costBasis:
+              type: string
+            ociRecycled:
+              type: string
+              nullable: true
+            ociCumulativeTotal:
+              type: string
+              nullable: true
+            noRecyclingNote:
+              type: string
+              nullable: true
+            jurnalEventCode:
+              type: string
+              nullable: true
+            approveComment:
+              type: string
+              nullable: true
+            rejectReason:
+              type: string
+              nullable: true
+            signatureMethod:
+              type: string
+              nullable: true
+            periodeBulananId:
+              type: string
+              format: uuid
+              nullable: true
+            bmViolationPct:
+              type: string
+              nullable: true
+            updatedAt:
+              type: string
+              format: date-time
+            rowVersion:
+              type: integer
+            preview:
+              $ref: "#/components/schemas/PenjualanPreview"
+
+    BMAlertItem:
+      type: object
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+        instrumenKode:
+          type: string
+        portofolioId:
+          type: string
+          format: uuid
+        portofolioNama:
+          type: string
+        cumulativeSold12mPct:
+          type: string
+          description: "Persentase disposal kumulatif 12-bulan. NUMERIC(7,4)."
+        warnThresholdPct:
+          type: string
+          description: "Threshold peringatan dari sys.config. NUMERIC(7,4)."
+        blockThresholdPct:
+          type: string
+          description: "Threshold block dari sys.config. NUMERIC(7,4)."
+        flagStatus:
+          type: string
+          enum: [BM_VIOLATION_RISK, BM_VIOLATION_BLOCK]
+        lastUpdated:
+          type: string
+          format: date-time
