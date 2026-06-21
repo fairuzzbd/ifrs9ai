@@ -8,6 +8,7 @@ package pocidelta
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -15,6 +16,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 )
+
+// ErrMappingJurnalDraft is returned when the mapping_jurnal rule for POCI_ECL_DELTA
+// events is still in DRAFT status. Jurnal posting is blocked until the mapping is
+// APPROVED by ROLE-AKUN-CTL (P5-M2 gate per DEC-P5-M1-002).
+//
+// See: internal/app-d/jurnal mapping_jurnal_header workflow (P5-M2).
+var ErrMappingJurnalDraft = fmt.Errorf("mapping_jurnal for POCI_ECL_DELTA event is DRAFT — approve mapping via P5-M2 before posting")
 
 // PociDeltaPostRequest carries data for posting POCI delta ECL jurnal.
 type PociDeltaPostRequest struct {
@@ -105,8 +113,12 @@ func (s *JurnalPosterStub) PostPociDelta(ctx context.Context, _ *sql.Tx, req Poc
 
 // NoopJurnalPoster is a no-op JurnalPoster for dev mode.
 // Logs a WARN on every call. Wire P5-M2 adapter in main.go.
+//
+// m5 fix: if MappingJurnalStatus == "DRAFT", PostPociDelta returns ErrMappingJurnalDraft
+// to guard against posting when the mapping rule is not yet approved (P5-M2 gate).
 type NoopJurnalPoster struct {
-	logger *slog.Logger
+	logger               *slog.Logger
+	MappingJurnalStatus  string // default "": treat as approved; "DRAFT" → block
 }
 
 // NewNoopJurnalPoster creates a noop poster.
@@ -119,8 +131,17 @@ func NewNoopJurnalPoster(logger *slog.Logger) *NoopJurnalPoster {
 }
 
 // PostPociDelta implements JurnalPoster (noop).
+// Returns ErrMappingJurnalDraft if MappingJurnalStatus == "DRAFT" (m5 fix).
 func (n *NoopJurnalPoster) PostPociDelta(ctx context.Context, _ *sql.Tx, req PociDeltaPostRequest) (PociDeltaPostResult, error) {
-	n.logger.WarnContext(ctx, "NoopJurnalPoster.PostPociDelta: skipped",
+	// m5: block posting if mapping rule is still in DRAFT (P5-M2 gate).
+	if n.MappingJurnalStatus == "DRAFT" {
+		n.logger.WarnContext(ctx, "NoopJurnalPoster.PostPociDelta: blocked — mapping_jurnal DRAFT",
+			"event_code", req.EventCode,
+			"instrumen_id", req.InstrumenID,
+		)
+		return PociDeltaPostResult{}, ErrMappingJurnalDraft
+	}
+	n.logger.WarnContext(ctx, "NoopJurnalPoster.PostPociDelta: skipped (noop)",
 		"event_code", req.EventCode,
 		"instrumen_id", req.InstrumenID,
 	)

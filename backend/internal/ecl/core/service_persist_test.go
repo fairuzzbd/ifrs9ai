@@ -272,19 +272,19 @@ func TestComputeSingle_POCI_PersistTrue_AuditTx(t *testing.T) {
 	if result.ECLWeightedIDR == nil {
 		t.Error("Phase 4.5: POCI ECLWeightedIDR must be non-nil (initial baseline ECL computed)")
 	}
-	// Verify both POCI warning codes are present.
-	wantWarnings := []string{WarnPOCIRequiresFullCAEIR, WarnPOCIECLRepresentsInitialBaseline}
-	for _, want := range wantWarnings {
-		found := false
-		for _, w := range result.Warnings {
-			if w == want {
-				found = true
-				break
-			}
+	// P5-M10: WarnPOCIRequiresFullCAEIR must be present.
+	// WarnPOCIECLRepresentsInitialBaseline must NOT be present (removed in P5-M10).
+	foundCAEIR := false
+	for _, w := range result.Warnings {
+		if w == WarnPOCIRequiresFullCAEIR {
+			foundCAEIR = true
 		}
-		if !found {
-			t.Errorf("POCI persist: expected warning %s, got %v", want, result.Warnings)
+		if w == WarnPOCIECLRepresentsInitialBaseline {
+			t.Errorf("POCI persist: WarnPOCIECLRepresentsInitialBaseline must NOT be emitted in P5-M10. Got warnings: %v", result.Warnings)
 		}
+	}
+	if !foundCAEIR {
+		t.Errorf("POCI persist: expected warning %s, got %v", WarnPOCIRequiresFullCAEIR, result.Warnings)
 	}
 }
 

@@ -70,6 +70,9 @@ import (
 
 	// P5-M9: Jatuh Tempo + Akrual EIR + Dividen
 	"blips-ifrs9.tugu-re.com/internal/trx/akrualmaturity"
+
+	// P5-M10: POCI Delta ECL
+	"blips-ifrs9.tugu-re.com/internal/ecl/pocidelta"
 )
 
 // version adalah versi service yang dilaporkan probe liveness.
@@ -1026,6 +1029,42 @@ func main() {
 	akrualmaturity.RegisterRoutes(v1, akrualHandler, rdb)
 	_ = akrualWorker // handlers registered on asynqMux below
 
+	// -----------------------------------------------------------------------
+	// P5-M10: POCI Delta ECL (APP-C-POCI-001..006)
+	// Endpoints (all under /api/v1/poci/):
+	//   GET  /poci/baseline                   — list baselines (poci.baseline.read)
+	//   POST /poci/baseline                   — capture baseline (poci.baseline.create)
+	//   GET  /poci/baseline/:instrumen_id     — get baseline (poci.baseline.read)
+	//   GET  /poci/delta-log                  — list delta log (poci.delta.read)
+	//   GET  /poci/delta-history              — delta history by instrumen (poci.delta.read)
+	//   GET  /poci/delta-history/summary      — MTD/YTD summary (poci.delta.read)
+	//   POST /poci/compute-delta-batch        — trigger async delta batch (poci.delta.compute)
+	//
+	// B1 fix: NewServiceWithDB wires real DBTxBeginner so processOnePociInstrumen can open tx.
+	// M1 fix: tenantID from JWT (actorAndTenant), not hardcoded UUID.
+	// Decisions: DEC-010, DEC-016, DEC-017, DEC-018, DEC-021, DEC-022.
+	// -----------------------------------------------------------------------
+	pociRepo := pocidelta.NewRepository(db)
+	pociPoster := pocidelta.NewNoopJurnalPoster(logger) // replace with P5-M2 adapter when ready
+	pociAuditWriter := audit.NewWriter(db)
+
+	// B1: dbAdapter wraps *sql.DB as DBTxBeginner for the pocidelta service.
+	var pociAsynqClient *asynq.Client
+	if cfg.RedisURL != "" {
+		pociAsynqClient = asynq.NewClient(asynq.RedisClientOpt{Addr: cfg.RedisURL})
+	}
+
+	var pociSvc *pocidelta.Service
+	if db != nil {
+		pociSvc = pocidelta.NewServiceWithDB(pociRepo, pocidelta.NewSQLDBAdapter(db), pociPoster, pociAuditWriter, logger)
+	} else {
+		pociSvc = pocidelta.NewService(pociRepo, pociPoster, pociAuditWriter, logger)
+	}
+	pociHandler := pocidelta.NewHTTPHandler(pociSvc, pociAsynqClient)
+	pociWorker := pocidelta.NewWorker(pociSvc, rdb, logger)
+	pocidelta.RegisterRoutes(v1, pociHandler, rdb)
+	_ = pociWorker // RegisterHandlers called on asynqMux below when Redis available
+
 	// B1 fix: Register DriftCronHandler on Asynq mux + scheduler.
 	// Previously the handler was instantiated then discarded (_ = ...), making the
 	// drift cron feature completely dead.  Now we:
@@ -1069,6 +1108,9 @@ func main() {
 
 		// P5-M9: Akrual + Maturity + Amortisasi cron tasks.
 		akrualWorker.RegisterHandlers(asynqMux)
+
+		// P5-M10: POCI delta batch computation.
+		pociWorker.RegisterHandlers(asynqMux)
 
 		// Asynq Server — pulls tasks from Redis queue and dispatches to mux.
 		asynqServer := asynq.NewServer(asynqRedisOpt, asynq.Config{

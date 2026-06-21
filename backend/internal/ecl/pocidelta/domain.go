@@ -105,9 +105,12 @@ func (d Direction) Valid() bool {
 type DeltaStatus string
 
 const (
-	StatusComputed     DeltaStatus = "COMPUTED"
-	StatusPosted       DeltaStatus = "POSTED"
-	StatusSkippedZero  DeltaStatus = "SKIPPED_ZERO"
+	StatusComputed             DeltaStatus = "COMPUTED"
+	StatusPosted               DeltaStatus = "POSTED"
+	StatusSkippedZero          DeltaStatus = "SKIPPED_ZERO"
+	// StatusBlockedPeriodeClosed is set when the associated periode_buku is CLOSED/HARD_CLOSED.
+	// Delta is computed but jurnal is not posted; logged for audit trail (B2).
+	StatusBlockedPeriodeClosed DeltaStatus = "BLOCKED_PERIODE_CLOSED"
 )
 
 // ─── Domain entities ──────────────────────────────────────────────────────────

@@ -748,9 +748,19 @@ func TestGetCumulativeDelta_DBError(t *testing.T) {
 
 // ─── GetDeltaSummary ──────────────────────────────────────────────────────────
 
+// m4 fix: GetDeltaSummary now runs real SQL — update existing tests to provide mock rows.
 func TestGetDeltaSummary_ReturnsStub(t *testing.T) {
-	db, _ := newTestDB(t)
+	db, mock := newTestDB(t)
 	r := &sqlRepo{db: db}
+
+	mock.ExpectQuery("SELECT").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"instr_count",
+			"delta_mtd", "delta_ytd", "delta_net",
+			"inc_count", "inc_amount",
+			"dec_count", "dec_amount",
+			"zero_count",
+		}).AddRow(0, "0", "0", "0", 0, "0", 0, "0", 0))
 
 	sum, err := r.GetDeltaSummary(context.Background(), nil, 2026, 6, "TUGURE")
 	if err != nil {
@@ -762,8 +772,17 @@ func TestGetDeltaSummary_ReturnsStub(t *testing.T) {
 }
 
 func TestGetDeltaSummarySQL_WithPortofolioID(t *testing.T) {
-	db, _ := newTestDB(t)
+	db, mock := newTestDB(t)
 	r := &sqlRepo{db: db}
+
+	mock.ExpectQuery("SELECT").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"instr_count",
+			"delta_mtd", "delta_ytd", "delta_net",
+			"inc_count", "inc_amount",
+			"dec_count", "dec_amount",
+			"zero_count",
+		}).AddRow(1, "50000", "50000", "50000", 1, "50000", 0, "0", 0))
 
 	pid := uuid.New()
 	sum, err := r.GetDeltaSummary(context.Background(), &pid, 2026, 6, "TUGURE")
@@ -1111,5 +1130,134 @@ func TestScanDeltaLog_WithPriorCumulative(t *testing.T) {
 	}
 	if rows[0].PriorDeltaCumulative == nil {
 		t.Fatal("expected non-nil PriorDeltaCumulative")
+	}
+}
+
+// ─── GetPeriodeBulananIDForCalcRun (B2) ───────────────────────────────────────
+
+func TestGetPeriodeBulananIDForCalcRun_Success(t *testing.T) {
+	db, mock := newTestDB(t)
+	r := &sqlRepo{db: db}
+
+	periodeID := uuid.New()
+	calcRunID := uuid.New()
+
+	mock.ExpectQuery("SELECT periode_bulanan_id FROM ecl.ecl_calc_run").
+		WithArgs(calcRunID, "TUGURE").
+		WillReturnRows(sqlmock.NewRows([]string{"periode_bulanan_id"}).AddRow(periodeID))
+
+	got, err := r.GetPeriodeBulananIDForCalcRun(context.Background(), calcRunID, "TUGURE")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != periodeID {
+		t.Fatalf("expected %s, got %s", periodeID, got)
+	}
+}
+
+func TestGetPeriodeBulananIDForCalcRun_NotFound(t *testing.T) {
+	db, mock := newTestDB(t)
+	r := &sqlRepo{db: db}
+
+	mock.ExpectQuery("SELECT periode_bulanan_id FROM ecl.ecl_calc_run").
+		WillReturnRows(sqlmock.NewRows([]string{"periode_bulanan_id"}))
+
+	_, err := r.GetPeriodeBulananIDForCalcRun(context.Background(), uuid.New(), "TUGURE")
+	if err == nil {
+		t.Fatal("expected error for not found")
+	}
+}
+
+func TestGetPeriodeBulananIDForCalcRun_DBError(t *testing.T) {
+	db, mock := newTestDB(t)
+	r := &sqlRepo{db: db}
+
+	mock.ExpectQuery("SELECT periode_bulanan_id FROM ecl.ecl_calc_run").
+		WillReturnError(errors.New("db error"))
+
+	_, err := r.GetPeriodeBulananIDForCalcRun(context.Background(), uuid.New(), "TUGURE")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+// ─── GetDeltaSummary (m4) ─────────────────────────────────────────────────────
+
+func TestGetDeltaSummary_Success(t *testing.T) {
+	db, mock := newTestDB(t)
+	r := &sqlRepo{db: db}
+
+	mock.ExpectQuery("SELECT").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"instr_count",
+			"delta_mtd", "delta_ytd", "delta_net",
+			"inc_count", "inc_amount",
+			"dec_count", "dec_amount",
+			"zero_count",
+		}).AddRow(
+			3,
+			"100000.0000", "250000.0000", "50000.0000",
+			2, "100000.0000",
+			1, "50000.0000",
+			0,
+		))
+
+	summary, err := r.GetDeltaSummary(context.Background(), nil, 2026, 6, "TUGURE")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+	if summary.InstrumenCount != 3 {
+		t.Fatalf("expected InstrumenCount=3, got %d", summary.InstrumenCount)
+	}
+	if summary.DirectionBreakdown.Increase.Count != 2 {
+		t.Fatalf("expected Increase.Count=2, got %d", summary.DirectionBreakdown.Increase.Count)
+	}
+	if summary.DirectionBreakdown.Decrease.Count != 1 {
+		t.Fatalf("expected Decrease.Count=1, got %d", summary.DirectionBreakdown.Decrease.Count)
+	}
+}
+
+func TestGetDeltaSummary_SQL_WithPortofolioID(t *testing.T) {
+	db, mock := newTestDB(t)
+	r := &sqlRepo{db: db}
+
+	portoID := uuid.New()
+
+	mock.ExpectQuery("SELECT").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"instr_count",
+			"delta_mtd", "delta_ytd", "delta_net",
+			"inc_count", "inc_amount",
+			"dec_count", "dec_amount",
+			"zero_count",
+		}).AddRow(
+			1,
+			"50000.0000", "50000.0000", "50000.0000",
+			1, "50000.0000",
+			0, "0.0000",
+			0,
+		))
+
+	summary, err := r.GetDeltaSummary(context.Background(), &portoID, 2026, 6, "TUGURE")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if summary.PortofolioID == nil {
+		t.Fatal("expected non-nil PortofolioID")
+	}
+}
+
+func TestGetDeltaSummary_DBError(t *testing.T) {
+	db, mock := newTestDB(t)
+	r := &sqlRepo{db: db}
+
+	mock.ExpectQuery("SELECT").WillReturnError(errors.New("db error"))
+
+	_, err := r.GetDeltaSummary(context.Background(), nil, 2026, 6, "TUGURE")
+	if err == nil {
+		t.Fatal("expected error")
 	}
 }

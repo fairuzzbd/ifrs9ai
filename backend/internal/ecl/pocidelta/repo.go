@@ -49,6 +49,8 @@ type Repository interface {
 	GetPeriodeStatus(ctx context.Context, periodeBulananID uuid.UUID, tenantID string) (string, error)
 	GetCalcRunStatus(ctx context.Context, calcRunID uuid.UUID, tenantID string) (string, error)
 	GetCurrentECLForPociInstrumen(ctx context.Context, calcRunID, instrumenID uuid.UUID, tenantID string) (decimal.Decimal, error)
+	// GetPeriodeBulananIDForCalcRun returns the periode_bulanan_id from ecl.ecl_calc_run.
+	GetPeriodeBulananIDForCalcRun(ctx context.Context, calcRunID uuid.UUID, tenantID string) (uuid.UUID, error)
 
 	// Large delta threshold from sys.parameter
 	GetLargeDeltaThreshold(ctx context.Context, tenantID string) (decimal.Decimal, error)
@@ -385,13 +387,80 @@ func (r *sqlRepo) GetCumulativeDelta(ctx context.Context, instrumenID uuid.UUID,
 	return d, nil
 }
 
-func (r *sqlRepo) GetDeltaSummary(_ context.Context, _ *uuid.UUID, year, month int, _ string) (*DeltaSummary, error) {
-	// Placeholder — real implementation aggregates ecl.poci_delta_log by MTD/YTD.
-	// Stubbed for compilation; full implementation in integration sprint.
-	return &DeltaSummary{
-		Year:  year,
-		Month: month,
-	}, nil
+func (r *sqlRepo) GetDeltaSummary(ctx context.Context, portofolioID *uuid.UUID, year, month int, tenantID string) (*DeltaSummary, error) {
+	// MTD window: first day of year/month to last day of year/month.
+	// YTD window: 1 Jan to last day of year/month.
+	mtdStart := fmt.Sprintf("%04d-%02d-01", year, month)
+	// Last day of month: first day of next month minus 1 day handled via SQL DATE arithmetic.
+	ytdStart := fmt.Sprintf("%04d-01-01", year)
+
+	const q = `
+		SELECT
+			COUNT(DISTINCT instrumen_id)                                                         AS instr_count,
+			COALESCE(SUM(CASE WHEN tanggal_compute >= $3::date AND tanggal_compute <= (DATE_TRUNC('month', $3::date + INTERVAL '1 month') - INTERVAL '1 day')
+			                  THEN delta_ecl ELSE 0 END), 0)                                     AS delta_mtd,
+			COALESCE(SUM(CASE WHEN tanggal_compute >= $4::date AND tanggal_compute <= (DATE_TRUNC('month', $3::date + INTERVAL '1 month') - INTERVAL '1 day')
+			                  THEN delta_ecl ELSE 0 END), 0)                                     AS delta_ytd,
+			COALESCE(SUM(delta_ecl), 0)                                                          AS delta_net,
+			COUNT(CASE WHEN direction = 'INCREASE' THEN 1 END)                                   AS inc_count,
+			COALESCE(SUM(CASE WHEN direction = 'INCREASE' THEN ABS(delta_ecl) ELSE 0 END), 0)   AS inc_amount,
+			COUNT(CASE WHEN direction = 'DECREASE' THEN 1 END)                                   AS dec_count,
+			COALESCE(SUM(CASE WHEN direction = 'DECREASE' THEN ABS(delta_ecl) ELSE 0 END), 0)   AS dec_amount,
+			COUNT(CASE WHEN direction = 'ZERO' THEN 1 END)                                       AS zero_count
+		FROM ecl.poci_delta_log
+		WHERE tenant_id = $1
+		  AND status = 'POSTED'
+		  AND deleted_at IS NULL
+		  AND ($2::uuid IS NULL OR instrumen_id IN (
+		        SELECT id FROM mst.instrumen WHERE portofolio_id = $2 AND tenant_id = $1 AND deleted_at IS NULL
+		      ))`
+
+	var (
+		instrCount                         int
+		deltaMtdStr, deltaYtdStr, deltaNet string
+		incCount, decCount, zeroCount      int
+		incAmount, decAmount               string
+	)
+	portoStr := (*string)(nil)
+	if portofolioID != nil {
+		s := portofolioID.String()
+		portoStr = &s
+	}
+
+	row := r.db.QueryRowContext(ctx, q, tenantID, portoStr, mtdStart, ytdStart)
+	if err := row.Scan(
+		&instrCount,
+		&deltaMtdStr, &deltaYtdStr, &deltaNet,
+		&incCount, &incAmount,
+		&decCount, &decAmount,
+		&zeroCount,
+	); err != nil {
+		return nil, fmt.Errorf("GetDeltaSummary: %w", err)
+	}
+
+	parseDec := func(s string) string {
+		d, _ := decimal.NewFromString(s)
+		return d.StringFixed(4)
+	}
+
+	summary := &DeltaSummary{
+		Year:                year,
+		Month:               month,
+		InstrumenCount:      instrCount,
+		DeltaEclMtdIdr:     parseDec(deltaMtdStr),
+		DeltaEclYtdIdr:     parseDec(deltaYtdStr),
+		NetCumulativeDeltaIdr: parseDec(deltaNet),
+		DirectionBreakdown: DeltaDirectionBreakdown{
+			Increase: DeltaDirectionEntry{Count: incCount, AmountIdr: parseDec(incAmount)},
+			Decrease: DeltaDirectionEntry{Count: decCount, AmountIdr: parseDec(decAmount)},
+			Zero:     DeltaZeroEntry{Count: zeroCount},
+		},
+	}
+	if portofolioID != nil {
+		s := portofolioID.String()
+		summary.PortofolioID = &s
+	}
+	return summary, nil
 }
 
 func (r *sqlRepo) GetInstrumenPociInfo(ctx context.Context, instrumenID uuid.UUID, tenantID string) (*InstrumenPociInfo, error) {
@@ -457,6 +526,20 @@ func (r *sqlRepo) GetCalcRunStatus(ctx context.Context, calcRunID uuid.UUID, ten
 		return "", fmt.Errorf("GetCalcRunStatus: %w", err)
 	}
 	return status, nil
+}
+
+func (r *sqlRepo) GetPeriodeBulananIDForCalcRun(ctx context.Context, calcRunID uuid.UUID, tenantID string) (uuid.UUID, error) {
+	const q = `
+		SELECT periode_bulanan_id FROM ecl.ecl_calc_run
+		WHERE id = $1 AND tenant_id = $2 LIMIT 1`
+	var id uuid.UUID
+	if err := r.db.QueryRowContext(ctx, q, calcRunID, tenantID).Scan(&id); err != nil {
+		if err == sql.ErrNoRows {
+			return uuid.Nil, fmt.Errorf("GetPeriodeBulananIDForCalcRun: calc_run %s not found", calcRunID)
+		}
+		return uuid.Nil, fmt.Errorf("GetPeriodeBulananIDForCalcRun: %w", err)
+	}
+	return id, nil
 }
 
 func (r *sqlRepo) GetCurrentECLForPociInstrumen(ctx context.Context, calcRunID, instrumenID uuid.UUID, tenantID string) (decimal.Decimal, error) {

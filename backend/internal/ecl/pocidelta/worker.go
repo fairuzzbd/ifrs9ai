@@ -33,11 +33,12 @@ type ComputeDeltaPayload struct {
 }
 
 // NewComputeDeltaTask creates an Asynq task for delta batch computation.
-func NewComputeDeltaTask(calcRunID, actorID, tenantID, jobID uuid.UUID) (*asynq.Task, error) {
+// M1 fix: tenantID is a plain string ("TUGURE") per DEC-023; actorID and jobID are UUIDs.
+func NewComputeDeltaTask(calcRunID uuid.UUID, actorID uuid.UUID, tenantID string, jobID uuid.UUID) (*asynq.Task, error) {
 	p, err := json.Marshal(ComputeDeltaPayload{
 		CalcRunID: calcRunID.String(),
 		ActorID:   actorID.String(),
-		TenantID:  tenantID.String(),
+		TenantID:  tenantID,
 		JobID:     jobID.String(),
 	})
 	if err != nil {

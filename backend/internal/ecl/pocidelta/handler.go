@@ -265,14 +265,12 @@ func (h *HTTPHandler) ComputeDeltaBatch(c *gin.Context) {
 		return
 	}
 
-	actorID, _ := actorAndTenant(c)
+	actorID, tenantID := actorAndTenant(c)
 	jobID := uuid.New()
 
-	// tenantUUID: single-tenant Phase 1 (TUGURE).
-	// Wire from config / JWT in Phase 2 multi-tenant.
-	tenantUUID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
-
-	task, err := NewComputeDeltaTask(req.CalcRunID, actorID, tenantUUID, jobID)
+	// M1 fix: use tenantID from JWT claims (actorAndTenant), not a hardcoded UUID.
+	// DEC-023: single-tenant Phase 1 — tenantID string is "TUGURE" from JWT.
+	task, err := NewComputeDeltaTask(req.CalcRunID, actorID, tenantID, jobID)
 	if err != nil {
 		response.Error(c, err)
 		return

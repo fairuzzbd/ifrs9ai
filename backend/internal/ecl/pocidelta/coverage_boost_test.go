@@ -517,7 +517,7 @@ func TestWorkerProgressHelpers_EmptyJobID(t *testing.T) {
 func TestNewComputeDeltaTask_FullPayloadRoundtrip(t *testing.T) {
 	calcRunID := uuid.New()
 	actorID := uuid.New()
-	tenantID := uuid.New()
+	tenantID := "TUGURE" // M1 fix: tenantID is string, not uuid.UUID
 	jobID := uuid.New()
 
 	task, err := NewComputeDeltaTask(calcRunID, actorID, tenantID, jobID)
@@ -668,4 +668,138 @@ type stubRepoInsertBaselineErr struct {
 
 func (r *stubRepoInsertBaselineErr) InsertBaseline(_ context.Context, _ *sql.Tx, _ *Baseline) error {
 	return errors.New("constraint violation")
+}
+
+// ─── db_adapter.go — NewSQLDBAdapter + BeginTxContext (B1, 0% → covered) ─────
+
+func TestSQLDBAdapter_NewAndBeginTx(t *testing.T) {
+	// Use sqlmock to get a *sql.DB (driver-level; BeginTx on sqlmock db works fine).
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock open: %v", err)
+	}
+	defer db.Close()
+
+	adapter := NewSQLDBAdapter(db)
+	if adapter == nil {
+		t.Fatal("expected non-nil adapter")
+	}
+
+	// BeginTxContext — happy path
+	mock.ExpectBegin()
+	tx, err := adapter.BeginTxContext(context.Background())
+	if err != nil {
+		t.Fatalf("BeginTxContext: %v", err)
+	}
+	if tx == nil {
+		t.Fatal("expected non-nil tx")
+	}
+	mock.ExpectCommit()
+	_ = tx.Commit()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestSQLDBAdapter_NilDB_ReturnsNil(t *testing.T) {
+	adapter := NewSQLDBAdapter(nil)
+	if adapter != nil {
+		t.Fatal("expected nil adapter for nil db")
+	}
+}
+
+// ─── NewJurnalPosterStub nil-logger branch (66.7% → 100%) ────────────────────
+
+func TestNewJurnalPosterStub_NilLogger_Defaults(t *testing.T) {
+	stub := NewJurnalPosterStub(nil)
+	if stub == nil {
+		t.Fatal("expected non-nil stub")
+	}
+	if stub.logger == nil {
+		t.Fatal("expected logger defaulted to slog.Default()")
+	}
+}
+
+// ─── NewNoopJurnalPoster nil-logger branch (75% → 100%) ──────────────────────
+
+func TestNewNoopJurnalPoster_NilLogger_Defaults(t *testing.T) {
+	noop := NewNoopJurnalPoster(nil)
+	if noop == nil {
+		t.Fatal("expected non-nil noop")
+	}
+	if noop.logger == nil {
+		t.Fatal("expected logger defaulted to slog.Default()")
+	}
+}
+
+// ─── postJurnalForDelta — direction mismatch (0% → partial covered) ──────────
+
+// TestPostJurnalForDelta_DirectionMismatch triggers ValidateJurnalDirection error path.
+// Delta > 0 but direction = DECREASE → mismatch.
+func TestPostJurnalForDelta_DirectionMismatch(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	tx, _ := db.Begin()
+	defer func() { _ = tx.Rollback() }()
+
+	repo := &stubRepo{}
+	svc := makeService(repo)
+
+	dl := &DeltaLog{
+		ID:             uuid.New(),
+		CalcRunID:      uuid.New(),
+		InstrumenID:    uuid.New(),
+		TanggalCompute: time.Now(),
+		BaselineECL:    decimal.NewFromFloat(1000000),
+		CurrentECL:     decimal.NewFromFloat(1200000),
+		// delta > 0 but direction says DECREASE → mismatch
+		DeltaECL:  decimal.NewFromFloat(200000),
+		Direction: DirectionDecrease,
+	}
+
+	postErr := svc.postJurnalForDelta(context.Background(), tx, dl, uuid.New(), "TUGURE")
+	if postErr == nil {
+		t.Fatal("expected direction mismatch error")
+	}
+}
+
+// TestPostJurnalForDelta_HappyPath exercises the non-mismatch flow via noop poster.
+// Delta > 0 with direction INCREASE → poster is called → UpdateDeltaLogStatus called.
+func TestPostJurnalForDelta_HappyPath(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	tx, _ := db.Begin()
+	defer func() { _ = tx.Rollback() }()
+
+	// Stub repo that succeeds UpdateDeltaLogStatus
+	repo := &stubRepo{}
+	svc := makeService(repo)
+
+	dl := &DeltaLog{
+		ID:             uuid.New(),
+		CalcRunID:      uuid.New(),
+		InstrumenID:    uuid.New(),
+		TanggalCompute: time.Now(),
+		BaselineECL:    decimal.NewFromFloat(1000000),
+		CurrentECL:     decimal.NewFromFloat(1200000),
+		DeltaECL:       decimal.NewFromFloat(200000),
+		Direction:      DirectionIncrease,
+	}
+
+	// The noop poster succeeds; repo.UpdateDeltaLogStatus is a noop stub.
+	postErr := svc.postJurnalForDelta(context.Background(), tx, dl, uuid.New(), "TUGURE")
+	if postErr != nil {
+		t.Fatalf("unexpected error: %v", postErr)
+	}
 }

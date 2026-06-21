@@ -33,15 +33,24 @@ import (
 // systemActorID is the UUID for the cron / system service account in audit logs.
 var systemActorID = uuid.MustParse("00000000-0000-0000-0000-000000000001")
 
+// DBTxBeginner is the interface satisfied by *sql.DB (via a thin adapter)
+// or any test double. Service uses it to open transactions without holding
+// *sql.DB directly (avoids import cycle and enables unit-test substitution).
+type DBTxBeginner interface {
+	BeginTxContext(ctx context.Context) (*sql.Tx, error)
+}
+
 // Service owns POCI delta ECL business logic.
 type Service struct {
 	repo    Repository
 	poster  JurnalPoster
 	audit   *audit.Writer
 	logger  *slog.Logger
+	txBegin func(ctx context.Context) (*sql.Tx, error)
 }
 
-// NewService creates a new pocidelta Service.
+// NewService creates a new pocidelta Service without a real DB transaction beginner.
+// txBegin will return an error — use NewServiceWithDB in production.
 func NewService(
 	repo Repository,
 	poster JurnalPoster,
@@ -54,12 +63,33 @@ func NewService(
 	if poster == nil {
 		poster = NewNoopJurnalPoster(logger)
 	}
-	return &Service{
+	svc := &Service{
 		repo:   repo,
 		poster: poster,
 		audit:  auditWriter,
 		logger: logger,
 	}
+	// Default stub — returns explicit error; replaced by NewServiceWithDB in production.
+	svc.txBegin = func(_ context.Context) (*sql.Tx, error) {
+		return nil, fmt.Errorf("txBegin: DBProvider not wired — inject via NewServiceWithDB in main.go (P5-M10)")
+	}
+	return svc
+}
+
+// NewServiceWithDB creates a production-ready Service wired with a real DBTxBeginner.
+// Call this from main.go instead of NewService when a real *sql.DB is available.
+func NewServiceWithDB(
+	repo Repository,
+	db DBTxBeginner,
+	poster JurnalPoster,
+	auditWriter *audit.Writer,
+	logger *slog.Logger,
+) *Service {
+	svc := NewService(repo, poster, auditWriter, logger)
+	if db != nil {
+		svc.txBegin = db.BeginTxContext
+	}
+	return svc
 }
 
 // ─── CaptureBaseline ──────────────────────────────────────────────────────────
@@ -248,6 +278,16 @@ func (s *Service) processOnePociInstrumen(
 	// Load cumulative prior delta
 	priorCumulative, _ := s.repo.GetCumulativeDelta(ctx, inst.ID, time.Now().UTC(), tenantID)
 
+	// B2: Fetch periode_bulanan_id from the calc run, then validate it is not locked.
+	periodeBulananID, err := s.repo.GetPeriodeBulananIDForCalcRun(ctx, calcRunID, tenantID)
+	if err != nil {
+		return &CalcRunError{InstrumenID: inst.ID, ErrorCode: "INTERNAL", ErrorDetail: err.Error()}
+	}
+	periodeStatus, err := s.repo.GetPeriodeStatus(ctx, periodeBulananID, tenantID)
+	if err != nil {
+		return &CalcRunError{InstrumenID: inst.ID, ErrorCode: "INTERNAL", ErrorDetail: err.Error()}
+	}
+
 	// Build DeltaLog row
 	now := time.Now().UTC()
 	today := now.Truncate(24 * time.Hour)
@@ -266,6 +306,7 @@ func (s *Service) processOnePociInstrumen(
 		DeltaECL:            delta,
 		Direction:           dir,
 		PriorDeltaCumulative: &priorCumulative,
+		PeriodeBulananID:    &periodeBulananID,
 		Status:              status,
 		CreatedAt:           now,
 		CreatedBy:           actor,
@@ -273,6 +314,39 @@ func (s *Service) processOnePociInstrumen(
 		UpdatedBy:           actor,
 		RowVersion:          1,
 		TenantID:            tenantID,
+	}
+
+	// B2: Validate periode is not locked before posting jurnal.
+	if periodeErr := ValidatePeriodeLocked(periodeStatus); periodeErr != nil {
+		// Periode is closed — record delta but skip jurnal post.
+		dl.Status = StatusBlockedPeriodeClosed
+		// Open tx to persist the delta log record for audit trail.
+		tx, txErr := s.txBegin(ctx)
+		if txErr != nil {
+			return &CalcRunError{InstrumenID: inst.ID, ErrorCode: "INTERNAL", ErrorDetail: txErr.Error()}
+		}
+		defer func() { _ = tx.Rollback() }()
+		if insertErr := s.repo.InsertDeltaLog(ctx, tx, dl); insertErr != nil {
+			return &CalcRunError{InstrumenID: inst.ID, ErrorCode: "INTERNAL", ErrorDetail: insertErr.Error()}
+		}
+		s.writeAuditInTx(ctx, tx, audit.Event{
+			Action:     "POCI.DELTA_BLOCKED_PERIODE_CLOSED",
+			EntityType: "ecl.poci_delta_log",
+			EntityID:   dl.ID,
+			After: map[string]interface{}{
+				"calc_run_id":        calcRunID,
+				"instrumen_id":       inst.ID,
+				"delta_ecl":          dl.DeltaECL.StringFixed(4),
+				"periode_bulanan_id": periodeBulananID,
+				"periode_status":     periodeStatus,
+			},
+		})
+		_ = tx.Commit()
+		return &CalcRunError{
+			InstrumenID: inst.ID,
+			ErrorCode:   "POCI_PERIODE_LOCKED",
+			ErrorDetail: periodeErr.Error(),
+		}
 	}
 
 	// Open transaction for atomic insert + audit + jurnal
@@ -292,12 +366,13 @@ func (s *Service) processOnePociInstrumen(
 		EntityType: "ecl.poci_delta_log",
 		EntityID:   dl.ID,
 		After: map[string]interface{}{
-			"calc_run_id":  calcRunID,
-			"instrumen_id": inst.ID,
-			"baseline_ecl": dl.BaselineECL.StringFixed(4),
-			"current_ecl":  dl.CurrentECL.StringFixed(4),
-			"delta_ecl":    dl.DeltaECL.StringFixed(4),
-			"direction":    string(dir),
+			"calc_run_id":        calcRunID,
+			"instrumen_id":       inst.ID,
+			"baseline_ecl":       dl.BaselineECL.StringFixed(4),
+			"current_ecl":        dl.CurrentECL.StringFixed(4),
+			"delta_ecl":          dl.DeltaECL.StringFixed(4),
+			"direction":          string(dir),
+			"periode_bulanan_id": periodeBulananID,
 		},
 	})
 
@@ -469,12 +544,3 @@ func (s *Service) writeAuditInTx(ctx context.Context, tx *sql.Tx, evt audit.Even
 	}
 }
 
-// txBegin opens a new DB transaction via the repo's underlying DB.
-// TODO(P5-M10): wire DBProvider interface so Service can open transactions
-// without holding *sql.DB directly. For now, integration tests use
-// a concrete sqlxRepo that exposes BeginTx via the DB field.
-func (s *Service) txBegin(ctx context.Context) (*sql.Tx, error) {
-	// This stub returns error in unit tests; integration tests provide real DB.
-	// The caller (processOnePociInstrumen) handles this gracefully via per-instrument error.
-	return nil, fmt.Errorf("txBegin: DBProvider not wired — inject via NewServiceWithDB in main.go (TODO P5-M10)")
-}

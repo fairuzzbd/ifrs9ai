@@ -13,7 +13,7 @@ import (
 )
 
 func TestNewComputeDeltaTask_ValidPayload(t *testing.T) {
-	task, err := NewComputeDeltaTask(uuid.New(), uuid.New(), uuid.New(), uuid.New())
+	task, err := NewComputeDeltaTask(uuid.New(), uuid.New(), "TUGURE", uuid.New())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

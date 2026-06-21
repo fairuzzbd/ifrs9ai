@@ -19,15 +19,16 @@ import (
 // ─── Stub repo ───────────────────────────────────────────────────────────────
 
 type stubRepo struct {
-	baseline        *Baseline
-	deltaLog        *DeltaLog
-	instrumenInfo   *InstrumenPociInfo
-	pociList        []InstrumenPociInfo
-	periodeStatus   string
-	calcRunStatus   string
-	currentECL      decimal.Decimal
-	threshold       decimal.Decimal
-	cumulativeDelta decimal.Decimal
+	baseline            *Baseline
+	deltaLog            *DeltaLog
+	instrumenInfo       *InstrumenPociInfo
+	pociList            []InstrumenPociInfo
+	periodeStatus       string
+	calcRunStatus       string
+	currentECL          decimal.Decimal
+	threshold           decimal.Decimal
+	cumulativeDelta     decimal.Decimal
+	periodeBulananID    uuid.UUID // B2: periode_bulanan_id returned by GetPeriodeBulananIDForCalcRun
 }
 
 func (r *stubRepo) InsertBaseline(_ context.Context, _ *sql.Tx, b *Baseline) error { return nil }
@@ -70,6 +71,9 @@ func (r *stubRepo) ListPociInstrumenByCalcRun(_ context.Context, _ uuid.UUID, _ 
 }
 func (r *stubRepo) GetPeriodeStatus(_ context.Context, _ uuid.UUID, _ string) (string, error) {
 	return r.periodeStatus, nil
+}
+func (r *stubRepo) GetPeriodeBulananIDForCalcRun(_ context.Context, _ uuid.UUID, _ string) (uuid.UUID, error) {
+	return r.periodeBulananID, nil
 }
 func (r *stubRepo) GetCalcRunStatus(_ context.Context, _ uuid.UUID, _ string) (string, error) {
 	return r.calcRunStatus, nil
