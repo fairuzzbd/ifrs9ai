@@ -185,6 +185,22 @@ const ERROR_MESSAGE_MAP: Record<string, string> = {
   POCI_JURNAL_DIRECTION_MISMATCH:
     "Inkonsistensi data: sign delta_ecl tidak sesuai direction enum. Posting dibatalkan — alert dikirim ke ROLE-IT-ADMIN dan ROLE-RISK untuk investigasi.",
 
+  // --- Bulk Upload (P5-M11) ---
+  BULK_FILE_TOO_LARGE:
+    "Ukuran file melebihi batas 50MB. Kompres atau pisah file lalu upload ulang.",
+  BULK_MIME_INVALID:
+    "Tipe file tidak valid. Hanya XLSX (format Office Open XML) yang diterima. Pastikan file bukan CSV atau XLS lama.",
+  BULK_DRY_RUN_EXPIRED:
+    "Sesi DRY_RUN sudah expired (1 jam). Jalankan ulang DRY_RUN sebelum commit.",
+  BULK_DRY_RUN_FAILED:
+    "COMMIT tidak dapat diproses karena DRY_RUN masih FAILED. Perbaiki baris yang bermasalah dan upload ulang file.",
+  BULK_PERIODE_LOCKED:
+    "Periode buku sudah CLOSED. Bulk upload / commit tidak dapat diproses. Hubungi Finance Controller.",
+  BULK_ROLLBACK_GRACE_EXPIRED:
+    "Grace window rollback (default 7 hari) sudah berakhir. Rollback tidak dapat dilakukan. Eskalasi ke ROLE-IT-ADMIN.",
+  BULK_APPROVE_SOD_VIOLATION:
+    "SoD: Maker tidak dapat menjadi approver untuk batch yang sama (DEC-017). Gunakan akun ROLE-APPR-TR yang berbeda.",
+
   // --- GL Delivery (P5-M3) ---
   GL_DELIVERY_JURNAL_NOT_FOUND:
     "Jurnal header tidak ditemukan.",
