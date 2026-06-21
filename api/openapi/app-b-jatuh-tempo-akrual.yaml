@@ -1,0 +1,485 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-B Jatuh Tempo + Pendapatan Akrual (P5-M9)
+  version: "1.0.0"
+  description: |
+    Modul APP-B — Jatuh Tempo + Pendapatan Akrual Harian (Phase 5, Module 9).
+
+    Cakupan:
+      - Akrual EIR harian per instrumen per stage via Asynq cron 09:15 WIB (S2)
+      - Jatuh tempo settlement + derecognition via Asynq cron 09:00 WIB (S1)
+      - Amortisasi premium/diskon via Asynq cron 10:00 WIB (S4)
+      - Dividen/distribusi reksadana 4-eyes maker→approver (S3)
+      - List akrual sort/filter/export + staging stale alert (S5)
+      - Dashboard MTD/YTD per instrumen/portofolio (S5-AC2)
+
+    State machine trx.pendapatan_akrual.status:
+      AUTO_POSTED         — cron sukses, jurnal terposting
+      PENDING_STALE_REVIEW — Stage 3 tanpa sealed ECL run (> AKRUAL_STAGING_STALE_DAYS)
+      OVERRIDE_APPROVED   — ROLE-AKUN-CTL confirm staging valid → POSTED
+      POSTED              — final
+      SKIPPED             — FVTPL, FVOCI_ELECTION dividen ke OCI, holiday
+
+    State machine trx.jatuh_tempo.status:
+      PENDING → SETTLED (maturity settlement sukses)
+      PENDING → FAILED  (error → DLQ)
+
+    Cron schedule:
+      09:00 WIB — MATURITY_PROCESS_JOB (skip holiday, per tanggal_jatuh_tempo = today)
+      09:15 WIB — DAILY_ACCRUAL_JOB    (skip holiday, all ACTIVE non-FVTPL)
+      10:00 WIB — AMORTISASI_PD_JOB   (skip holiday, AC/FVOCI only)
+
+    Stage 3 akrual: (Gross − ECL_sealed) × EIR/365 per PSAK 71 §5.4.1(b).
+    POCI: credit-adjusted EIR dari ecl.amortisasi_schedule versi POCI.
+    Multi-currency: FCY × FX_rate APPROVED(tanggal_akrual).
+    Idempotency: unique(instrumen_id, tanggal_akrual, jenis) per row.
+
+    AC coverage: S1-AC1..4, S2-AC1..4, S3-AC1..4, S4-AC1..4, S5-AC1..4 (20 AC total).
+
+servers:
+  - url: /api/v1
+    description: BLIPS IFRS9 REST API
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # GET /transaksi/akrual — List pendapatan akrual dengan sort/filter/export
+  # ─────────────────────────────────────────────────────────────────────────────
+  /transaksi/akrual:
+    get:
+      operationId: listAkrual
+      summary: List pendapatan akrual harian
+      description: |
+        List trx.pendapatan_akrual dengan sort, filter, paging cursor, export.
+        Permission: akrual.read.
+        Includes stale_staging_flag per row (S5-AC3).
+        Filter has_stale_flag=true mengembalikan hanya instrumen staging stale.
+      tags: [Akrual]
+      parameters:
+        - $ref: "_common.yaml#/components/parameters/cursor"
+        - $ref: "_common.yaml#/components/parameters/limit"
+        - name: sort
+          in: query
+          schema: { type: string, example: "akrual_idr:desc,tanggal_akrual:desc" }
+          description: "Multi-column sort. Max 3. Allowed: tanggal_akrual, akrual_idr, instrumen_id, stage, status, created_at"
+        - name: filter[instrumen_id]
+          in: query
+          schema: { type: string, format: uuid }
+        - name: filter[tanggal_akrual]
+          in: query
+          schema: { type: string, example: "2026-06-20" }
+          description: "Exact date, or range: between:2026-06-01,2026-06-30"
+        - name: filter[stage]
+          in: query
+          schema: { type: integer, enum: [1, 2, 3] }
+        - name: filter[status]
+          in: query
+          schema:
+            type: string
+            enum: [AUTO_POSTED, PENDING_STALE_REVIEW, OVERRIDE_APPROVED, POSTED, SKIPPED]
+        - name: filter[jenis]
+          in: query
+          schema:
+            type: string
+            enum: [BUNGA, DIVIDEN, AMORTISASI_PREMIUM, AMORTISASI_DISKON, DISTRIBUSI_REKSADANA]
+        - name: has_stale_flag
+          in: query
+          schema: { type: boolean }
+          description: "true = hanya instrumen dengan stale_staging_flag=TRUE"
+        - name: periode_bulanan_id
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: List akrual berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/AkrualListItem" }
+                  pagination: { $ref: "_common.yaml#/components/schemas/CursorPagination" }
+                  staleCount:
+                    type: integer
+                    description: Jumlah instrumen dengan stale_staging_flag=TRUE di halaman ini
+                  meta: { $ref: "_common.yaml#/components/schemas/Meta" }
+        "401": { $ref: "_common.yaml#/components/responses/Unauthorized" }
+        "403": { $ref: "_common.yaml#/components/responses/Forbidden" }
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # GET /transaksi/akrual/dashboard — MTD/YTD summary
+  # ─────────────────────────────────────────────────────────────────────────────
+  /transaksi/akrual/dashboard:
+    get:
+      operationId: getAkrualDashboard
+      summary: MTD/YTD summary akrual per instrumen atau portofolio
+      description: |
+        Aggregate akrual bulan-berjalan (MTD) dan tahun-berjalan (YTD).
+        Filter by instrumen_id XOR portofolio_id.
+        Permission: akrual.read.
+      tags: [Akrual]
+      parameters:
+        - name: instrumen_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: portofolio_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: year
+          in: query
+          required: true
+          schema: { type: integer, example: 2026 }
+        - name: month
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1, maximum: 12 }
+      responses:
+        "200":
+          description: Dashboard akrual
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/AkrualDashboard" }
+                  meta: { $ref: "_common.yaml#/components/schemas/Meta" }
+        "401": { $ref: "_common.yaml#/components/responses/Unauthorized" }
+        "403": { $ref: "_common.yaml#/components/responses/Forbidden" }
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # GET /transaksi/akrual/{id} — Detail single akrual
+  # ─────────────────────────────────────────────────────────────────────────────
+  /transaksi/akrual/{id}:
+    get:
+      operationId: getAkrualByID
+      summary: Detail pendapatan akrual
+      tags: [Akrual]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Detail akrual
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/AkrualDetail" }
+                  meta: { $ref: "_common.yaml#/components/schemas/Meta" }
+        "401": { $ref: "_common.yaml#/components/responses/Unauthorized" }
+        "403": { $ref: "_common.yaml#/components/responses/Forbidden" }
+        "404": { $ref: "_common.yaml#/components/responses/NotFound" }
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # POST /transaksi/akrual/{id}/override-stale — ROLE-AKUN-CTL confirm stale
+  # ─────────────────────────────────────────────────────────────────────────────
+  /transaksi/akrual/{id}/override-stale:
+    post:
+      operationId: overrideStaleAkrual
+      summary: Override/konfirmasi akrual staging stale (ROLE-AKUN-CTL)
+      description: |
+        ROLE-AKUN-CTL mereview instrumen dengan PENDING_STALE_REVIEW dan memutuskan staging masih valid.
+        Recompute akrual dengan data ECL terkini, insert row baru OVERRIDE_APPROVED → POSTED.
+        reason wajib ≥ 30 karakter (SoW §9.3).
+        Idempotency-Key wajib.
+        Permission: akrual.override_stale (ROLE-AKUN-CTL).
+      tags: [Akrual]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason, signatureMethod]
+              properties:
+                reason:
+                  type: string
+                  minLength: 30
+                  description: Alasan konfirmasi staging masih valid (≥ 30 char)
+                  example: "Tidak ada perubahan material sejak ECL run terakhir. Staging Stage 2 dikonfirmasi valid per judgement CFO 2026-06-20."
+                signatureMethod:
+                  type: string
+                  enum: [JWT_STEP_UP]
+      responses:
+        "200":
+          description: Override sukses, akrual di-repost
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      akrualId: { type: string, format: uuid }
+                      status: { type: string, enum: [POSTED] }
+                      akrualIdr: { type: string, description: "Recomputed akrual IDR NUMERIC(20,4)" }
+                      jurnalEntryId: { type: string, format: uuid }
+                  meta: { $ref: "_common.yaml#/components/schemas/Meta" }
+        "400": { $ref: "_common.yaml#/components/responses/ValidationFailed" }
+        "401": { $ref: "_common.yaml#/components/responses/Unauthorized" }
+        "403": { $ref: "_common.yaml#/components/responses/Forbidden" }
+        "404": { $ref: "_common.yaml#/components/responses/NotFound" }
+        "422":
+          description: "AKRUAL_STAGING_STALE or WORKFLOW_INVALID_TRANSITION"
+          content:
+            application/json:
+              schema: { $ref: "_common.yaml#/components/schemas/ErrorEnvelope" }
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # GET /transaksi/jatuh-tempo — List maturity events
+  # ─────────────────────────────────────────────────────────────────────────────
+  /transaksi/jatuh-tempo:
+    get:
+      operationId: listJatuhTempo
+      summary: List jatuh tempo maturity events
+      description: |
+        List trx.jatuh_tempo dengan sort/filter/paging. Permission: maturity.read.
+      tags: [JatuhTempo]
+      parameters:
+        - $ref: "_common.yaml#/components/parameters/cursor"
+        - $ref: "_common.yaml#/components/parameters/limit"
+        - name: sort
+          in: query
+          schema: { type: string, example: "tanggal_jatuh_tempo:desc" }
+        - name: filter[instrumen_id]
+          in: query
+          schema: { type: string, format: uuid }
+        - name: filter[status]
+          in: query
+          schema: { type: string, enum: [PENDING, SETTLED, FAILED, SKIPPED] }
+        - name: filter[jenis]
+          in: query
+          schema: { type: string, enum: [DEPOSITO, BOND, REKSADANA] }
+        - name: filter[tanggal_jatuh_tempo]
+          in: query
+          schema: { type: string, example: "between:2026-06-01,2026-06-30" }
+      responses:
+        "200":
+          description: List jatuh tempo
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/JatuhTempoListItem" }
+                  pagination: { $ref: "_common.yaml#/components/schemas/CursorPagination" }
+                  meta: { $ref: "_common.yaml#/components/schemas/Meta" }
+        "401": { $ref: "_common.yaml#/components/responses/Unauthorized" }
+        "403": { $ref: "_common.yaml#/components/responses/Forbidden" }
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # POST /transaksi/jatuh-tempo/cron-trigger — Manual trigger (ROLE-IT-ADMIN)
+  # ─────────────────────────────────────────────────────────────────────────────
+  /transaksi/jatuh-tempo/cron-trigger:
+    post:
+      operationId: triggerMaturityCron
+      summary: Manual trigger maturity cron job (ROLE-IT-ADMIN)
+      description: |
+        ROLE-IT-ADMIN memicu MATURITY_PROCESS_JOB secara manual.
+        Returns 202 Accepted + jobId. Long-running per UX rule §3.
+        Idempotency-Key wajib.
+        Permission: sys.cron.trigger (ROLE-IT-ADMIN).
+      tags: [JatuhTempo]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tanggal:
+                  type: string
+                  format: date
+                  description: "Override tanggal proses (default: today). ROLE-IT-ADMIN only."
+                  example: "2026-06-20"
+      responses:
+        "202":
+          description: Job di-queue, proses async
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      jobId: { type: string }
+                      type: { type: string, enum: [MATURITY_PROCESS_JOB] }
+                      statusUrl: { type: string, example: "/api/v1/jobs/job_01HXYZ..." }
+                      streamUrl: { type: string, example: "/api/v1/jobs/job_01HXYZ.../stream" }
+                  meta: { $ref: "_common.yaml#/components/schemas/Meta" }
+        "401": { $ref: "_common.yaml#/components/responses/Unauthorized" }
+        "403": { $ref: "_common.yaml#/components/responses/Forbidden" }
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # POST /transaksi/akrual/cron-trigger — Manual trigger akrual (ROLE-IT-ADMIN)
+  # ─────────────────────────────────────────────────────────────────────────────
+  /transaksi/akrual/cron-trigger:
+    post:
+      operationId: triggerAkrualCron
+      summary: Manual trigger akrual cron job (ROLE-IT-ADMIN)
+      description: |
+        ROLE-IT-ADMIN memicu DAILY_ACCRUAL_JOB dan/atau AMORTISASI_PD_JOB secara manual.
+        Returns 202 Accepted + jobId. Long-running per UX rule §3.
+        Idempotency-Key wajib.
+        Permission: sys.cron.trigger (ROLE-IT-ADMIN).
+      tags: [Akrual]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tanggal:
+                  type: string
+                  format: date
+                  description: "Override tanggal akrual (default: today)."
+                jobTypes:
+                  type: array
+                  items:
+                    type: string
+                    enum: [DAILY_ACCRUAL_JOB, AMORTISASI_PD_JOB]
+                  description: "Subset job types to trigger. Default: both."
+      responses:
+        "202":
+          description: Job di-queue
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      jobId: { type: string }
+                      jobIds:
+                        type: array
+                        items: { type: string }
+                      statusUrl: { type: string }
+                      streamUrl: { type: string }
+                  meta: { $ref: "_common.yaml#/components/schemas/Meta" }
+        "401": { $ref: "_common.yaml#/components/responses/Unauthorized" }
+        "403": { $ref: "_common.yaml#/components/responses/Forbidden" }
+
+components:
+  schemas:
+    # ─── Akrual list item ─────────────────────────────────────────────────────
+    AkrualListItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        instrumenId: { type: string, format: uuid }
+        instrumenKode: { type: string }
+        klasifikasiSnapshot: { type: string }
+        tanggalAkrual: { type: string, format: date }
+        jenis:
+          type: string
+          enum: [BUNGA, DIVIDEN, AMORTISASI_PREMIUM, AMORTISASI_DISKON, DISTRIBUSI_REKSADANA]
+        stage: { type: integer, enum: [1, 2, 3] }
+        carryingBasis:
+          type: string
+          enum: [GROSS, NET_CARRYING]
+          description: "GROSS untuk Stage 1/2; NET_CARRYING untuk Stage 3 per §5.4.1(b)"
+        carryingIdr: { type: string, description: "NUMERIC(20,4)" }
+        eirPersen: { type: string, description: "NUMERIC(10,8)" }
+        bungaKotor: { type: string, description: "IDR NUMERIC(20,4)" }
+        pph: { type: string, description: "IDR NUMERIC(20,4), null jika tidak ada PPh" }
+        bungaBersih: { type: string, description: "IDR NUMERIC(20,4)" }
+        mataUang: { type: string, example: "IDR" }
+        fxRateId: { type: string, format: uuid, nullable: true }
+        staleStagingFlag: { type: boolean, description: "TRUE jika ECL sealed > AKRUAL_STAGING_STALE_DAYS hari lalu" }
+        eclRunIdUsed: { type: string, format: uuid, nullable: true }
+        status:
+          type: string
+          enum: [AUTO_POSTED, PENDING_STALE_REVIEW, OVERRIDE_APPROVED, POSTED, SKIPPED]
+        jurnalHeaderId: { type: string, format: uuid, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    # ─── Akrual detail ────────────────────────────────────────────────────────
+    AkrualDetail:
+      allOf:
+        - $ref: "#/components/schemas/AkrualListItem"
+        - type: object
+          properties:
+            overrideUserId: { type: string, format: uuid, nullable: true }
+            overrideComment: { type: string, nullable: true }
+            periodeBulananId: { type: string, format: uuid, nullable: true }
+            updatedAt: { type: string, format: date-time }
+            rowVersion: { type: integer, format: int64 }
+
+    # ─── Dashboard ────────────────────────────────────────────────────────────
+    AkrualDashboard:
+      type: object
+      properties:
+        instrumenId: { type: string, format: uuid, nullable: true }
+        portofolioId: { type: string, format: uuid, nullable: true }
+        year: { type: integer }
+        month: { type: integer }
+        akrualMtdIdr: { type: string, description: "Σ akrual bulan berjalan NUMERIC(20,4)" }
+        akrualYtdIdr: { type: string, description: "Σ akrual tahun berjalan NUMERIC(20,4)" }
+        stageSaatIni: { type: integer, nullable: true }
+        stagingSource: { type: string, nullable: true, description: "ECL calc run ID yang digunakan" }
+        eclRunSealedAt: { type: string, format: date-time, nullable: true }
+        staleCount: { type: integer, description: "Jumlah instrumen staging stale (portofolio query)" }
+        breakdown:
+          type: array
+          description: "Per jenis (BUNGA, AMORTISASI_*, DIVIDEN)"
+          items:
+            type: object
+            properties:
+              jenis: { type: string }
+              mtdIdr: { type: string }
+              ytdIdr: { type: string }
+
+    # ─── Jatuh tempo list item ────────────────────────────────────────────────
+    JatuhTempoListItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        instrumenId: { type: string, format: uuid }
+        instrumenKode: { type: string }
+        tanggalJatuhTempo: { type: string, format: date }
+        jenis:
+          type: string
+          enum: [DEPOSITO, BOND, REKSADANA]
+        pokokIdr: { type: string, description: "NUMERIC(20,4)" }
+        bungaLastIdr: { type: string, description: "NUMERIC(20,4)" }
+        pphIdr: { type: string, description: "PPh final yang dipotong NUMERIC(20,4)" }
+        netKasIdr: { type: string, description: "Net kas diterima NUMERIC(20,4)" }
+        klasifikasiSnapshot: { type: string }
+        status:
+          type: string
+          enum: [PENDING, SETTLED, FAILED, SKIPPED]
+        errorMessage: { type: string, nullable: true }
+        jurnalHeaderId: { type: string, format: uuid, nullable: true }
+        createdAt: { type: string, format: date-time }

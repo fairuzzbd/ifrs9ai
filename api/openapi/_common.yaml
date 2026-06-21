@@ -370,6 +370,43 @@ components:
         - JURNAL_DLQ_DISCARD_REASON_TOO_SHORT # 422 — discard/reject reason < 30 karakter
         - JURNAL_DLQ_REPLAY_PERIODE_HARD_CLOSED # 423 — replay tidak bisa karena periode masih HARD_CLOSED
         - JURNAL_MAPPING_WORKFLOW_GATE       # 422 — regulated code tanpa 6-eyes path (misconfiguration)
+        # APP-D P5-M4 — Periode Buku Close Workflow
+        - CLOSING_CHECKLIST_FAILED       # 422 — pre-condition closing checklist gagal (≥1 item tidak lolos)
+        - CLOSING_CHECKLIST_STALE        # 422 — checklist > SOFT_CLOSE_CHECKLIST_STALE_HOURS sejak request; re-run dilakukan
+        - PERIODE_SOFT_CLOSED            # 423 — mutasi ditolak karena periode SOFT_CLOSED atau HARD_CLOSE_PENDING
+        - MFA_STEP_UP_REQUIRED           # 401 — hard-close approve atau reopen CLOSED tanpa X-Step-Up-Token
+        - MFA_STEP_UP_EXPIRED            # 401 — X-Step-Up-Token sudah > 5 menit (re-challenge diperlukan)
+        - PERIODE_GRACE_EXPIRED          # 423 — grace window untuk reopen CLOSED berakhir; eskalasi RFC ke Direksi
+        - SOFT_CLOSE_PENDING_EXISTS      # 409 — sudah ada soft-close request pending untuk periode ini
+        # APP-D P5-M5 — FX Rate Management
+        - FX_RATE_LOCKED                 # 423 — mutasi pada kurs dengan locked_flag=TRUE (periode CLOSED)
+        - KURS_DUPLICATE_DATE            # 409 — conflict (kode_mata_uang, tanggal_berlaku) sudah APPROVED/PENDING
+        - KURS_UPLOAD_VALIDATION_FAILED  # 422 — upload XLSX/CSV gagal validasi (format, range, holiday)
+        - KLASIFIKASI_NOT_LOCKED         # 422 — FX treatment query saat klasifikasi PSAK 71 belum final
+        - KURS_PERIODE_MISMATCH          # 422 — tanggal_berlaku tidak dalam periode OPEN manapun
+        # APP-B P5-M7 — Renewal Deposito
+        - RENEWAL_INSTRUMEN_NOT_ELIGIBLE   # 422 — instrumen lama status bukan ACTIVE/MATURING
+        - RENEWAL_SKEMA_INVALID            # 422 — skema bukan POKOK_SAJA atau POKOK_PLUS_BUNGA
+        - RENEWAL_TENOR_OUT_OF_RANGE       # 422 — tenor_bulan < 1 atau > 60
+        - RENEWAL_RATE_OUT_OF_RANGE        # 422 — rate_persen < 0 atau > 30
+        - RENEWAL_BUNGA_BERSIH_TOO_SMALL   # 422 — bunga bersih < 100k IDR (POKOK_PLUS_BUNGA)
+        - RENEWAL_PPH_CALC_MISMATCH        # 422 — preview vs final PPh tidak match
+        # APP-B P5-M8 — Penjualan / Pencairan
+        - PENJUALAN_INSTRUMEN_NOT_ACTIVE              # 422 — instrumen status bukan ACTIVE (sudah DISPOSED/MATURED)
+        - PENJUALAN_QTY_EXCEEDS_HOLDING               # 422 — qty_terjual > qty_holding_pre
+        - PENJUALAN_KLASIFIKASI_NOT_LOCKED            # 422 — klasifikasi PSAK 71 belum final
+        - PENJUALAN_HARGA_INVALID                     # 422 — harga_jual_per_unit < 0 atau invalid
+        - PENJUALAN_PERIODE_LOCKED                    # 423 — tidak bisa POST karena periode CLOSED
+        - PENJUALAN_BM_VIOLATION_BLOCK                # 422 — BM frequency breach hard threshold (10% per 12-month rolling)
+        - PENJUALAN_FVOCI_ELECTION_NO_RECYCLING_WARN  # 200 (warn) — FVOCI Election cumulative OCI tidak di-recycle ke P&L per §B5.7.1
+        # APP-B P5-M9 — Jatuh Tempo + Akrual EIR + Dividen
+        - MATURITY_INSTRUMEN_NOT_ACTIVE  # 422 — instrumen bukan ACTIVE saat maturity processing
+        - AKRUAL_STAGING_STALE           # 422 — ECL sealed run untuk staging lebih tua dari AKRUAL_STAGING_STALE_DAYS → PENDING_STALE_REVIEW
+        - AKRUAL_FX_RATE_MISSING         # 422 — FX rate APPROVED tidak tersedia untuk tanggal_akrual (FCY instrument)
+        - AKRUAL_PERIODE_LOCKED          # 423 — periode_buku bukan OPEN, akrual tidak bisa diposting
+        - AKRUAL_DUPLICATE               # 409 — (instrumen_id, tanggal_akrual, jenis) sudah ada → idempotency guard
+        - AKRUAL_EIR_NOT_FOUND           # 422 — instrumen tidak memiliki amortisasi_schedule aktif atau EIR = 0
+        - DIVIDEN_VALIDATION_FAILED      # 422 — gross_dividen ≤ 0 atau tanggal_terima kosong
         # APP-D P5-M3 — GL Host Delivery
         - GL_DELIVERY_HOST_UNREACHABLE       # 502 — GL Host tidak bisa di-reach (5xx, timeout, network)
         - GL_DELIVERY_INVALID_RESPONSE       # 502 — response GL Host tidak sesuai kontrak
@@ -387,6 +424,13 @@ components:
         - GL_RECONCILIATION_HOST_FETCH_FAILED # 502 — GL Host tidak bisa di-reach saat fetch daily-summary
         - GL_RECONCILIATION_IN_PROGRESS      # 409 — rekonsiliasi untuk tanggal ini sedang berjalan
         - GL_DLQ_REPLAY_INVALID_STATE        # 422 — DLQ entry status bukan FAILED (replay dari ABANDONED, dll)
+        # APP-B P5-M6 — MTM Daily Job + Manual Upload
+        - MTM_PRICE_STALE              # 422 — stale_price_flag=TRUE; harga_age_days > MTM_PRICE_STALE_DAYS OR kurs FCY tidak tersedia; jurnal tidak dapat diposting otomatis
+        - MTM_PRICE_DEVIATION_REJECTED # 422 — informational: digunakan dalam notifikasi uploader saat override-reject baris dengan deviation_flag=TRUE (bukan HTTP error dari reject endpoint yang return 200)
+        - MTM_BATCH_NOT_FOUND          # 404 — upload_batch_id tidak ditemukan di sys.upload_batch scope MTM_UPLOAD
+        - MTM_OVERRIDE_SOD_VIOLATION   # 403 — override_approver_id = uploader_id; SoD violation saat override-approve/reject; details berisi uploader_id untuk tracing; DEC-017
+        - MTM_INSTRUMEN_AC_SKIP        # 422 — instrumen berklasifikasi AC dimasukkan ke upload MTM; tidak ada MTM untuk AC per PSAK 71 amortised cost method
+        - MTM_PERIODE_LOCKED           # 423 — mutasi trx.mtm saat locked_flag=TRUE (periode CLOSED); mirror FX_RATE_LOCKED pattern P5-M5; raised by MtmLockMiddleware + tg_mtm_locked_check trigger
         # APP-B P5-M1 — Penempatan Deposito
         - PENEMPATAN_INSTRUMEN_NOT_FOUND           # 404 — instrumen_id tidak ada atau soft-deleted
         - PENEMPATAN_INSTRUMEN_INVALID_KLASIFIKASI # 422 — klasifikasi instrumen belum APPROVED di mst.instrumen
@@ -401,6 +445,21 @@ components:
         - PENEMPATAN_PERIODE_HARD_CLOSED           # 423 — periode bukan OPEN saat create atau approve
         - PENEMPATAN_TERMINATE_FORBIDDEN_NOT_ACTIVE # 422 — /terminate pada status bukan APPROVED_ACTIVE
         - ERR_CALC_2010                            # 422 — field wajib EIR belum terisi (preview only)
+        # APP-C P5-M10 — POCI Delta ECL
+        - POCI_BASELINE_MISSING              # 422/404 — ecl.poci_baseline tidak ada saat compute delta; per-instrument error log (tidak halt run)
+        - POCI_BASELINE_IMMUTABLE_VIOLATION  # 422 — upaya insert/update kedua ke poci_baseline untuk instrumen yang sudah ada baseline (DEC-018 WORM)
+        - POCI_DELTA_DUPLICATE              # 409 — unique constraint (calc_run_id, instrumen_id) violation di poci_delta_log; idempotency guard saat retry job
+        - POCI_INSTRUMEN_NOT_POCI           # 422 — endpoint POCI-specific dipanggil untuk instrumen dengan is_poci = FALSE
+        - POCI_PERIODE_LOCKED               # 423 — mst.periode_buku.status_periode = 'CLOSED' saat posting jurnal POCI delta; blocking
+        - POCI_JURNAL_DIRECTION_MISMATCH    # 422 — delta_ecl > 0 tapi direction = 'DECREASE' atau sebaliknya; bug guard; reject posting + alert
+        # Bulk Upload Master Instrumen (APP-A, P5-M11)
+        - BULK_FILE_TOO_LARGE           # 413 — file size > 50MB saat upload; server-side check sebelum parse (S1-AC2)
+        - BULK_MIME_INVALID             # 415 — MIME bukan XLSX zip magic bytes; magic-byte check, bukan hanya Content-Type header (S1-AC3)
+        - BULK_DRY_RUN_EXPIRED          # 422 — TTL 1 jam dry_run_expires_at expired saat COMMIT dicoba; re-run DRY_RUN required (S2-AC4)
+        - BULK_DRY_RUN_FAILED           # 422 — COMMIT dicoba saat batch.status = DRY_RUN_FAILED; Stage 1-3 harus pass dulu (S2-AC2)
+        - BULK_PERIODE_LOCKED           # 423 — mst.periode_buku.status_periode = 'CLOSED' saat upload (S1) atau commit (S3)
+        - BULK_ROLLBACK_GRACE_EXPIRED   # 422 — now() > committed_at + BULK_ROLLBACK_GRACE_DAYS; grace window configurable via sys.config_param (S5-AC2)
+        - BULK_APPROVE_SOD_VIOLATION    # 403 — approver_id = batch.created_by (maker); DEC-017 server-side enforce (S4-AC2)
 
     # ---- Timestamps -------------------------------------------------------
     TimestampISO:
