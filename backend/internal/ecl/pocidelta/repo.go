@@ -192,7 +192,7 @@ func (r *sqlRepo) ListBaselines(ctx context.Context, q listquery.Query, tenantID
 	if err != nil {
 		return nil, Pagination{}, fmt.Errorf("ListBaselines: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var baselines []Baseline
 	for rows.Next() {
 		var b Baseline
@@ -310,7 +310,7 @@ func (r *sqlRepo) ListDeltaLogs(ctx context.Context, q listquery.Query, tenantID
 	if err != nil {
 		return nil, Pagination{}, fmt.Errorf("ListDeltaLogs: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var logs []DeltaLog
 	for rows.Next() {
 		d, scanErr := r.scanOneDeltaLogRow(rows)
@@ -353,7 +353,7 @@ func (r *sqlRepo) GetDeltaHistoryByInstrumen(ctx context.Context, instrumenID uu
 	if err != nil {
 		return nil, Pagination{}, fmt.Errorf("GetDeltaHistoryByInstrumen: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var logs []DeltaLog
 	for rows.Next() {
 		d, scanErr := r.scanOneDeltaLogRow(rows)
@@ -422,7 +422,7 @@ func (r *sqlRepo) ListPociInstrumenByCalcRun(ctx context.Context, calcRunID uuid
 	if err != nil {
 		return nil, fmt.Errorf("ListPociInstrumenByCalcRun: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var infos []InstrumenPociInfo
 	for rows.Next() {
 		var info InstrumenPociInfo
