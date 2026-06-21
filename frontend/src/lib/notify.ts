@@ -171,6 +171,20 @@ const ERROR_MESSAGE_MAP: Record<string, string> = {
   DIVIDEN_VALIDATION_FAILED:
     "Input dividen tidak valid. Pastikan gross_dividen_IDR lebih dari 0 dan semua field wajib diisi.",
 
+  // --- POCI Delta ECL (P5-M10) ---
+  POCI_BASELINE_MISSING:
+    "Baseline POCI tidak ditemukan untuk instrumen ini. Pastikan penempatan POCI sudah di-approve dan baseline ter-capture (S1). Instrumen ini dilewati — run dilanjutkan.",
+  POCI_BASELINE_IMMUTABLE_VIOLATION:
+    "Baseline POCI untuk instrumen ini sudah ada dan tidak dapat di-overwrite (WORM per DEC-018). Baseline bersifat immutable sejak origination.",
+  POCI_DELTA_DUPLICATE:
+    "Delta POCI duplikat: kombinasi (calc_run, instrumen) sudah ada (idempotency guard). Tidak ada aksi diperlukan — instrumen lain dilanjutkan.",
+  POCI_INSTRUMEN_NOT_POCI:
+    "Instrumen ini bukan POCI (is_poci = FALSE). Endpoint POCI khusus hanya untuk instrumen dengan flag POCI aktif.",
+  POCI_PERIODE_LOCKED:
+    "Periode buku sudah CLOSED. Delta POCI tidak dapat diposting ke periode ini. Hubungi Finance Controller.",
+  POCI_JURNAL_DIRECTION_MISMATCH:
+    "Inkonsistensi data: sign delta_ecl tidak sesuai direction enum. Posting dibatalkan — alert dikirim ke ROLE-IT-ADMIN dan ROLE-RISK untuk investigasi.",
+
   // --- GL Delivery (P5-M3) ---
   GL_DELIVERY_JURNAL_NOT_FOUND:
     "Jurnal header tidak ditemukan.",
