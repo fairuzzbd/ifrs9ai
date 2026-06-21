@@ -243,6 +243,15 @@ const (
 	CodePeriodeGraceExpired    Code = "PERIODE_GRACE_EXPIRED"     // 423 — grace window expired
 	CodeSoftClosePendingExists Code = "SOFT_CLOSE_PENDING_EXISTS" // 409 — duplicate pending request
 
+	// P5-M11 Bulk Upload Master Instrumen codes (APP-A-BULK-001..007).
+	CodeBulkFileTooLarge          Code = "BULK_FILE_TOO_LARGE"          // 413 — file size > 50MB (S1-AC2)
+	CodeBulkMimeInvalid           Code = "BULK_MIME_INVALID"            // 415 — MIME bukan XLSX zip (S1-AC3)
+	CodeBulkDryRunExpired         Code = "BULK_DRY_RUN_EXPIRED"         // 422 — TTL 1 jam expired saat COMMIT (S2-AC4)
+	CodeBulkDryRunFailed          Code = "BULK_DRY_RUN_FAILED"          // 422 — COMMIT saat DRY_RUN_FAILED (S2-AC2)
+	CodeBulkPeriodeLocked         Code = "BULK_PERIODE_LOCKED"          // 423 — periode CLOSED saat upload/commit (S1,S3)
+	CodeBulkRollbackGraceExpired  Code = "BULK_ROLLBACK_GRACE_EXPIRED"  // 422 — grace window expired (S5-AC2)
+	CodeBulkApproveSoDViolation   Code = "BULK_APPROVE_SOD_VIOLATION"   // 403 — approver = maker (S4-AC2)
+
 	// P5-M2 Jurnal Engine codes (APP-D-JRNL-001..016).
 	// State machine: docs/state-machines/p5-m2-jurnal-engine.md §6.
 	CodeJurnalEventNotMapped             Code = "JURNAL_EVENT_NOT_MAPPED"               // 422 — no APPROVED_ACTIVE mapping for eventCode
@@ -434,6 +443,20 @@ func (c Code) HTTPStatus() int {
 		return 423 // Locked
 	case "KURS_UPLOAD_VALIDATION_FAILED", "KURS_PERIODE_MISMATCH", "KLASIFIKASI_NOT_LOCKED":
 		return http.StatusUnprocessableEntity
+
+	// P5-M11 Bulk Upload codes.
+	case CodeBulkFileTooLarge:
+		return http.StatusRequestEntityTooLarge
+	case CodeBulkMimeInvalid:
+		return http.StatusUnsupportedMediaType
+	case CodeBulkDryRunExpired, CodeBulkDryRunFailed:
+		return http.StatusUnprocessableEntity
+	case CodeBulkPeriodeLocked:
+		return 423 // Locked
+	case CodeBulkRollbackGraceExpired:
+		return http.StatusUnprocessableEntity
+	case CodeBulkApproveSoDViolation:
+		return http.StatusForbidden
 
 	// P5-M2 Jurnal Engine codes.
 	case CodeJurnalInstrumenNotFound, CodeJurnalHeaderNotFound, CodeJurnalDlqNotFound:

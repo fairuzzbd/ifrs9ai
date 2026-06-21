@@ -1,0 +1,932 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-A Bulk Upload Master Instrumen (P5-M11)
+  version: "1.0.0"
+  description: |
+    Modul APP-A — Bulk Upload Master Instrumen XLSX 5-sheet (Phase 5, Module 11).
+
+    Cakupan:
+      - POST /master/instrumen/bulk-upload — upload XLSX; ROLE-MAKER-TR; 50MB; MIME validate
+      - GET  /master/instrumen/bulk-upload/{batch_id} — batch detail + row breakdown (paginated)
+      - POST /master/instrumen/bulk-upload/{batch_id}/dry-run — 4-stage validation; cached 1h
+      - POST /master/instrumen/bulk-upload/{batch_id}/commit — enqueue Asynq; 202; SSE
+      - POST /master/instrumen/bulk-upload/{batch_id}/approve — ROLE-APPR-TR; 4-eyes SoD
+      - POST /master/instrumen/bulk-upload/{batch_id}/rollback-request — ROLE-CFO; reason ≥ 50 chars
+      - POST /master/instrumen/bulk-upload/{batch_id}/rollback-approve — ROLE-CFO step-up MFA
+
+    AC ID coverage:
+      S1-AC1 (upload valid), S1-AC2 (file too large), S1-AC3 (MIME invalid),
+      S1-AC4 (parse errors — batch still PARSED),
+      S2-AC1 (dry run pass + SPPI+BM), S2-AC2 (dry run failed stage 3),
+      S2-AC3 (flagged NEEDS_MANUAL_REVIEW), S2-AC4 (dry run TTL expired → COMMIT blocked),
+      S3-AC1 (commit 202 + job progress), S3-AC2 (partial commit), S3-AC3 (BULK_PERIODE_LOCKED),
+      S3-AC4 (instrumen status PENDING_APPROVAL_BULK until approve),
+      S4-AC1 (approve → ACTIVE), S4-AC2 (SoD violation maker=approver),
+      S4-AC3 (idempotency replay), S4-AC4 (ROLE-RISK klasifikasi manual resolve),
+      S5-AC1 (rollback in grace window), S5-AC2 (grace window expired),
+      S5-AC3 (step-up MFA required), S5-AC4 (IT-ADMIN config grace window)
+
+    Dependensi:
+      - P5-M1 (mst.instrumen target table + workflow_status enum)
+      - P5-M4 (mst.periode_buku status_periode check before upload + commit)
+      - Phase 3 SPPI+BM auto-eval (Stage 4 DRY_RUN; unavailable → flagged, non-blocking)
+      - sys.job tracking (DEC-007, Asynq worker pattern from P5-M10)
+      - DEC-016 — shopspring/decimal for money (IDR amounts)
+      - DEC-017 — 4-eyes SoD: maker ≠ approver
+      - DEC-018 — audit trail append-only; soft-delete only; retensi 10+10 tahun
+      - DEC-021 — Idempotency-Key wajib di mutating endpoints
+      - DEC-022 — cursor-based pagination
+      - DEC-027 — step-up MFA for rollback-approve (irreversible CFO action)
+
+    State machine sys.upload_batch.status (P5-M11):
+      PARSED
+        → [dry-run PASS] → DRY_RUN_PASSED
+        → [dry-run FAIL] → DRY_RUN_FAILED (terminal untuk commit)
+      DRY_RUN_PASSED (+ TTL valid)
+        → [commit enqueue] → COMMITTING
+      COMMITTING (Asynq job running)
+        → [all rows OK]    → COMMITTED
+        → [some rows fail] → PARTIAL_COMMIT
+      COMMITTED | PARTIAL_COMMIT
+        → [approve, ROLE-APPR-TR, SoD] → APPROVED
+      APPROVED
+        → [rollback-request, ROLE-CFO, in grace window] → ROLLBACK_PENDING
+      ROLLBACK_PENDING
+        → [rollback-approve, ROLE-CFO, step-up MFA] → ROLLED_BACK (terminal)
+
+    Row status (sys.upload_batch_row.row_status):
+      PENDING → COMMITTED (INSERT mst.instrumen ok)
+              → FAILED    (INSERT error; partial commit)
+              → ROLLED_BACK (CFO rollback within grace window)
+      FLAGGED_MANUAL_REVIEW (SPPI+BM ambiguous — COMMIT inserts with PENDING_CLASSIFICATION)
+
+    4-Stage DRY_RUN pipeline:
+      Stage 1: cell type + mandatory columns
+      Stage 2: business rules (range, enum)
+      Stage 3: cross-sheet references (counterparty, bank, mata_uang)
+      Stage 4: SPPI+BM auto-eval (Phase 3 service — unavailable → SPPI_SERVICE_UNAVAILABLE flag)
+
+    Performance SLA:
+      - Upload + parse: ≤ 10s for 50MB / 500 rows
+      - DRY_RUN: ≤ 30s for 500 rows (Stage 4 SPPI+BM concurrent per sheet)
+      - Commit worker: ≤ 5 min for 500 rows (partial commit ok, per-row savepoint)
+
+security:
+  - bearerAuth: []
+
+paths:
+
+  # ─── Upload XLSX ──────────────────────────────────────────────────────────────
+
+  /master/instrumen/bulk-upload:
+    post:
+      operationId: bulkUploadInstrumen
+      summary: Upload XLSX 5-sheet master instrumen
+      description: |
+        Upload XLSX 5-sheet (Deposito, Obligasi, Saham, Reksadana, Tabungan_Cash).
+        Server-side: (1) file size ≤ 50MB, (2) MIME = xlsx zip magic bytes,
+        (3) parse 5 sheets → sys.upload_batch (PARSED) + sys.upload_batch_row per row.
+        Audit BULK.UPLOADED in-transaction.
+        Periode lock check: status_periode = 'CLOSED' → 423 BULK_PERIODE_LOCKED.
+        Returns batch_id for tracking via GET /batch/{batch_id}.
+      tags: [BulkUpload]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID v4. DEC-021. Same key + same file → IDEMPOTENCY_REPLAY 200.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: |
+                    XLSX 5-sheet file. Max 50MB. MIME validation: server-side magic bytes
+                    check (PK zip signature), not only Content-Type header (S1-AC3).
+                portofolio_id:
+                  type: string
+                  format: uuid
+                  description: Optional target portofolio override (default dari sheet data)
+      responses:
+        "202":
+          description: Upload berhasil — batch PARSED, rows captured
+          headers:
+            X-Batch-Id:
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "./_common.yaml#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/BulkUploadBatchSummary"
+              example:
+                data:
+                  batchId: "BATCH-001"
+                  status: "PARSED"
+                  totalRows: 350
+                  parseErrors: []
+                  sheets:
+                    Deposito: 80
+                    Obligasi: 120
+                    Saham: 60
+                    Reksadana: 50
+                    Tabungan_Cash: 40
+                  createdAt: "2026-06-21T10:30:00+07:00"
+                meta:
+                  traceId: "01HXY..."
+        "200":
+          description: Idempotency replay — original response
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/SuccessEnvelope"
+        "400":
+          description: Validation failed (missing file field)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+        "413":
+          description: File size > 50MB
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: "BULK_FILE_TOO_LARGE"
+                  message: "Ukuran file 62MB melebihi batas 50MB. Upload dibatalkan."
+                  traceId: "01HXY..."
+        "415":
+          description: MIME bukan XLSX zip signature
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: "BULK_MIME_INVALID"
+                  message: "Tipe file tidak valid. Hanya XLSX (application/vnd.openxmlformats-officedocument.spreadsheetml.sheet) yang diterima."
+                  traceId: "01HXY..."
+        "423":
+          description: Periode CLOSED
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: "BULK_PERIODE_LOCKED"
+                  message: "Periode PRD-2026-06 sudah CLOSED. Bulk upload tidak dapat diproses."
+                  traceId: "01HXY..."
+
+  # ─── Batch Detail ─────────────────────────────────────────────────────────────
+
+  /master/instrumen/bulk-upload/{batch_id}:
+    get:
+      operationId: getBulkUploadBatch
+      summary: Batch detail dengan row breakdown (paginated)
+      description: |
+        Menampilkan detail batch + list rows dengan status per row.
+        Cursor-based pagination (DEC-022). Sort + filter support.
+        ROLE-AUDIT dapat akses semua batch. ROLE-MAKER-TR hanya batch sendiri.
+      tags: [BulkUpload]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: batch_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Batch ID dari upload response
+        - $ref: "./_common.yaml#/components/parameters/cursor"
+        - $ref: "./_common.yaml#/components/parameters/limit"
+        - $ref: "./_common.yaml#/components/parameters/sortParam"
+        - name: row_status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, COMMITTED, FAILED, ROLLED_BACK, FLAGGED_MANUAL_REVIEW]
+          description: Filter by row_status
+        - name: sheet_name
+          in: query
+          schema:
+            type: string
+          description: Filter by sheet name (Deposito, Obligasi, Saham, Reksadana, Tabungan_Cash)
+      responses:
+        "200":
+          description: Batch detail + row list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/BulkUploadBatchDetail"
+                  rows:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/BulkUploadRowItem"
+                  pagination:
+                    $ref: "./_common.yaml#/components/schemas/PaginationResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "404":
+          description: Batch tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+
+  # ─── DRY_RUN ──────────────────────────────────────────────────────────────────
+
+  /master/instrumen/bulk-upload/{batch_id}/dry-run:
+    post:
+      operationId: bulkUploadDryRun
+      summary: 4-stage validation pipeline (DRY_RUN) — tidak INSERT ke mst.instrumen
+      description: |
+        Jalankan 4-stage validation pipeline:
+          Stage 1: cell type + mandatory columns
+          Stage 2: business rules (range, enum)
+          Stage 3: cross-sheet references (counterparty, bank, mata_uang)
+          Stage 4: SPPI+BM auto-eval (Phase 3 service call per row)
+        Cache result 1 jam di dry_run_result_jsonb (TTL = dry_run_expires_at).
+        Status DRY_RUN_FAILED jika ada Stage 1-3 failures (COMMIT blocked).
+        Status DRY_RUN_PASSED jika Stage 1-3 semua pass (flagged rows diizinkan COMMIT).
+        Audit BULK.VALIDATED_DRY_RUN in-transaction.
+        Idempotency-Key wajib.
+      tags: [BulkUpload]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: batch_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: DRY_RUN result (PASSED atau FAILED — keduanya HTTP 200)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "./_common.yaml#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/DryRunResult"
+              examples:
+                passed:
+                  value:
+                    data:
+                      status: "DRY_RUN_PASSED"
+                      totalRows: 350
+                      validRows: 347
+                      invalidRows: 0
+                      flaggedRows: 3
+                      stageSummary:
+                        stage1: {status: "PASS"}
+                        stage2: {status: "PASS"}
+                        stage3: {status: "PASS"}
+                        stage4: {status: "PASS", evaluated: 350, classified: 347, flagged: 3}
+                      errorsPerRow: []
+                      dryRunExpiresAt: "2026-06-21T11:30:00+07:00"
+                    meta:
+                      traceId: "01HXY..."
+                failed:
+                  value:
+                    data:
+                      status: "DRY_RUN_FAILED"
+                      invalidRows: 1
+                      errorsPerRow:
+                        - sheet: "Obligasi"
+                          row: 10
+                          stage: 3
+                          col: "counterparty_id"
+                          error: "Counterparty CP-999 tidak ditemukan di master data."
+                    meta:
+                      traceId: "01HXY..."
+        "404":
+          description: Batch tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+        "422":
+          description: Batch status bukan PARSED (mis. COMMITTED sudah)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+
+  # ─── COMMIT ───────────────────────────────────────────────────────────────────
+
+  /master/instrumen/bulk-upload/{batch_id}/commit:
+    post:
+      operationId: bulkUploadCommit
+      summary: Enqueue async commit job (Asynq bulkupload:commit_instrumen)
+      description: |
+        Enqueue Asynq job bulkupload:commit_instrumen.
+        Pre-conditions:
+          - batch.status = DRY_RUN_PASSED
+          - dry_run_expires_at > now() (TTL 1 jam)
+          - mst.periode_buku.status_periode = 'OPEN'
+          - ROLE-MAKER-TR = batch.created_by (SoD owner)
+        Returns 202 { jobId, statusUrl, streamUrl }.
+        Worker inserts per-row mst.instrumen with status=PENDING_APPROVAL_BULK.
+        Failed rows: row_status=FAILED, row_error_jsonb populated, skip (no halt).
+        Progress via sys.job + Redis pub/sub SSE.
+        Audit BULK.COMMITTED atau BULK.PARTIAL_COMMIT in-transaction after job done.
+        Idempotency-Key wajib.
+      tags: [BulkUpload]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: batch_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "202":
+          description: Job enqueued — track progress via statusUrl/streamUrl
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "./_common.yaml#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/CommitJobResponse"
+              example:
+                data:
+                  jobId: "JOB-BULK-001"
+                  type: "bulkupload:commit_instrumen"
+                  statusUrl: "/api/v1/jobs/JOB-BULK-001"
+                  streamUrl: "/api/v1/jobs/JOB-BULK-001/stream"
+                  batchId: "BATCH-001"
+                meta:
+                  traceId: "01HXY..."
+        "422":
+          description: DRY_RUN expired atau DRY_RUN_FAILED
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                expired:
+                  value:
+                    error:
+                      code: "BULK_DRY_RUN_EXPIRED"
+                      message: "DRY_RUN BATCH-001 expired pukul 09:00. Jalankan ulang DRY_RUN sebelum COMMIT."
+                      traceId: "01HXY..."
+                dry_run_failed:
+                  value:
+                    error:
+                      code: "BULK_DRY_RUN_FAILED"
+                      message: "COMMIT tidak dapat diproses: DRY_RUN status=DRY_RUN_FAILED. Perbaiki errors dan re-upload."
+                      traceId: "01HXY..."
+        "423":
+          description: Periode CLOSED
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+
+  # ─── APPROVE ──────────────────────────────────────────────────────────────────
+
+  /master/instrumen/bulk-upload/{batch_id}/approve:
+    post:
+      operationId: bulkUploadApprove
+      summary: Approve batch 4-eyes (ROLE-APPR-TR; SoD ≠ maker)
+      description: |
+        Approve batch setelah commit. Syarat:
+          - batch.status IN (COMMITTED, PARTIAL_COMMIT)
+          - approver ≠ batch.created_by (SoD DEC-017)
+          - ROLE-APPR-TR dengan instrumen.approve
+          - Idempotency-Key wajib
+        Efek:
+          - mst.instrumen rows (row_status=COMMITTED) → status=ACTIVE
+          - mst.instrumen rows (FLAGGED_MANUAL_REVIEW) → tetap PENDING_CLASSIFICATION
+          - sys.upload_batch.status → APPROVED
+        Audit BULK.APPROVED in-transaction.
+        SoD violation: audit BULK.SOD_VIOLATION_ATTEMPT + return 403 BULK_APPROVE_SOD_VIOLATION.
+        signatureMethod wajib = "JWT_STEP_UP" (DEC-027 untuk Approver signing).
+      tags: [BulkUpload]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: batch_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApproveRequest"
+            example:
+              comment: "Checked — 348 instrumen sesuai daftar penempatan Juni 2026"
+              signatureMethod: "JWT_STEP_UP"
+      responses:
+        "200":
+          description: Batch approved — instrumen ACTIVE
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "./_common.yaml#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ApproveResult"
+              example:
+                data:
+                  batchId: "BATCH-001"
+                  status: "APPROVED"
+                  activatedCount: 348
+                  pendingManualCount: 3
+                  approverId: "USR-APPR-001"
+                  approvedAt: "2026-06-21T14:00:00+07:00"
+                meta:
+                  traceId: "01HXY..."
+        "403":
+          description: SoD violation — maker mencoba approve batch sendiri
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: "BULK_APPROVE_SOD_VIOLATION"
+                  message: "SoD: Maker tidak dapat menjadi approver untuk batch yang sama (DEC-017)."
+                  traceId: "01HXY..."
+        "422":
+          description: signatureMethod invalid atau status bukan COMMITTED/PARTIAL_COMMIT
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+
+  # ─── ROLLBACK REQUEST ─────────────────────────────────────────────────────────
+
+  /master/instrumen/bulk-upload/{batch_id}/rollback-request:
+    post:
+      operationId: bulkUploadRollbackRequest
+      summary: CFO request rollback batch (grace window check; reason ≥ 50 chars)
+      description: |
+        ROLE-CFO request rollback batch APPROVED dalam grace window.
+        Pre-conditions:
+          - batch.status = APPROVED
+          - now() ≤ batch.committed_at + BULK_ROLLBACK_GRACE_DAYS (default 7; configurable)
+          - ROLE-CFO dengan instrumen.delete
+          - reason ≥ 50 chars
+          - Idempotency-Key wajib
+        Efek: batch.rollback_status = PENDING → batch.status = ROLLBACK_PENDING
+        Audit BULK.ROLLBACK_REQUESTED in-transaction.
+        Note: step-up MFA dilakukan di rollback-approve (final confirmation).
+      tags: [BulkUpload]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: batch_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RollbackRequestBody"
+            example:
+              reason: "Error counterparty mapping ditemukan post-commit. Diperlukan rollback untuk koreksi."
+      responses:
+        "200":
+          description: Rollback request accepted — menunggu rollback-approve dengan step-up MFA
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/SuccessEnvelope"
+        "422":
+          description: Grace window expired atau reason terlalu pendek
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                grace_expired:
+                  value:
+                    error:
+                      code: "BULK_ROLLBACK_GRACE_EXPIRED"
+                      message: "Grace window 7 hari telah berakhir. Rollback tidak dapat dilakukan."
+                      traceId: "01HXY..."
+                reason_short:
+                  value:
+                    error:
+                      code: "VALIDATION_FAILED"
+                      message: "reason minimal 50 karakter. Got: 20."
+                      traceId: "01HXY..."
+
+  # ─── ROLLBACK APPROVE ─────────────────────────────────────────────────────────
+
+  /master/instrumen/bulk-upload/{batch_id}/rollback-approve:
+    post:
+      operationId: bulkUploadRollbackApprove
+      summary: CFO konfirmasi rollback dengan step-up MFA (irreversible)
+      description: |
+        ROLE-CFO konfirmasi rollback dengan X-Step-Up-Token (DEC-027).
+        Step-up scope = 'bulk_rollback'.
+        Pre-conditions:
+          - batch.status = ROLLBACK_PENDING
+          - X-Step-Up-Token valid dan freshnessnya ≤ 5 menit
+          - ROLE-CFO dengan instrumen.delete
+          - Idempotency-Key wajib
+        Efek (in-transaction):
+          - Soft-delete semua mst.instrumen dari batch (deleted_at, deleted_by)
+          - sys.upload_batch_row → row_status = ROLLED_BACK
+          - sys.upload_batch.status → ROLLED_BACK
+          - Audit BULK.ROLLBACK_APPROVED in-transaction
+        Jurnal kompensasi jika ada posting terkait (M2 stub — Phase 5 wiring).
+        DEC-018: soft-delete only, tidak ada hard-delete.
+      tags: [BulkUpload]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: batch_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: X-Step-Up-Token
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Step-up MFA token. scope='bulk_rollback'. Freshness ≤ 5 menit (DEC-027).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RollbackApproveBody"
+            example:
+              comment: "Rollback disetujui — counterparty mapping telah dikonfirmasi error."
+              signatureMethod: "JWT_STEP_UP"
+      responses:
+        "200":
+          description: Rollback berhasil — semua instrumen soft-deleted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "./_common.yaml#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RollbackResult"
+              example:
+                data:
+                  batchId: "BATCH-001"
+                  status: "ROLLED_BACK"
+                  rolledBackCount: 348
+                  rolledBackAt: "2026-06-21T14:30:00+07:00"
+                meta:
+                  traceId: "01HXY..."
+        "403":
+          description: Step-up MFA missing atau expired
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: "FORBIDDEN"
+                  message: "Rollback memerlukan step-up MFA. Lakukan re-autentikasi MFA terlebih dahulu (DEC-027)."
+                  traceId: "01HXY..."
+
+components:
+  schemas:
+
+    BulkUploadBatchSummary:
+      type: object
+      properties:
+        batchId:
+          type: string
+        status:
+          type: string
+          enum: [PARSED, DRY_RUN_PASSED, DRY_RUN_FAILED, COMMITTING, COMMITTED, PARTIAL_COMMIT, APPROVED, ROLLBACK_PENDING, ROLLED_BACK]
+        totalRows:
+          type: integer
+        parseErrors:
+          type: array
+          items:
+            $ref: "#/components/schemas/ParseError"
+        sheets:
+          type: object
+          additionalProperties:
+            type: integer
+          description: "Per-sheet row count: {Deposito: 80, Obligasi: 120, ...}"
+        createdAt:
+          type: string
+          format: date-time
+
+    BulkUploadBatchDetail:
+      allOf:
+        - $ref: "#/components/schemas/BulkUploadBatchSummary"
+        - type: object
+          properties:
+            committedRows:
+              type: integer
+            failedRows:
+              type: integer
+            flaggedRows:
+              type: integer
+            dryRunExpiresAt:
+              type: string
+              format: date-time
+              nullable: true
+            rollbackStatus:
+              type: string
+              nullable: true
+              enum: [NOT_REQUESTED, PENDING, APPROVED, EXPIRED]
+            rollbackGraceExpiresAt:
+              type: string
+              format: date-time
+              nullable: true
+            approverId:
+              type: string
+              format: uuid
+              nullable: true
+            approvedAt:
+              type: string
+              format: date-time
+              nullable: true
+
+    BulkUploadRowItem:
+      type: object
+      properties:
+        rowId:
+          type: string
+          format: uuid
+        batchId:
+          type: string
+        sheetName:
+          type: string
+        rowNumber:
+          type: integer
+        rowStatus:
+          type: string
+          enum: [PENDING, COMMITTED, FAILED, ROLLED_BACK, FLAGGED_MANUAL_REVIEW]
+        instrumenId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Populated after successful commit
+        rowErrorJsonb:
+          type: object
+          nullable: true
+          description: Parse + validation errors for this row
+        rowDataPreview:
+          type: object
+          additionalProperties: true
+          description: Sanitized row data (kode_instrumen, tipe, counterparty_id, etc.)
+
+    ParseError:
+      type: object
+      properties:
+        sheet:
+          type: string
+        row:
+          type: integer
+        col:
+          type: string
+        error:
+          type: string
+
+    DryRunResult:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [DRY_RUN_PASSED, DRY_RUN_FAILED]
+        totalRows:
+          type: integer
+        validRows:
+          type: integer
+        invalidRows:
+          type: integer
+        flaggedRows:
+          type: integer
+          description: Rows with SPPI+BM ambiguous result (NEEDS_MANUAL_REVIEW)
+        stageSummary:
+          $ref: "#/components/schemas/StageSummary"
+        errorsPerRow:
+          type: array
+          items:
+            $ref: "#/components/schemas/RowValidationError"
+        dryRunExpiresAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    StageSummary:
+      type: object
+      properties:
+        stage1:
+          type: object
+          properties:
+            status:
+              type: string
+              enum: [PASS, FAIL]
+            errorCount:
+              type: integer
+        stage2:
+          type: object
+          properties:
+            status:
+              type: string
+              enum: [PASS, FAIL]
+            errorCount:
+              type: integer
+        stage3:
+          type: object
+          properties:
+            status:
+              type: string
+              enum: [PASS, FAIL]
+            errorCount:
+              type: integer
+        stage4:
+          type: object
+          properties:
+            status:
+              type: string
+              enum: [PASS, PARTIAL, UNAVAILABLE]
+            evaluated:
+              type: integer
+            classified:
+              type: integer
+            flagged:
+              type: integer
+            sppiServiceUnavailable:
+              type: boolean
+              default: false
+
+    RowValidationError:
+      type: object
+      properties:
+        sheet:
+          type: string
+        row:
+          type: integer
+        stage:
+          type: integer
+          minimum: 1
+          maximum: 4
+        col:
+          type: string
+          nullable: true
+        error:
+          type: string
+        klasifikasiPsak71:
+          type: string
+          nullable: true
+          description: Stage 4 only — null if NEEDS_MANUAL_REVIEW
+
+    CommitJobResponse:
+      type: object
+      properties:
+        jobId:
+          type: string
+          format: uuid
+        type:
+          type: string
+          example: "bulkupload:commit_instrumen"
+        statusUrl:
+          type: string
+          example: "/api/v1/jobs/JOB-BULK-001"
+        streamUrl:
+          type: string
+          example: "/api/v1/jobs/JOB-BULK-001/stream"
+        batchId:
+          type: string
+
+    ApproveRequest:
+      type: object
+      required: [comment, signatureMethod]
+      properties:
+        comment:
+          type: string
+          minLength: 10
+          description: Komentar approver
+        signatureMethod:
+          type: string
+          enum: [JWT_STEP_UP]
+          description: Wajib JWT_STEP_UP (DEC-027)
+
+    ApproveResult:
+      type: object
+      properties:
+        batchId:
+          type: string
+        status:
+          type: string
+          enum: [APPROVED]
+        activatedCount:
+          type: integer
+        pendingManualCount:
+          type: integer
+          description: Rows flagged NEEDS_MANUAL_REVIEW — status PENDING_CLASSIFICATION
+        approverId:
+          type: string
+          format: uuid
+        approvedAt:
+          type: string
+          format: date-time
+
+    RollbackRequestBody:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 50
+          description: Alasan rollback. Minimal 50 karakter (audit trail requirement)
+
+    RollbackApproveBody:
+      type: object
+      required: [comment, signatureMethod]
+      properties:
+        comment:
+          type: string
+          minLength: 10
+        signatureMethod:
+          type: string
+          enum: [JWT_STEP_UP]
+
+    RollbackResult:
+      type: object
+      properties:
+        batchId:
+          type: string
+        status:
+          type: string
+          enum: [ROLLED_BACK]
+        rolledBackCount:
+          type: integer
+        rolledBackAt:
+          type: string
+          format: date-time

@@ -452,6 +452,14 @@ components:
         - POCI_INSTRUMEN_NOT_POCI           # 422 — endpoint POCI-specific dipanggil untuk instrumen dengan is_poci = FALSE
         - POCI_PERIODE_LOCKED               # 423 — mst.periode_buku.status_periode = 'CLOSED' saat posting jurnal POCI delta; blocking
         - POCI_JURNAL_DIRECTION_MISMATCH    # 422 — delta_ecl > 0 tapi direction = 'DECREASE' atau sebaliknya; bug guard; reject posting + alert
+        # Bulk Upload Master Instrumen (APP-A, P5-M11)
+        - BULK_FILE_TOO_LARGE           # 413 — file size > 50MB saat upload; server-side check sebelum parse (S1-AC2)
+        - BULK_MIME_INVALID             # 415 — MIME bukan XLSX zip magic bytes; magic-byte check, bukan hanya Content-Type header (S1-AC3)
+        - BULK_DRY_RUN_EXPIRED          # 422 — TTL 1 jam dry_run_expires_at expired saat COMMIT dicoba; re-run DRY_RUN required (S2-AC4)
+        - BULK_DRY_RUN_FAILED           # 422 — COMMIT dicoba saat batch.status = DRY_RUN_FAILED; Stage 1-3 harus pass dulu (S2-AC2)
+        - BULK_PERIODE_LOCKED           # 423 — mst.periode_buku.status_periode = 'CLOSED' saat upload (S1) atau commit (S3)
+        - BULK_ROLLBACK_GRACE_EXPIRED   # 422 — now() > committed_at + BULK_ROLLBACK_GRACE_DAYS; grace window configurable via sys.config_param (S5-AC2)
+        - BULK_APPROVE_SOD_VIOLATION    # 403 — approver_id = batch.created_by (maker); DEC-017 server-side enforce (S4-AC2)
 
     # ---- Timestamps -------------------------------------------------------
     TimestampISO:
