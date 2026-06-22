@@ -185,6 +185,22 @@ const ERROR_MESSAGE_MAP: Record<string, string> = {
   POCI_JURNAL_DIRECTION_MISMATCH:
     "Inkonsistensi data: sign delta_ecl tidak sesuai direction enum. Posting dibatalkan — alert dikirim ke ROLE-IT-ADMIN dan ROLE-RISK untuk investigasi.",
 
+  // --- Mapping Jurnal P5-M12 ---
+  MAPPING_EVENT_NOT_FOUND:
+    "Kode event mapping tidak ditemukan di sistem. Pastikan event_code benar.",
+  MAPPING_AKUN_INVALID:
+    "Akun debit atau kredit tidak ditemukan di Chart of Accounts. Pastikan kode akun sudah terdaftar dan aktif.",
+  MAPPING_UNBALANCED:
+    "Mapping tidak seimbang — total baris debit ≠ total baris kredit. Jurnal harus balanced per PSAK 71.",
+  MAPPING_REGULATED_REQUIRES_RISK:
+    "Event ini adalah event regulated dan memerlukan jalur 6-eyes (ROLE-RISK sebagai approver-2). Hubungi ROLE-RISK untuk approval.",
+  MAPPING_DUPLICATE_VERSION:
+    "Sudah ada versi DRAFT atau PENDING untuk event ini. Selesaikan atau tolak versi yang ada sebelum membuat versi baru.",
+  MAPPING_SOD_VIOLATION:
+    "SoD: Anda tidak dapat menjadi reviewer/approver untuk mapping yang Anda buat sendiri (DEC-017).",
+  MAPPING_PERIODE_LOCKED:
+    "Periode buku sudah HARD_CLOSED. Perubahan mapping tidak dapat diaktifkan di periode ini. Hubungi Finance Controller.",
+
   // --- Bulk Upload (P5-M11) ---
   BULK_FILE_TOO_LARGE:
     "Ukuran file melebihi batas 50MB. Kompres atau pisah file lalu upload ulang.",
