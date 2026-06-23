@@ -128,6 +128,11 @@ type Detail struct {
 	Urutan               int             `db:"urutan"`
 	KodeAkunID           uuid.UUID       `db:"kode_akun_id"`
 	DKIndicator          string          `db:"dk_indicator"` // DEBIT | KREDIT
+	// AkunDebitCode and AkunKreditCode are the text COA codes stored in
+	// mst.mapping_jurnal_detail.akun_debit / akun_kredit (added migration 000049).
+	// Populated by GetDetailsByP5HeaderID; empty for legacy detail rows.
+	AkunDebitCode  string `db:"akun_debit"`
+	AkunKreditCode string `db:"akun_kredit"`
 	SumberAmount         string          `db:"sumber_amount"`
 	KlasifikasiFilter    *string         `db:"klasifikasi_filter"`
 	TipeInstrumenFilter  []string        `db:"tipe_instrumen_filter"`

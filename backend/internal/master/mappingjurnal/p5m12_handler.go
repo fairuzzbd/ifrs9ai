@@ -291,10 +291,26 @@ func (h *P5M12Handler) GetHistory(c *gin.Context) {
 }
 
 // ExportHistory handles GET /api/v1/reports/rpt-21-mapping-history/export.
+// M7: pre-check row count before inline export. Dataset > 10k rows is hard-capped
+// at 10000 rows and signals truncation via X-Truncated: true response header.
+// Future: datasets > 10k should use async Asynq job (UX rule §1.4 async export pattern).
 func (h *P5M12Handler) ExportHistory(c *gin.Context) {
 	eventCode := c.Query("event_code")
-	// For export, fetch up to 10k rows synchronously (async Asynq for > 10k — future)
-	result, err := h.svc.GetHistory(c.Request.Context(), eventCode, "", 10000)
+
+	// Row count pre-check (M7)
+	rowCount, err := h.svc.CountHistory(c.Request.Context(), eventCode)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	const exportRowCap = 10000
+	truncated := rowCount > exportRowCap
+	if truncated {
+		c.Header("X-Truncated", "true")
+		c.Header("X-Total-Rows-Estimate", strconv.Itoa(rowCount))
+	}
+
+	result, err := h.svc.GetHistory(c.Request.Context(), eventCode, "", exportRowCap)
 	if err != nil {
 		response.Error(c, err)
 		return

@@ -54,6 +54,10 @@ func (v *Validator) ValidateAkunDetails(ctx context.Context, details []AkunDetai
 
 // ValidateBalance checks that total count of debit lines equals kredit lines.
 // Per P5-M12-S3-AC4: MAPPING_UNBALANCED if debit line count ≠ kredit line count.
+//
+// NOTE: Template-level validator checks line count parity only. Amount-level D=K
+// enforcement is performed at jurnal posting time (P5-M2 engine) when concrete
+// jumlah_calc values are computed per event payload.
 func ValidateBalance(details []AkunDetail) error {
 	var debitCount, kreditCount int
 	for _, d := range details {

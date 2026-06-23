@@ -285,16 +285,15 @@ func TestDBRepo_RejectVersion_ZeroRows(t *testing.T) {
 
 // ─── FlipActiveVersion ────────────────────────────────────────────────────────
 
+// TestDBRepo_FlipActiveVersion_Success: B4 fix — FlipActiveVersion now issues a single
+// UPDATE that closes prior APPROVED_ACTIVE version (activate-new was merged into Approve4/6Eyes).
 func TestDBRepo_FlipActiveVersion_Success(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer db.Close()
 	repo := &DBRepository{db: db}
 
 	mock.ExpectBegin()
-	// Step 1: close prior
-	mock.ExpectExec(`UPDATE mst.mapping_jurnal_header`).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	// Step 2: activate new
+	// Single UPDATE: close prior active version only.
 	mock.ExpectExec(`UPDATE mst.mapping_jurnal_header`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -318,21 +317,23 @@ func TestDBRepo_FlipActiveVersion_Step1Error(t *testing.T) {
 	assert.Contains(t, err.Error(), "close prior")
 }
 
-func TestDBRepo_FlipActiveVersion_Step2Error(t *testing.T) {
+// TestDBRepo_FlipActiveVersion_ClosePriorOnly confirms that after B4 fix, no second UPDATE
+// is issued. sqlmock will fail if an unexpected exec is called.
+func TestDBRepo_FlipActiveVersion_ClosePriorOnly(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer db.Close()
 	repo := &DBRepository{db: db}
 
 	mock.ExpectBegin()
+	// Exactly one UPDATE expected; no step-2 "activate" UPDATE should occur.
 	mock.ExpectExec(`UPDATE mst.mapping_jurnal_header`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(`UPDATE mst.mapping_jurnal_header`).
-		WillReturnError(errTestSvcNoDB)
 
 	tx, _ := db.Begin()
 	err := repo.FlipActiveVersion(testCtx(), tx, "PENEMPATAN_DEPOSITO", uuid.New(), uuid.New(), "TUGURE")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "activate")
+	require.NoError(t, err)
+	// No unexpected expectations means no second UPDATE was issued.
+	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
 // ─── CoaCodeExists ────────────────────────────────────────────────────────────
@@ -821,4 +822,77 @@ func TestWriteAuditP5_WithRealTx(t *testing.T) {
 		EntityID:   uuid.New(),
 	})
 	// No assertion needed — coverage of the aw.WithTx(tx).Write() line is what matters
+}
+
+// ─── GetDetailsByP5HeaderID ───────────────────────────────────────────────────
+
+func TestDBRepo_GetDetailsByP5HeaderID_Success(t *testing.T) {
+	repo, mock := newMockRepo(t)
+	hID := uuid.New()
+	dID := uuid.New()
+	eID := uuid.New()
+	now := time.Now()
+	actorID := uuid.New()
+
+	cols := []string{"id", "event_header_id", "urutan",
+		"akun_debit", "akun_kredit", "dk_indicator", "jumlah_calc",
+		"created_at", "created_by", "updated_at", "updated_by", "row_version", "tenant_id"}
+	mock.ExpectQuery(`SELECT id`).
+		WithArgs(hID).
+		WillReturnRows(sqlmock.NewRows(cols).
+			AddRow(dID, eID, 1, "110201", "440101", "D", nil,
+				now, actorID, now, actorID, int64(1), "TUGURE"))
+
+	got, err := repo.GetDetailsByP5HeaderID(testCtx(), hID)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "110201", got[0].AkunDebitCode)
+	assert.Equal(t, "D", got[0].DKIndicator)
+}
+
+func TestDBRepo_GetDetailsByP5HeaderID_QueryError(t *testing.T) {
+	repo, mock := newMockRepo(t)
+	hID := uuid.New()
+	mock.ExpectQuery(`SELECT id`).
+		WithArgs(hID).
+		WillReturnError(errTestSvcNoDB)
+
+	_, err := repo.GetDetailsByP5HeaderID(testCtx(), hID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "GetDetailsByP5HeaderID")
+}
+
+// ─── CountMappingHistoryRows ──────────────────────────────────────────────────
+
+func TestDBRepo_CountMappingHistoryRows_NoFilter(t *testing.T) {
+	repo, mock := newMockRepo(t)
+	mock.ExpectQuery(`SELECT COUNT`).
+		WithArgs("TUGURE").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(42))
+
+	n, err := repo.CountMappingHistoryRows(testCtx(), "", "TUGURE")
+	require.NoError(t, err)
+	assert.Equal(t, 42, n)
+}
+
+func TestDBRepo_CountMappingHistoryRows_WithEventCodeFilter(t *testing.T) {
+	repo, mock := newMockRepo(t)
+	mock.ExpectQuery(`SELECT COUNT`).
+		WithArgs("TUGURE", "ECL_PEMBENTUKAN").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(7))
+
+	n, err := repo.CountMappingHistoryRows(testCtx(), "ECL_PEMBENTUKAN", "TUGURE")
+	require.NoError(t, err)
+	assert.Equal(t, 7, n)
+}
+
+func TestDBRepo_CountMappingHistoryRows_QueryError(t *testing.T) {
+	repo, mock := newMockRepo(t)
+	mock.ExpectQuery(`SELECT COUNT`).
+		WithArgs("TUGURE").
+		WillReturnError(errTestSvcNoDB)
+
+	_, err := repo.CountMappingHistoryRows(testCtx(), "", "TUGURE")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CountMappingHistoryRows")
 }

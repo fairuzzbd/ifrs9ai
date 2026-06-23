@@ -126,7 +126,7 @@ func (s *P5M12Service) CreateNewVersion(ctx context.Context, eventCode string, r
 	}
 
 	writeAuditP5(ctx, tx, s.aw, audit.Event{
-		Action:     "MAPPING.NEW_VERSION",
+		Action:     "MAPPING.VERSION_CREATED",
 		EntityType: "mst.mapping_jurnal_header",
 		EntityID:   newVersionID,
 		After:      map[string]any{"event_code": eventCode, "version_id": newVersionID.String(), "parent_id": active.ID.String(), "regulated": regulated},
@@ -176,8 +176,8 @@ func (s *P5M12Service) P5Submit(ctx context.Context, eventCode string, versionID
 			fmt.Sprintf("WORKFLOW_INVALID_TRANSITION: versi %s harus dalam status DRAFT untuk dapat di-submit (current: %s).", versionID, v.WorkflowStatus))
 	}
 
-	// Fetch and validate details
-	details, err := s.repo.GetDetailsByHeaderID(ctx, versionID, false)
+	// Fetch and validate details (P5 schema: akun_debit/kredit as text COA codes)
+	details, err := s.repo.GetDetailsByP5HeaderID(ctx, versionID)
 	if err != nil {
 		return nil, fmt.Errorf("P5M12Service.P5Submit: fetch details: %w", err)
 	}
@@ -217,7 +217,7 @@ func (s *P5M12Service) P5Submit(ctx context.Context, eventCode string, versionID
 	}
 
 	writeAuditP5(ctx, tx, s.aw, audit.Event{
-		Action:     "MAPPING.SUBMIT",
+		Action:     "MAPPING.SUBMITTED",
 		EntityType: "mst.mapping_jurnal_header",
 		EntityID:   versionID,
 		Before:     map[string]any{"workflow_status": string(WorkflowStatusDraft)},
@@ -267,8 +267,15 @@ func (s *P5M12Service) P5Review(ctx context.Context, eventCode string, versionID
 	// SoD
 	makerStr := uuidPtrToStr(v.MakerID)
 	actorStr := actorID.String()
-	if err := ValidateSoD4Way(&makerStr, nil, nil, nil, actorStr, "review"); err != nil {
-		return nil, domainerrors.New(domainerrors.CodeForbidden, err.Error())
+	if sodErr := ValidateSoD4Way(&makerStr, nil, nil, nil, actorStr, "review"); sodErr != nil {
+		// B3: write SoD violation attempt audit BEFORE returning 403 (standalone, no tx)
+		writeAuditP5(ctx, nil, s.aw, audit.Event{
+			Action:     "MAPPING.SOD_VIOLATION_ATTEMPT",
+			EntityType: "mst.mapping_jurnal_header",
+			EntityID:   versionID,
+			After:      map[string]any{"step": "review", "actor_id": actorStr, "maker_id": makerStr, "version_id": versionID.String()},
+		})
+		return nil, domainerrors.New(domainerrors.CodeForbidden, sodErr.Error())
 	}
 
 	// Determine next status based on regulated_flag
@@ -294,7 +301,7 @@ func (s *P5M12Service) P5Review(ctx context.Context, eventCode string, versionID
 	}
 
 	writeAuditP5(ctx, tx, s.aw, audit.Event{
-		Action:     "MAPPING.REVIEW",
+		Action:     "MAPPING.REVIEWED",
 		EntityType: "mst.mapping_jurnal_header",
 		EntityID:   versionID,
 		Before:     map[string]any{"workflow_status": string(WorkflowStatusPendingReview)},
@@ -345,8 +352,14 @@ func (s *P5M12Service) P5Approve(ctx context.Context, eventCode string, versionI
 	makerStr := uuidPtrToStr(v.MakerID)
 	reviewerStr := uuidPtrToStr(v.ReviewerID)
 	actorStr := actorID.String()
-	if err := ValidateSoD4Way(&makerStr, &reviewerStr, nil, nil, actorStr, "approve"); err != nil {
-		return nil, domainerrors.New(domainerrors.CodeForbidden, err.Error())
+	if sodErr := ValidateSoD4Way(&makerStr, &reviewerStr, nil, nil, actorStr, "approve"); sodErr != nil {
+		writeAuditP5(ctx, nil, s.aw, audit.Event{
+			Action:     "MAPPING.SOD_VIOLATION_ATTEMPT",
+			EntityType: "mst.mapping_jurnal_header",
+			EntityID:   versionID,
+			After:      map[string]any{"step": "approve", "actor_id": actorStr, "maker_id": makerStr, "reviewer_id": reviewerStr, "version_id": versionID.String()},
+		})
+		return nil, domainerrors.New(domainerrors.CodeForbidden, sodErr.Error())
 	}
 
 	// Periode lock
@@ -375,11 +388,11 @@ func (s *P5M12Service) P5Approve(ctx context.Context, eventCode string, versionI
 	}
 
 	writeAuditP5(ctx, tx, s.aw, audit.Event{
-		Action:     "MAPPING.APPROVE",
+		Action:     "MAPPING.APPROVED_ACTIVE",
 		EntityType: "mst.mapping_jurnal_header",
 		EntityID:   versionID,
 		Before:     map[string]any{"workflow_status": string(WorkflowStatusPendingApproval)},
-		After:      map[string]any{"workflow_status": string(StatusApprovedActive), "approver_id": actorStr, "comment": req.Comment, "event_code": eventCode},
+		After:      map[string]any{"workflow_status": string(StatusApprovedActive), "approver_id": actorStr, "comment": req.Comment, "event_code": eventCode, "workflow_path": "4-eyes"},
 	})
 
 	if err := tx.Commit(); err != nil {
@@ -411,11 +424,10 @@ func (s *P5M12Service) P5Approve2(ctx context.Context, eventCode string, version
 	}
 	tid := tenantID(claims)
 
-	// Validate step-up token present (DEC-027)
-	if strings.TrimSpace(stepUpToken) == "" {
-		return nil, domainerrors.New(domainerrors.CodeForbidden,
-			"MAPPING_REGULATED_REQUIRES_RISK: approve-2 pada event terregulasi membutuhkan step-up MFA token (X-Step-Up-Token header). "+
-				"Lakukan step-up MFA terlebih dahulu.")
+	// Validate step-up token: scope + freshness (DEC-027, B2)
+	tokenRef, err := verifyMappingStepUp(stepUpToken)
+	if err != nil {
+		return nil, err
 	}
 
 	v, err := s.repo.GetVersionByID(ctx, versionID, tid)
@@ -435,8 +447,14 @@ func (s *P5M12Service) P5Approve2(ctx context.Context, eventCode string, version
 	reviewerStr := uuidPtrToStr(v.ReviewerID)
 	approverStr := uuidPtrToStr(v.ApproverID)
 	actorStr := actorID.String()
-	if err := ValidateSoD4Way(&makerStr, &reviewerStr, &approverStr, nil, actorStr, "approve-2"); err != nil {
-		return nil, domainerrors.New(domainerrors.CodeForbidden, err.Error())
+	if sodErr := ValidateSoD4Way(&makerStr, &reviewerStr, &approverStr, nil, actorStr, "approve-2"); sodErr != nil {
+		writeAuditP5(ctx, nil, s.aw, audit.Event{
+			Action:     "MAPPING.SOD_VIOLATION_ATTEMPT",
+			EntityType: "mst.mapping_jurnal_header",
+			EntityID:   versionID,
+			After:      map[string]any{"step": "approve-2", "actor_id": actorStr, "maker_id": makerStr, "reviewer_id": reviewerStr, "approver_id": approverStr, "version_id": versionID.String()},
+		})
+		return nil, domainerrors.New(domainerrors.CodeForbidden, sodErr.Error())
 	}
 
 	// Periode lock
@@ -447,7 +465,7 @@ func (s *P5M12Service) P5Approve2(ctx context.Context, eventCode string, version
 	now := time.Now()
 	sigInput := signatureInputString(actorID, "MAPPING.APPROVE_2", versionID, now, req.Comment)
 	sigHash := computeSHA256(sigInput)
-	tokenRef := computeSHA256(stepUpToken) // store hash, not raw token (DEC-028)
+	// tokenRef already computed above by verifyMappingStepUp (SHA-256 of jti or token)
 
 	tx, err := s.repo.BeginTx(ctx)
 	if err != nil {
@@ -466,11 +484,11 @@ func (s *P5M12Service) P5Approve2(ctx context.Context, eventCode string, version
 	}
 
 	writeAuditP5(ctx, tx, s.aw, audit.Event{
-		Action:     "MAPPING.APPROVE_2",
+		Action:     "MAPPING.APPROVED_ACTIVE",
 		EntityType: "mst.mapping_jurnal_header",
 		EntityID:   versionID,
 		Before:     map[string]any{"workflow_status": string(StatusPendingApproval2)},
-		After:      map[string]any{"workflow_status": string(StatusApprovedActive), "approver_2_id": actorStr, "event_code": eventCode},
+		After:      map[string]any{"workflow_status": string(StatusApprovedActive), "approver_2_id": actorStr, "event_code": eventCode, "workflow_path": "6-eyes"},
 	})
 
 	if err := tx.Commit(); err != nil {
@@ -527,7 +545,7 @@ func (s *P5M12Service) P5Reject(ctx context.Context, eventCode string, versionID
 	}
 
 	writeAuditP5(ctx, tx, s.aw, audit.Event{
-		Action:     "MAPPING.REJECT",
+		Action:     "MAPPING.REJECTED",
 		EntityType: "mst.mapping_jurnal_header",
 		EntityID:   versionID,
 		Before:     map[string]any{"workflow_status": string(v.WorkflowStatus)},
@@ -552,7 +570,10 @@ func (s *P5M12Service) P5Reject(ctx context.Context, eventCode string, versionID
 // ─── Bulk Import ──────────────────────────────────────────────────────────────
 
 // ImportBulk parses an XLSX upload, validates rows, and creates DRAFT versions.
-// Returns BulkImportResp with errors per row. No partial commit: all-or-nothing.
+// Returns BulkImportResp with errors per row.
+// Partial commit: valid rows are committed, invalid rows are skipped (per-row errors
+// are returned in BulkImportResp.Errors). The batch is all-or-nothing only when all
+// rows are invalid (no DB write in that case).
 // P5-M12-S3.
 func (s *P5M12Service) ImportBulk(ctx context.Context, fh *multipart.FileHeader) (*BulkImportResp, error) {
 	claims := auth.ClaimsFromContext(ctx)
@@ -729,6 +750,18 @@ func (s *P5M12Service) GetValidation(ctx context.Context) (*ValidationResp, erro
 
 // ─── RPT-21: History ──────────────────────────────────────────────────────────
 
+// CountHistory returns the number of MAPPING.* audit log entries matching the filter.
+// Used by ExportHistory to decide whether to serve inline (≤ 10k) or truncate (> 10k).
+func (s *P5M12Service) CountHistory(ctx context.Context, filterEventCode string) (int, error) {
+	claims := auth.ClaimsFromContext(ctx)
+	tid := tenantID(claims)
+	n, err := s.repo.CountMappingHistoryRows(ctx, filterEventCode, tid)
+	if err != nil {
+		return 0, fmt.Errorf("P5M12Service.CountHistory: %w", err)
+	}
+	return n, nil
+}
+
 // GetHistory returns paginated MAPPING.* audit history (RPT-21).
 func (s *P5M12Service) GetHistory(ctx context.Context, filterEventCode string, cursor string, limit int) (*MappingAuditListResult, error) {
 	claims := auth.ClaimsFromContext(ctx)
@@ -782,22 +815,19 @@ func stringPtr(s string) *string {
 	return &s
 }
 
-// detailsToAkunDetail converts []*Detail to []AkunDetail for validation.
+// detailsToAkunDetail converts []*Detail to []AkunDetail for P5-M12 COA validation.
+// Reads AkunDebitCode and AkunKreditCode — the text COA codes stored in
+// mst.mapping_jurnal_detail.akun_debit / akun_kredit (migration 000049).
+// These fields are populated by GetDetailsByP5HeaderID.
 func detailsToAkunDetail(details []*Detail) []AkunDetail {
 	result := make([]AkunDetail, 0, len(details))
 	for _, d := range details {
-		ad := AkunDetail{
+		result = append(result, AkunDetail{
 			Urutan:      d.Urutan,
 			DebitKredit: mapDKIndicator(d.DKIndicator),
-		}
-		// Legacy Detail uses KodeAkunID (UUID); for P5-M12 validation,
-		// CoaCodeExists uses text code. If detail uses text akun_debit/kredit (P5 schema),
-		// those are in separate columns. We set them from the legacy fields.
-		// For new P5 detail rows, AkunDebit/AkunKredit text fields are stored differently.
-		// This converter is best-effort for mixed-schema.
-		ad.AkunDebit = d.KodeAkunID.String() // UUID as code (legacy compat)
-		ad.AkunKredit = d.KodeAkunID.String()
-		result = append(result, ad)
+			AkunDebit:   d.AkunDebitCode,
+			AkunKredit:  d.AkunKreditCode,
+		})
 	}
 	return result
 }

@@ -138,8 +138,8 @@ func TestP5Submit_CommitPath(t *testing.T) {
 	repo.versionHeader = h
 	repo.coaExists = true
 	repo.detailsResult = []*Detail{
-		{DKIndicator: "D", KodeAkunID: uuid.New()},
-		{DKIndicator: "K", KodeAkunID: uuid.New()},
+		makeAkunDetail("D", "110201", "440101"),
+		makeAkunDetail("K", "440101", "110201"),
 	}
 
 	repo.mock.ExpectBegin()
@@ -163,8 +163,8 @@ func TestP5Submit_SubmitVersionError_Rollback(t *testing.T) {
 	repo.versionHeader = h
 	repo.coaExists = true
 	repo.detailsResult = []*Detail{
-		{DKIndicator: "D", KodeAkunID: uuid.New()},
-		{DKIndicator: "K", KodeAkunID: uuid.New()},
+		makeAkunDetail("D", "110201", "440101"),
+		makeAkunDetail("K", "440101", "110201"),
 	}
 	repo.submitErr = errStubFail
 
@@ -335,7 +335,7 @@ func TestP5Approve2_CommitPath(t *testing.T) {
 	svc := newSvcTx(repo)
 	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{Sub: approver2ID.String(), TenantID: "TUGURE"})
 
-	result, err := svc.P5Approve2(ctx, h.EventCode, h.ID, P5ApproveReq{Comment: "approve-2 comment", SignatureMethod: "JWT_STEP_UP"}, "valid-step-up-token")
+	result, err := svc.P5Approve2(ctx, h.EventCode, h.ID, P5ApproveReq{Comment: "approve-2 comment", SignatureMethod: "JWT_STEP_UP"}, makeValidStepUpToken())
 	require.NoError(t, err)
 	assert.Equal(t, StatusApprovedActive, result.WorkflowStatus)
 	assert.True(t, result.AktifFlag)
@@ -361,7 +361,7 @@ func TestP5Approve2_Approve6EyesError_Rollback(t *testing.T) {
 	svc := newSvcTx(repo)
 	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{Sub: approver2ID.String(), TenantID: "TUGURE"})
 
-	_, err := svc.P5Approve2(ctx, h.EventCode, h.ID, P5ApproveReq{Comment: "approve-2 comment", SignatureMethod: "JWT_STEP_UP"}, "valid-step-up-token")
+	_, err := svc.P5Approve2(ctx, h.EventCode, h.ID, P5ApproveReq{Comment: "approve-2 comment", SignatureMethod: "JWT_STEP_UP"}, makeValidStepUpToken())
 	require.Error(t, err)
 	assert.NoError(t, repo.mock.ExpectationsWereMet())
 }

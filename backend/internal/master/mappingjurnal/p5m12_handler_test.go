@@ -275,10 +275,10 @@ func TestHandler_P5Approve2_MissingStepUpToken(t *testing.T) {
 	r, _ := buildHandlerRouter(repo)
 
 	body := []byte(`{"comment":"approve-2 comment","signatureMethod":"JWT_STEP_UP"}`)
-	// No X-Step-Up-Token header
+	// No X-Step-Up-Token header → MFA_STEP_UP_REQUIRED → HTTP 401 (per domain.go CodeMFAStepUpRequired mapping).
 	w := doHandlerRequest(r, http.MethodPost, "/api/v1/master/mapping-jurnal/"+h.EventCode+"/version/"+h.ID.String()+"/approve-2", body, nil)
-	assert.Equal(t, http.StatusForbidden, w.Code)
-	assert.Contains(t, w.Body.String(), "step-up")
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Contains(t, w.Body.String(), StepUpScopeMappingApprove)
 }
 
 func TestHandler_P5Approve2_InvalidVersionUUID(t *testing.T) {
@@ -294,14 +294,15 @@ func TestHandler_P5Approve2_SoDViolation(t *testing.T) {
 	makerID := uuid.New()
 	reviewerID := uuid.New()
 	approverID := handlerTestActorID // approver = caller → SoD when trying to be approver-2 is same as approver
-	// Actually approver-2 SoD blocks if actor == approver
+	// Actually approver-2 SoD blocks if actor == approver.
 	h := makeVersionHeader(StatusPendingApproval2, &makerID, &reviewerID, &approverID)
 	h.RegulatedFlag = true
 	repo := &svcP5Repo{versionHeader: h, periodeStatus: "OPEN"}
 	r, _ := buildHandlerRouter(repo)
 
 	body := []byte(`{"comment":"approve-2 comment","signatureMethod":"JWT_STEP_UP"}`)
-	w := doHandlerRequest(r, http.MethodPost, "/api/v1/master/mapping-jurnal/"+h.EventCode+"/version/"+h.ID.String()+"/approve-2", body, map[string]string{"X-Step-Up-Token": "valid"})
+	// Must pass a valid step-up JWT so token check passes and SoD check is reached.
+	w := doHandlerRequest(r, http.MethodPost, "/api/v1/master/mapping-jurnal/"+h.EventCode+"/version/"+h.ID.String()+"/approve-2", body, map[string]string{"X-Step-Up-Token": makeValidStepUpToken()})
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
@@ -315,7 +316,8 @@ func TestHandler_P5Approve2_Happy(t *testing.T) {
 	r, _ := buildHandlerRouter(repo)
 
 	body := []byte(`{"comment":"approve-2 comment","signatureMethod":"JWT_STEP_UP"}`)
-	w := doHandlerRequest(r, http.MethodPost, "/api/v1/master/mapping-jurnal/"+h.EventCode+"/version/"+h.ID.String()+"/approve-2", body, map[string]string{"X-Step-Up-Token": "valid-step-up-token"})
+	// Valid step-up token so the service proceeds past step-up check and fails at BeginTx (no DB) → 500.
+	w := doHandlerRequest(r, http.MethodPost, "/api/v1/master/mapping-jurnal/"+h.EventCode+"/version/"+h.ID.String()+"/approve-2", body, map[string]string{"X-Step-Up-Token": makeValidStepUpToken()})
 	// BeginTx fails (no DB) → 500
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }
@@ -565,4 +567,43 @@ func TestHandler_P5ExportHistory_DBError(t *testing.T) {
 
 	w := doHandlerRequest(r, http.MethodGet, "/api/v1/reports/rpt-21-mapping-history/export", nil, nil)
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+// M7: ExportHistory sets X-Truncated: true when row count exceeds 10k cap.
+func TestHandler_P5ExportHistory_TruncatedHeader_WhenOver10k(t *testing.T) {
+	repo := &svcP5Repo{
+		historyCountOverride: 15000, // simulate 15k rows
+		historyEntries:       []MappingAuditEntry{},
+	}
+	r, _ := buildHandlerRouter(repo)
+
+	w := doHandlerRequest(r, http.MethodGet, "/api/v1/reports/rpt-21-mapping-history/export", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "true", w.Header().Get("X-Truncated"),
+		"X-Truncated must be 'true' when row count > 10k")
+	assert.Equal(t, "15000", w.Header().Get("X-Total-Rows-Estimate"),
+		"X-Total-Rows-Estimate must reflect actual count")
+}
+
+// M7: ExportHistory does NOT set X-Truncated when row count is within cap.
+func TestHandler_P5ExportHistory_NoTruncatedHeader_WhenUnder10k(t *testing.T) {
+	repo := &svcP5Repo{
+		historyEntries: []MappingAuditEntry{
+			{
+				EventID:     uuid.New(),
+				EventTime:   time.Now(),
+				ActorUserID: uuid.New(),
+				ActorRole:   "ROLE-AKUN",
+				Action:      "MAPPING.SUBMITTED",
+				EntityType:  "mst.mapping_jurnal_header",
+				EntityID:    uuid.New(),
+			},
+		},
+	}
+	r, _ := buildHandlerRouter(repo)
+
+	w := doHandlerRequest(r, http.MethodGet, "/api/v1/reports/rpt-21-mapping-history/export", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Empty(t, w.Header().Get("X-Truncated"),
+		"X-Truncated must not be set when row count ≤ 10k")
 }

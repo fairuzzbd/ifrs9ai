@@ -19,7 +19,9 @@ package mappingjurnal
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 	"time"
@@ -64,10 +66,11 @@ type svcP5Repo struct {
 	coverageErr        error
 	validationResp     *ValidationResp
 	validationErr      error
-	historyEntries     []MappingAuditEntry
-	historyNextCursor  *string
-	historyHasMore     bool
-	historyErr         error
+	historyEntries       []MappingAuditEntry
+	historyNextCursor    *string
+	historyHasMore       bool
+	historyErr           error
+	historyCountOverride int // if > 0, CountMappingHistoryRows returns this value
 	submitErr          error
 	reviewErr          error
 	approve4Err        error
@@ -198,6 +201,9 @@ func (r *svcP5Repo) InsertDraftForBulkRow(_ context.Context, _ *sql.Tx, _ Mappin
 func (r *svcP5Repo) InsertUploadBatch(_ context.Context, _ *sql.Tx, _ uuid.UUID, _ uuid.UUID, _, _, _ int, _ string) error {
 	return r.insertBatchErr
 }
+func (r *svcP5Repo) GetDetailsByP5HeaderID(_ context.Context, _ uuid.UUID) ([]*Detail, error) {
+	return r.detailsResult, r.detailsErr
+}
 func (r *svcP5Repo) GetCoverageReport(_ context.Context, _ string) (*CoverageResp, error) {
 	return r.coverageResp, r.coverageErr
 }
@@ -206,6 +212,12 @@ func (r *svcP5Repo) GetValidationReport(_ context.Context, _ string) (*Validatio
 }
 func (r *svcP5Repo) ListMappingHistory(_ context.Context, _ listquery.Query, _ string, _ string, _ int, _ string) ([]MappingAuditEntry, *string, bool, error) {
 	return r.historyEntries, r.historyNextCursor, r.historyHasMore, r.historyErr
+}
+func (r *svcP5Repo) CountMappingHistoryRows(_ context.Context, _ string, _ string) (int, error) {
+	if r.historyCountOverride > 0 {
+		return r.historyCountOverride, nil
+	}
+	return len(r.historyEntries), nil
 }
 
 var _ P5M12Repository = (*svcP5Repo)(nil)
@@ -250,6 +262,26 @@ func makeVersionHeader(status WorkflowStatus, maker, reviewer, approver *uuid.UU
 
 func newSvc(repo *svcP5Repo) *P5M12Service {
 	return NewP5M12Service(repo, nil) // nil audit.Writer — writeAuditP5 is no-op when aw==nil
+}
+
+// makeValidStepUpToken creates a minimal JWT-format step-up token for tests.
+// It has scope=mapping_approve, a fresh iat, and a far-future exp.
+// The signature segment is not verified (verifyMappingStepUp only parses the payload).
+func makeValidStepUpToken() string {
+	iat := time.Now().Unix()
+	payload := fmt.Sprintf(`{"scope":"mapping_approve","iat":%d,"exp":9999999999,"jti":"test-jti"}`, iat)
+	payloadB64 := base64.RawURLEncoding.EncodeToString([]byte(payload))
+	return "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9." + payloadB64 + ".fakesig"
+}
+
+// makeAkunDetail creates a Detail with proper text COA codes for P5 validation.
+func makeAkunDetail(dkIndicator, akunDebit, akunKredit string) *Detail {
+	return &Detail{
+		ID:             uuid.New(),
+		DKIndicator:    dkIndicator,
+		AkunDebitCode:  akunDebit,
+		AkunKreditCode: akunKredit,
+	}
 }
 
 // ─── CreateNewVersion tests ───────────────────────────────────────────────────
@@ -385,12 +417,12 @@ func TestP5Submit_UnbalancedDetails(t *testing.T) {
 	vID := uuid.New()
 	makerID := uuid.New()
 	h := makeVersionHeader(WorkflowStatusDraft, &makerID, nil, nil)
-	// Two debit rows, no kredit
+	// Two debit rows, no kredit — will fail balance check AFTER empty-check passes
 	repo := &svcP5Repo{
 		versionHeader: h,
 		detailsResult: []*Detail{
-			{DKIndicator: "D", KodeAkunID: uuid.New()},
-			{DKIndicator: "D", KodeAkunID: uuid.New()},
+			makeAkunDetail("D", "110201", "440101"),
+			makeAkunDetail("D", "110202", "440102"),
 		},
 	}
 	svc := newSvc(repo)
@@ -408,8 +440,8 @@ func TestP5Submit_COAInvalid(t *testing.T) {
 	repo := &svcP5Repo{
 		versionHeader: h,
 		detailsResult: []*Detail{
-			{DKIndicator: "D", KodeAkunID: uuid.New()},
-			{DKIndicator: "K", KodeAkunID: uuid.New()},
+			makeAkunDetail("D", "110201", "440101"),
+			makeAkunDetail("K", "440101", "110201"),
 		},
 		coaExists: false, // COA not found
 	}
@@ -427,8 +459,8 @@ func TestP5Submit_HappyPath(t *testing.T) {
 	repo := &svcP5Repo{
 		versionHeader: h,
 		detailsResult: []*Detail{
-			{DKIndicator: "D", KodeAkunID: uuid.New()},
-			{DKIndicator: "K", KodeAkunID: uuid.New()},
+			makeAkunDetail("D", "110201", "440101"),
+			makeAkunDetail("K", "440101", "110201"),
 		},
 		coaExists: true,
 		// BeginTx returns errTestSvcNoDB — but we check guards pass first.
@@ -589,17 +621,20 @@ func TestP5Approve2_MissingStepUpToken(t *testing.T) {
 
 	_, err := svc.P5Approve2(ctxWithActor(uuid.New()), "ECL_PEMBENTUKAN", vID, P5ApproveReq{Comment: "approve 2 comment", SignatureMethod: "JWT_STEP_UP"}, "")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "step-up MFA")
+	// Empty token → MFA_STEP_UP_REQUIRED with scope message
+	assert.Contains(t, err.Error(), StepUpScopeMappingApprove)
 }
 
 func TestP5Approve2_WrongStatus(t *testing.T) {
 	vID := uuid.New()
 	makerID := uuid.New()
+	// Header status is PENDING_APPROVAL (not PENDING_APPROVAL_2) → WORKFLOW_INVALID_TRANSITION.
+	// Need valid JWT so step-up check passes and status check is reached.
 	h := makeVersionHeader(WorkflowStatusPendingApproval, &makerID, nil, nil)
 	repo := &svcP5Repo{versionHeader: h}
 	svc := newSvc(repo)
 
-	_, err := svc.P5Approve2(ctxWithActor(uuid.New()), h.EventCode, vID, P5ApproveReq{Comment: "approve 2 comment", SignatureMethod: "JWT_STEP_UP"}, "valid-step-up-token")
+	_, err := svc.P5Approve2(ctxWithActor(uuid.New()), h.EventCode, vID, P5ApproveReq{Comment: "approve 2 comment", SignatureMethod: "JWT_STEP_UP"}, makeValidStepUpToken())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "WORKFLOW_INVALID_TRANSITION")
 }
@@ -614,7 +649,7 @@ func TestP5Approve2_SoDViolation_MakerEqualsApprover2(t *testing.T) {
 	repo := &svcP5Repo{versionHeader: h}
 	svc := newSvc(repo)
 
-	_, err := svc.P5Approve2(ctxWithActor(makerID), h.EventCode, vID, P5ApproveReq{Comment: "approve 2 comment", SignatureMethod: "JWT_STEP_UP"}, "valid-step-up-token")
+	_, err := svc.P5Approve2(ctxWithActor(makerID), h.EventCode, vID, P5ApproveReq{Comment: "approve 2 comment", SignatureMethod: "JWT_STEP_UP"}, makeValidStepUpToken())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), CodeMappingSoDViolation)
 }
@@ -629,7 +664,7 @@ func TestP5Approve2_SoDViolation_ReviewerEqualsApprover2(t *testing.T) {
 	repo := &svcP5Repo{versionHeader: h}
 	svc := newSvc(repo)
 
-	_, err := svc.P5Approve2(ctxWithActor(reviewerID), h.EventCode, vID, P5ApproveReq{Comment: "approve 2 comment", SignatureMethod: "JWT_STEP_UP"}, "valid-step-up-token")
+	_, err := svc.P5Approve2(ctxWithActor(reviewerID), h.EventCode, vID, P5ApproveReq{Comment: "approve 2 comment", SignatureMethod: "JWT_STEP_UP"}, makeValidStepUpToken())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), CodeMappingSoDViolation)
 }
@@ -644,7 +679,7 @@ func TestP5Approve2_SoDViolation_ApproverEqualsApprover2(t *testing.T) {
 	repo := &svcP5Repo{versionHeader: h}
 	svc := newSvc(repo)
 
-	_, err := svc.P5Approve2(ctxWithActor(approverID), h.EventCode, vID, P5ApproveReq{Comment: "approve 2 comment", SignatureMethod: "JWT_STEP_UP"}, "valid-step-up-token")
+	_, err := svc.P5Approve2(ctxWithActor(approverID), h.EventCode, vID, P5ApproveReq{Comment: "approve 2 comment", SignatureMethod: "JWT_STEP_UP"}, makeValidStepUpToken())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), CodeMappingSoDViolation)
 }
@@ -663,7 +698,7 @@ func TestP5Approve2_PeriodeLocked(t *testing.T) {
 	}
 	svc := newSvc(repo)
 
-	_, err := svc.P5Approve2(ctxWithActor(approver2ID), h.EventCode, vID, P5ApproveReq{Comment: "approve 2 comment", SignatureMethod: "JWT_STEP_UP"}, "valid-step-up-token")
+	_, err := svc.P5Approve2(ctxWithActor(approver2ID), h.EventCode, vID, P5ApproveReq{Comment: "approve 2 comment", SignatureMethod: "JWT_STEP_UP"}, makeValidStepUpToken())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "MAPPING_PERIODE_LOCKED")
 }
@@ -682,7 +717,7 @@ func TestP5Approve2_HappyPath_Regulated(t *testing.T) {
 	}
 	svc := newSvc(repo)
 
-	_, err := svc.P5Approve2(ctxWithActor(approver2ID), h.EventCode, vID, P5ApproveReq{Comment: "approve 2 comment", SignatureMethod: "JWT_STEP_UP"}, "valid-step-up-token")
+	_, err := svc.P5Approve2(ctxWithActor(approver2ID), h.EventCode, vID, P5ApproveReq{Comment: "approve 2 comment", SignatureMethod: "JWT_STEP_UP"}, makeValidStepUpToken())
 	// Only DB error expected (begin tx)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "begin tx")

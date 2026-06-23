@@ -54,6 +54,9 @@ type P5M12Repository interface {
 	GetConfigParam(ctx context.Context, key string) (string, error)
 	GetPeriodeStatus(ctx context.Context, tenantID string) (string, error)
 
+	// P5 detail fetch (akun_debit/akun_kredit text columns, migration 000049)
+	GetDetailsByP5HeaderID(ctx context.Context, headerID uuid.UUID) ([]*Detail, error)
+
 	// Bulk import
 	InsertDraftForBulkRow(ctx context.Context, tx *sql.Tx, row MappingBulkRow, batchID uuid.UUID, actor uuid.UUID, tenantID string) error
 	InsertUploadBatch(ctx context.Context, tx *sql.Tx, batchID uuid.UUID, actor uuid.UUID, totalRows, validRows, invalidRows int, tenantID string) error
@@ -66,6 +69,8 @@ type P5M12Repository interface {
 
 	// RPT-21
 	ListMappingHistory(ctx context.Context, q listquery.Query, filterEventCode string, cursor string, limit int, tenantID string) ([]MappingAuditEntry, *string, bool, error)
+	// CountMappingHistoryRows returns approximate row count for RPT-21; used by ExportHistory to decide inline vs async.
+	CountMappingHistoryRows(ctx context.Context, filterEventCode string, tenantID string) (int, error)
 }
 
 // Compile-time check: DBRepository implements P5M12Repository.
@@ -182,35 +187,25 @@ INSERT INTO mst.mapping_jurnal_detail (
 	return nil
 }
 
-// FlipActiveVersion atomically sets effective_to=now() on current APPROVED_ACTIVE row
-// for eventCode, then activates newVersionID.
+// FlipActiveVersion atomically closes the effective_to on the prior APPROVED_ACTIVE row
+// for eventCode. The new version's aktif_flag and effective_from are already set by
+// Approve4Eyes / Approve6Eyes in the same transaction (B4 fix: single UPDATE per row).
 // Called WITHIN the approve/approve-2 transaction (already open).
 func (r *DBRepository) FlipActiveVersion(ctx context.Context, tx *sql.Tx, eventCode string, newVersionID uuid.UUID, actor uuid.UUID, tenantID string) error {
-	// Step 1: close prior ACTIVE version's effective_to
-	const close = `
+	// Close prior ACTIVE version's effective_to (excludes newVersionID to avoid self-update).
+	const closePrior = `
 UPDATE mst.mapping_jurnal_header
 SET effective_to = now(),
     updated_at   = now(),
     updated_by   = $1,
     row_version  = row_version + 1
 WHERE event_code = $2
+  AND id         <> $3
   AND workflow_status = 'APPROVED_ACTIVE'
   AND deleted_at IS NULL
-  AND tenant_id = $3`
-	if _, err := tx.ExecContext(ctx, close, actor, eventCode, tenantID); err != nil {
+  AND tenant_id = $4`
+	if _, err := tx.ExecContext(ctx, closePrior, actor, eventCode, newVersionID, tenantID); err != nil {
 		return fmt.Errorf("repo.FlipActiveVersion close prior: %w", err)
-	}
-	// Step 2: set new version aktif_flag = TRUE (workflow_status already set by caller)
-	const activate = `
-UPDATE mst.mapping_jurnal_header
-SET aktif_flag  = TRUE,
-    effective_to = 'infinity'::TIMESTAMPTZ,
-    updated_at   = now(),
-    updated_by   = $1,
-    row_version  = row_version + 1
-WHERE id = $2 AND tenant_id = $3`
-	if _, err := tx.ExecContext(ctx, activate, actor, newVersionID, tenantID); err != nil {
-		return fmt.Errorf("repo.FlipActiveVersion activate: %w", err)
 	}
 	return nil
 }
@@ -267,10 +262,14 @@ WHERE id = $6 AND workflow_status = 'PENDING_REVIEW' AND tenant_id = $7 AND dele
 }
 
 // Approve4Eyes transitions PENDING_APPROVAL → APPROVED_ACTIVE (4-eyes path).
+// B4: aktif_flag + effective_from set in the same UPDATE to avoid a second UPDATE that would
+// conflict with the immutability trigger on APPROVED_ACTIVE rows.
 func (r *DBRepository) Approve4Eyes(ctx context.Context, tx *sql.Tx, versionID uuid.UUID, approverID uuid.UUID, sigHash []byte, comment string, now time.Time, tenantID string) error {
 	const q = `
 UPDATE mst.mapping_jurnal_header
 SET workflow_status          = 'APPROVED_ACTIVE',
+    aktif_flag               = TRUE,
+    effective_from           = $2,
     approver_id              = $1,
     approver_signed_at       = $2,
     approver_signature_hash  = $3,
@@ -290,10 +289,14 @@ WHERE id = $5 AND workflow_status = 'PENDING_APPROVAL' AND tenant_id = $6 AND de
 }
 
 // Approve6Eyes transitions PENDING_APPROVAL_2 → APPROVED_ACTIVE (6-eyes path).
+// B4: aktif_flag + effective_from set in the same UPDATE to avoid a second UPDATE that would
+// conflict with the immutability trigger on APPROVED_ACTIVE rows.
 func (r *DBRepository) Approve6Eyes(ctx context.Context, tx *sql.Tx, versionID uuid.UUID, approver2ID uuid.UUID, sigHash, tokenRef []byte, comment string, now time.Time, tenantID string) error {
 	const q = `
 UPDATE mst.mapping_jurnal_header
 SET workflow_status              = 'APPROVED_ACTIVE',
+    aktif_flag                   = TRUE,
+    effective_from               = $2,
     approver_2_id                = $1,
     approver_2_signed_at         = $2,
     approver_2_signature_hash    = $3,
@@ -483,6 +486,61 @@ INSERT INTO mst.mapping_jurnal_detail (
 		return fmt.Errorf("repo.InsertDraftForBulkRow detail: %w", err)
 	}
 	return nil
+}
+
+// ─── P5 detail fetch ─────────────────────────────────────────────────────────
+
+// GetDetailsByP5HeaderID fetches detail rows from the P5-M12 schema that includes
+// akun_debit and akun_kredit text columns (migration 000049).
+// Returns []*Detail with AkunDebitCode and AkunKreditCode populated.
+func (r *DBRepository) GetDetailsByP5HeaderID(ctx context.Context, headerID uuid.UUID) ([]*Detail, error) {
+	const q = `
+SELECT id, event_header_id, urutan,
+       akun_debit, akun_kredit, dk_indicator, jumlah_calc,
+       created_at, created_by, updated_at, updated_by, row_version, tenant_id
+FROM mst.mapping_jurnal_detail
+WHERE event_header_id = $1 AND deleted_at IS NULL
+ORDER BY urutan ASC`
+	rows, err := r.db.QueryContext(ctx, q, headerID)
+	if err != nil {
+		return nil, fmt.Errorf("repo.GetDetailsByP5HeaderID: %w", err)
+	}
+	defer rows.Close()
+
+	var items []*Detail
+	for rows.Next() {
+		d := &Detail{}
+		var jumlahCalc sql.NullString
+		if err := rows.Scan(
+			&d.ID, &d.EventHeaderID, &d.Urutan,
+			&d.AkunDebitCode, &d.AkunKreditCode, &d.DKIndicator, &jumlahCalc,
+			&d.CreatedAt, &d.CreatedBy, &d.UpdatedAt, &d.UpdatedBy, &d.RowVersion, &d.TenantID,
+		); err != nil {
+			return nil, fmt.Errorf("repo.GetDetailsByP5HeaderID scan: %w", err)
+		}
+		items = append(items, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repo.GetDetailsByP5HeaderID rows.Err: %w", err)
+	}
+	return items, nil
+}
+
+// CountMappingHistoryRows returns the approximate number of MAPPING.* audit log entries.
+// Used by ExportHistory to decide inline vs async export.
+func (r *DBRepository) CountMappingHistoryRows(ctx context.Context, filterEventCode string, tenantID string) (int, error) {
+	args := []interface{}{tenantID}
+	where := "tenant_id = $1 AND action LIKE 'MAPPING.%'"
+	if filterEventCode != "" {
+		args = append(args, filterEventCode)
+		where += fmt.Sprintf(" AND after_jsonb->>'event_code' = $%d", len(args))
+	}
+	var count int
+	err := r.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM aud.audit_log WHERE %s", where), args...).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("repo.CountMappingHistoryRows: %w", err)
+	}
+	return count, nil
 }
 
 // ─── RPT-19 Coverage ─────────────────────────────────────────────────────────
@@ -837,10 +895,25 @@ func joinStr(parts []string, sep string) string {
 	return result
 }
 
-// writeAuditP5 writes an audit event in-transaction. Logs on error, never panics.
+// writeAuditP5 writes an audit event to aud.audit_log.
+// When tx is non-nil the write is bound to the open transaction (standard path).
+// When tx is nil the write uses a standalone DB connection — used for SoD violation
+// attempts so the audit row is persisted even though no business transaction is open
+// (B3: MAPPING.SOD_VIOLATION_ATTEMPT must always land, never be swallowed).
+// When aw is nil (test or unconfigured), the call is silently skipped.
 func writeAuditP5(ctx context.Context, tx *sql.Tx, aw *audit.Writer, evt audit.Event) {
-	if aw == nil || tx == nil {
+	if aw == nil {
 		return
 	}
-	_ = aw.WithTx(tx).Write(ctx, evt)
+	if tx != nil {
+		_ = aw.WithTx(tx).Write(ctx, evt)
+		return
+	}
+	// Standalone write (no open tx): best-effort. Errors are intentionally ignored
+	// so that an audit infrastructure failure never blocks the 403 response.
+	// Guard with IsReady() to avoid nil-db panic in test environments where
+	// audit.NewWriter(nil) is used. Production path always has a valid db.
+	if aw.IsReady() {
+		_ = aw.Write(ctx, evt)
+	}
 }
