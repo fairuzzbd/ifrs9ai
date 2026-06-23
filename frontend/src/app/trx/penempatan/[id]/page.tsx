@@ -19,6 +19,7 @@ import { RejectDialog } from "@/components/blips/penempatan/dialogs/RejectDialog
 import { WithdrawDialog } from "@/components/blips/penempatan/dialogs/WithdrawDialog";
 import { TerminateApproveDialog } from "@/components/blips/penempatan/dialogs/TerminateApproveDialog";
 import { SodBlockBanner } from "@/components/blips/SodBlockBanner";
+import { PeriodeLockBanner } from "@/components/blips/periode-close/PeriodeLockBanner";
 import { JobProgressPanel } from "@/components/blips/JobProgressPanel";
 import { JSONBTreeView } from "@/components/blips/JSONBTreeView";
 import { notify } from "@/lib/notify";
@@ -365,6 +366,10 @@ export default function PenempatanDetailPage({ params }: PageProps) {
 
   return (
     <div className="p-6 space-y-4">
+      {/* Periode lock banner */}
+      {penempatan.periodeId && (
+        <PeriodeLockBanner periodeId={penempatan.periodeId} />
+      )}
       {/* Breadcrumb */}
       <nav aria-label="Breadcrumb" className="flex items-center gap-1 text-sm text-gray-500">
         <Link href="/trx/penempatan" className="hover:underline">Penempatan Deposito</Link>
