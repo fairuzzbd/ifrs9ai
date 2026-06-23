@@ -217,6 +217,20 @@ const ERROR_MESSAGE_MAP: Record<string, string> = {
   BULK_APPROVE_SOD_VIOLATION:
     "SoD: Maker tidak dapat menjadi approver untuk batch yang sama (DEC-017). Gunakan akun ROLE-APPR-TR yang berbeda.",
 
+  // --- Reporting MV + Export + Scheduled Email (P5-M13) ---
+  EXPORT_TOO_LARGE:
+    "Dataset melebihi batas 100.000 baris per export. Gunakan filter untuk mempersempit data sebelum export.",
+  EXPORT_PERMISSION_DENIED:
+    "Anda tidak punya permission untuk export laporan ini. Hubungi ROLE-IT-ADMIN untuk request akses.",
+  EXPORT_FORMAT_UNSUPPORTED:
+    "Format export tidak didukung. Format tersedia: CSV, XLSX, PDF.",
+  MV_REFRESH_LOCKED:
+    "Refresh Materialized View sedang berjalan. Coba lagi setelah proses refresh selesai.",
+  MV_REFRESH_FAILED:
+    "Refresh Materialized View gagal. Periksa DLQ dan log sistem. Hubungi ROLE-IT-ADMIN.",
+  SCHEDULED_EMAIL_SMTP_FAILED:
+    "Pengiriman email terjadwal gagal setelah 3x percobaan. Job dipindah ke DLQ. Periksa konfigurasi SMTP.",
+
   // --- GL Delivery (P5-M3) ---
   GL_DELIVERY_JURNAL_NOT_FOUND:
     "Jurnal header tidak ditemukan.",
