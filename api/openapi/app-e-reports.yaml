@@ -1,0 +1,409 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-E Reports (P5-M14)
+  version: "1.0.0"
+  description: |
+    P5-M14: 25 REST report endpoints (RPT-01..18, RPT-22, RPT-22b, RPT-23, RPT-25..28).
+    RPT-19/20/21 → M12. RPT-24 → M4.
+
+    Architecture:
+    - All list endpoints: GET /reports/{slug} — sort+filter+cursor (UX §1)
+    - Export: GET /reports/{slug}/export — inline <10k or async ≥10k (M13 engine)
+    - Special: POST /reports/rpt-28/export — MFA step-up + composite XLSX
+
+    References: P5-M14-S1..S5, DEC-007, DEC-018, DEC-021, DEC-022.
+
+servers:
+  - url: /api/v1
+
+security:
+  - bearerAuth: []
+
+paths:
+
+  # ─── Generic list endpoint (25 slugs) ──────────────────────────────────────
+  /reports/{slug}:
+    get:
+      operationId: getReport
+      summary: List report data for any of 25 report slugs (RPT-01..18, RPT-22, RPT-22b, RPT-23, RPT-25..28)
+      description: |
+        Cursor-based list with sort + filter per §1.
+        Permission: report.{slug}.read OR report.*.read (ROLE-AUDIT wildcard).
+        Read-replica routing active.
+        statement_timeout = 30s; REPORT_QUERY_TIMEOUT on exceed.
+      tags: [reports]
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          description: Report slug (e.g. rpt-01, rpt-13, rpt-28)
+          schema:
+            type: string
+            example: "rpt-01"
+        - $ref: "_common.yaml#/components/parameters/cursor"
+        - $ref: "_common.yaml#/components/parameters/limit"
+        - $ref: "_common.yaml#/components/parameters/sortParam"
+        - name: q
+          in: query
+          description: Global text search
+          schema:
+            type: string
+        - name: filter
+          in: query
+          description: "Column filters: filter[col]=val or filter[col]=op:val"
+          schema:
+            type: object
+            additionalProperties:
+              type: string
+          style: deepObject
+          explode: true
+        - name: calc_run_id
+          in: query
+          description: "RPT-13/RPT-27: filter by calc run ID"
+          schema:
+            type: string
+        - name: periode_id
+          in: query
+          description: "Filter by periode buku ID"
+          schema:
+            type: string
+        - name: instrumen_id
+          in: query
+          description: "Filter by instrumen ID"
+          schema:
+            type: string
+        - name: schedule_version
+          in: query
+          description: "RPT-17: filter EIR schedule version"
+          schema:
+            type: integer
+        - name: w_good
+          in: query
+          description: "RPT-27 sensitivity: scenario weight Good"
+          schema:
+            type: number
+            format: double
+        - name: w_normal
+          in: query
+          description: "RPT-27 sensitivity: scenario weight Normal"
+          schema:
+            type: number
+            format: double
+        - name: w_bad
+          in: query
+          description: "RPT-27 sensitivity: scenario weight Bad"
+          schema:
+            type: number
+            format: double
+      responses:
+        "200":
+          description: Report data (cursor-paged)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "_common.yaml#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+                      appliedSort:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/AppliedSortItem"
+                      appliedFilter:
+                        type: object
+                        additionalProperties: true
+        "400":
+          description: Invalid sort/filter column or params
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: REPORT_PARAMS_INVALID
+                  message: "Kolom sort 'xyz' tidak diizinkan untuk laporan rpt-01."
+        "401":
+          $ref: "_common.yaml#/components/responses/Unauthorized"
+        "403":
+          description: Permission denied
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: REPORT_PERMISSION_DENIED
+                  message: "Tidak punya permission 'report.rpt-13.read'."
+        "404":
+          description: Report slug not found in registry
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: REPORT_NOT_FOUND
+                  message: "Laporan 'rpt-99' tidak ditemukan."
+        "422":
+          description: Date range invalid or query timeout
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/ErrorEnvelope"
+
+  # ─── Generic export endpoint ────────────────────────────────────────────────
+  /reports/{slug}/export:
+    get:
+      operationId: exportReport
+      summary: Export report — inline CSV/XLSX/PDF (<10k) or async job (≥10k)
+      description: |
+        Permission: report.{slug}.export OR report.*.export (ROLE-AUDIT).
+        Inline (<= 10k rows): HTTP 200 streaming file.
+        Async (> 10k rows): HTTP 202 { jobId, statusUrl, streamUrl } via M13-S4 Asynq.
+        Audit EXPORT.GENERATED written in-transaction for both paths.
+        Idempotency-Key required.
+      tags: [reports]
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: format
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [csv, xlsx, pdf]
+          description: Export format
+        - $ref: "_common.yaml#/components/parameters/sortParam"
+        - name: filter
+          in: query
+          description: "Same filter params as list endpoint"
+          schema:
+            type: object
+            additionalProperties:
+              type: string
+          style: deepObject
+          explode: true
+        - name: periode_id
+          in: query
+          schema:
+            type: string
+        - name: calc_run_id
+          in: query
+          schema:
+            type: string
+        - name: instrumen_id
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Inline export (< 10k rows)
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "202":
+          description: Async export enqueued (>= 10k rows)
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/SuccessEnvelope"
+              example:
+                data:
+                  jobId: "JOB-RPT13-001"
+                  statusUrl: "/api/v1/jobs/JOB-RPT13-001"
+                  streamUrl: "/api/v1/jobs/JOB-RPT13-001/stream"
+        "400":
+          description: Invalid params or format
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/ErrorEnvelope"
+        "401":
+          $ref: "_common.yaml#/components/responses/Unauthorized"
+        "403":
+          description: Export permission denied
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: REPORT_PERMISSION_DENIED
+                  message: "Tidak punya permission 'report.rpt-13.export'."
+        "404":
+          description: Slug not found
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/ErrorEnvelope"
+        "422":
+          description: Query timeout or params invalid
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/ErrorEnvelope"
+
+  # ─── RPT-28 Regulator Submission Pack (special POST) ──────────────────────
+  /reports/rpt-28/export:
+    post:
+      operationId: exportRegulatorPack
+      summary: "RPT-28: Regulator Submission Pack — ROLE-CFO only; MFA step-up; composite XLSX"
+      description: |
+        Generates consolidated XLSX: sheets Jurnal, ECL Summary, EIR Schedule, GL Delivery.
+        SHA-256 hash + text watermark on cover sheet.
+        MFA step-up required: X-Step-Up-Token header (DEC-027).
+        Permission: report.rpt-28.export (ROLE-CFO only).
+        Always async (may be > 10k rows). Returns 202 { jobId }.
+        Audit EXPORT.REGULATOR_PACK_GENERATED in-transaction.
+        Idempotency-Key required.
+      tags: [reports]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: X-Step-Up-Token
+          in: header
+          required: true
+          description: Step-up MFA token (scope=regulator_pack)
+          schema:
+            type: string
+        - $ref: "_common.yaml#/components/parameters/idempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RPT28ExportRequest"
+      responses:
+        "202":
+          description: Regulator pack job enqueued
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/SuccessEnvelope"
+              example:
+                data:
+                  jobId: "JOB-RPT28-001"
+                  statusUrl: "/api/v1/jobs/JOB-RPT28-001"
+                  streamUrl: "/api/v1/jobs/JOB-RPT28-001/stream"
+        "400":
+          description: Invalid body
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/ErrorEnvelope"
+        "401":
+          $ref: "_common.yaml#/components/responses/Unauthorized"
+        "403":
+          description: Permission denied or step-up MFA missing/expired
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                permission:
+                  value:
+                    error:
+                      code: REPORT_PERMISSION_DENIED
+                      message: "Tidak punya permission 'report.rpt-28.export'. Hanya ROLE-CFO."
+                stepup:
+                  value:
+                    error:
+                      code: STEP_UP_REQUIRED
+                      message: "Step-up MFA wajib untuk RPT-28 export."
+        "422":
+          description: Missing periode_id or format
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/ErrorEnvelope"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+
+    AppliedSortItem:
+      type: object
+      properties:
+        col:
+          type: string
+        dir:
+          type: string
+          enum: [asc, desc]
+
+    RPT28ExportRequest:
+      type: object
+      required:
+        - periode_id
+        - format
+      properties:
+        periode_id:
+          type: string
+          description: "Periode buku ID (e.g. PRD-2026-06)"
+        format:
+          type: string
+          enum: [xlsx]
+          default: xlsx
+          description: "Only XLSX supported for regulator pack"
+        include_sheets:
+          type: array
+          items:
+            type: string
+            enum: [jurnal, ecl_summary, eir_schedule, gl_delivery]
+          description: "Sheets to include (default: all 4)"
+
+    # ─── Report metadata table (28 rows) ────────────────────────────────────
+    ReportCatalogEntry:
+      type: object
+      properties:
+        slug:
+          type: string
+        name:
+          type: string
+        category:
+          type: string
+          enum: [master, transaksi, ecl_eir, jurnal_gl, compliance]
+        source:
+          type: string
+          description: "Source MV or table"
+        required_permission:
+          type: string
+        async_threshold_override:
+          type: integer
+          nullable: true
+          description: "Override inline threshold; null = use global 10k"
+        regulated_flag:
+          type: boolean
+          description: "true → REPORT.{slug}_VIEWED audit on each view"
+        default_sort:
+          type: string
+
+    # ─── Error codes (M14 new) ───────────────────────────────────────────────
+    # These are added to _common.yaml ErrorCode enum conceptually:
+    # REPORT_NOT_FOUND      — 404
+    # REPORT_PARAMS_INVALID — 400
+    # REPORT_PERIODE_INVALID— 422
+    # REPORT_QUERY_TIMEOUT  — 422
+    # REPORT_PERMISSION_DENIED — 403

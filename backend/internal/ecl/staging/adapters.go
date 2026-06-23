@@ -34,14 +34,17 @@ func (r *DBInstrumenReader) GetByID(ctx context.Context, id uuid.UUID) (*Instrum
 	if r.db == nil {
 		return nil, ErrNotFound
 	}
+	// M3 fix: include is_poci so staging engine can gate POCI instruments.
 	q := `
-		SELECT i.id, i.klasifikasi_psak71, i.status, i.tanggal_penempatan, i.tenant_id
+		SELECT i.id, i.klasifikasi_psak71, i.status, i.tanggal_penempatan, i.tenant_id,
+		       COALESCE(i.is_poci, FALSE)
 		FROM mst.instrumen i
 		WHERE i.id = $1 AND i.deleted_at IS NULL
 		LIMIT 1`
 	var snap InstrumenSnapshot
 	err := r.db.QueryRowContext(ctx, q, id).Scan(
 		&snap.ID, &snap.KlasifikasiPSAK71, &snap.Status, &snap.TanggalPenempatan, &snap.TenantID,
+		&snap.IsPOCI,
 	)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound

@@ -1,0 +1,619 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-C POCI Delta ECL (P5-M10)
+  version: "1.0.0"
+  description: |
+    Modul APP-C — POCI Delta ECL Computation (Phase 5, Module 10).
+
+    Cakupan:
+      - Capture immutable baseline lifetime ECL saat penempatan POCI di-approve (S1)
+      - Compute delta_ecl = current_lifetime_ecl − baseline per ECL calc run (S2)
+      - Jurnal P&L booking per POCI delta via P5-M2 engine (S3)
+      - Remove stale warning POCI_ECL_REPRESENTS_INITIAL_BASELINE_NOT_DELTA (S4)
+      - Delta history per instrumen + MTD/YTD dashboard (S5)
+
+    POCI treatment per PSAK 71 §5.5.13-14:
+      - Stage marker = 'POCI' — staging engine TIDAK dipanggil
+      - P&L hanya dibebani/dikreditkan DELTA (bukan full lifetime ECL)
+      - Baseline IMMUTABLE sejak origination (DEC-018)
+      - Idempotency: unique (calc_run_id, instrumen_id) di ecl.poci_delta_log
+
+    Jurnal sign convention:
+      INCREASE (delta > 0): D Beban Penurunan Nilai ECL POCI / K Cadangan ECL POCI
+      DECREASE (delta < 0): D Cadangan ECL POCI / K Pendapatan Pemulihan ECL POCI
+      ZERO (delta == 0): skip — tidak ada jurnal kosong
+
+    Error codes baru (6): POCI_BASELINE_MISSING, POCI_BASELINE_IMMUTABLE_VIOLATION,
+      POCI_DELTA_DUPLICATE, POCI_INSTRUMEN_NOT_POCI, POCI_PERIODE_LOCKED,
+      POCI_JURNAL_DIRECTION_MISMATCH.
+
+    AC coverage: S1-AC1..4, S2-AC1..4, S3-AC1..4, S4-AC1..4, S5-AC1..4 (20 AC total).
+
+servers:
+  - url: /api/v1
+    description: BLIPS IFRS9 REST API
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # GET /poci/baseline — List POCI baseline dengan sort/filter/export
+  # ─────────────────────────────────────────────────────────────────────────────
+  /poci/baseline:
+    get:
+      operationId: listPociBaseline
+      summary: List POCI ECL baseline (immutable)
+      description: |
+        List ecl.poci_baseline dengan sort, filter, paging cursor, export.
+        Permission: poci.baseline.read.
+        Baseline bersifat WORM — setiap instrumen POCI hanya memiliki satu row (S1).
+        Filter: instrumen_id, tanggal_baseline range (S1-AC4).
+      tags: [POCI Baseline]
+      parameters:
+        - $ref: "_common.yaml#/components/parameters/cursor"
+        - $ref: "_common.yaml#/components/parameters/limit"
+        - name: sort
+          in: query
+          schema: { type: string, example: "tanggal_baseline:desc,instrumen_id:asc" }
+          description: "Multi-column sort. Max 3. Allowed: tanggal_baseline, lifetime_ecl_at_origination, instrumen_id, created_at"
+        - name: filter[instrumen_id]
+          in: query
+          schema: { type: string, format: uuid }
+          description: Filter per instrumen UUID
+        - name: filter[tanggal_baseline]
+          in: query
+          schema: { type: string }
+          example: "between:2026-01-01,2026-06-30"
+          description: "Exact date atau range: between:YYYY-MM-DD,YYYY-MM-DD"
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 200 }
+          description: Text search pada kode_instrumen / nama_instrumen
+      responses:
+        "200":
+          description: List POCI baseline berhasil
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "_common.yaml#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/PociBaselineListItem"
+        "400":
+          $ref: "_common.yaml#/components/responses/BadRequest"
+        "401":
+          $ref: "_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "_common.yaml#/components/responses/Forbidden"
+
+    post:
+      operationId: capturePociBaseline
+      summary: Capture POCI ECL baseline (internal/system endpoint)
+      description: |
+        Capture immutable ECL baseline saat penempatan POCI di-approve.
+        Dipanggil oleh penempatan approve flow (P5-M1) dalam transaksi yang sama.
+        Jika baseline sudah ada untuk instrumen_id → POCI_BASELINE_IMMUTABLE_VIOLATION.
+        Audit: POCI.BASELINE_CAPTURED in-transaction (S1-AC1).
+        Permission: poci.baseline.create (service account only).
+        Instrumen harus is_poci = TRUE → POCI_INSTRUMEN_NOT_POCI jika tidak.
+      tags: [POCI Baseline]
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema: { type: string, format: uuid }
+          description: UUID v4 unik per request (DEC-021)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CapturePociBaselineRequest"
+      responses:
+        "201":
+          description: Baseline berhasil dicapture
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "_common.yaml#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PociBaselineDetail"
+        "400":
+          $ref: "_common.yaml#/components/responses/BadRequest"
+        "401":
+          $ref: "_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "_common.yaml#/components/responses/Forbidden"
+        "422":
+          description: |
+            POCI_BASELINE_IMMUTABLE_VIOLATION — baseline sudah ada, tidak bisa overwrite.
+            POCI_INSTRUMEN_NOT_POCI — instrumen.is_poci = FALSE.
+            VALIDATION_FAILED — field wajib kosong atau nilai tidak valid.
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/ErrorEnvelope"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # GET /poci/baseline/{instrumen_id} — Detail single baseline
+  # ─────────────────────────────────────────────────────────────────────────────
+  /poci/baseline/{instrumen_id}:
+    get:
+      operationId: getPociBaseline
+      summary: Detail POCI ECL baseline per instrumen
+      description: |
+        Mengembalikan satu row ecl.poci_baseline untuk instrumen_id.
+        404 jika baseline belum pernah dicapture (POCI_BASELINE_MISSING).
+        Permission: poci.baseline.read.
+        Read-only — tidak ada PUT/PATCH/DELETE (DEC-018 WORM).
+      tags: [POCI Baseline]
+      parameters:
+        - in: path
+          name: instrumen_id
+          required: true
+          schema: { type: string, format: uuid }
+          description: UUID instrumen POCI
+      responses:
+        "200":
+          description: Baseline ditemukan
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "_common.yaml#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PociBaselineDetail"
+        "404":
+          description: |
+            POCI_BASELINE_MISSING — instrumen POCI belum memiliki baseline (origination belum di-approve atau bug S1).
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/ErrorEnvelope"
+        "401":
+          $ref: "_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "_common.yaml#/components/responses/Forbidden"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # GET /poci/delta-log — List delta log dengan sort/filter
+  # ─────────────────────────────────────────────────────────────────────────────
+  /poci/delta-log:
+    get:
+      operationId: listPociDeltaLog
+      summary: List POCI delta log per calc run
+      description: |
+        List ecl.poci_delta_log dengan sort, filter, paging cursor, export.
+        Permission: poci.delta.read.
+        Filter: calc_run_id, instrumen_id, periode, direction, status.
+        Setiap row = satu komputasi delta per (calc_run × instrumen) (S2).
+      tags: [POCI Delta]
+      parameters:
+        - $ref: "_common.yaml#/components/parameters/cursor"
+        - $ref: "_common.yaml#/components/parameters/limit"
+        - name: sort
+          in: query
+          schema: { type: string, example: "tanggal_compute:desc,delta_ecl:desc" }
+          description: "Multi-column sort. Max 3. Allowed: tanggal_compute, delta_ecl, instrumen_id, direction, status, created_at"
+        - name: filter[calc_run_id]
+          in: query
+          schema: { type: string, format: uuid }
+        - name: filter[instrumen_id]
+          in: query
+          schema: { type: string, format: uuid }
+        - name: filter[periode]
+          in: query
+          schema: { type: string, example: "2026-06" }
+          description: "Format YYYY-MM untuk filter bulan compute"
+        - name: filter[direction]
+          in: query
+          schema:
+            type: string
+            enum: [INCREASE, DECREASE, ZERO]
+        - name: filter[status]
+          in: query
+          schema:
+            type: string
+            enum: [COMPUTED, POSTED, SKIPPED_ZERO]
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 200 }
+      responses:
+        "200":
+          description: List delta log berhasil
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "_common.yaml#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/PociDeltaLogItem"
+        "400":
+          $ref: "_common.yaml#/components/responses/BadRequest"
+        "401":
+          $ref: "_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "_common.yaml#/components/responses/Forbidden"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # GET /poci/delta-history — Cumulative delta history per instrumen
+  # ─────────────────────────────────────────────────────────────────────────────
+  /poci/delta-history:
+    get:
+      operationId: getPociDeltaHistory
+      summary: Cumulative POCI delta history per instrumen
+      description: |
+        Mengembalikan semua rows delta_log untuk satu instrumen, terurut per calc run date.
+        Setiap row menyertakan prior_delta_cumulative untuk rolling analysis (S5-AC1).
+        Permission: poci.delta.read (minimum ecl_run.read).
+        Export CSV/XLSX via /poci/delta-history/export (async jika > 10k row per UX §3).
+        Large delta badge: jika delta_ecl > sys.parameter POCI_LARGE_DELTA_THRESHOLD → beri flag.
+      tags: [POCI Delta]
+      parameters:
+        - name: instrumen_id
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+          description: UUID instrumen POCI (wajib)
+        - $ref: "_common.yaml#/components/parameters/cursor"
+        - $ref: "_common.yaml#/components/parameters/limit"
+        - name: sort
+          in: query
+          schema: { type: string, example: "tanggal_compute:desc" }
+        - name: filter[direction]
+          in: query
+          schema:
+            type: string
+            enum: [INCREASE, DECREASE, ZERO]
+      responses:
+        "200":
+          description: Delta history berhasil
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "_common.yaml#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/PociDeltaHistoryItem"
+        "404":
+          description: POCI_BASELINE_MISSING jika instrumen tidak memiliki baseline
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/ErrorEnvelope"
+        "401":
+          $ref: "_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "_common.yaml#/components/responses/Forbidden"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # GET /poci/delta-history/summary — MTD/YTD aggregate per portofolio
+  # ─────────────────────────────────────────────────────────────────────────────
+  /poci/delta-history/summary:
+    get:
+      operationId: getPociDeltaSummary
+      summary: MTD/YTD aggregate POCI delta per portofolio
+      description: |
+        Dashboard aggregate delta ECL POCI per portofolio per periode (S5-AC2).
+        Permission: poci.delta.read.
+        Large delta threshold dari sys.parameter POCI_LARGE_DELTA_THRESHOLD.
+      tags: [POCI Dashboard]
+      parameters:
+        - name: portofolio_id
+          in: query
+          schema: { type: string, format: uuid }
+          description: UUID portofolio (opsional — jika kosong, aggregate semua)
+        - name: year
+          in: query
+          required: true
+          schema: { type: integer, example: 2026 }
+        - name: month
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1, maximum: 12, example: 6 }
+      responses:
+        "200":
+          description: Summary berhasil
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "_common.yaml#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PociDeltaSummary"
+        "401":
+          $ref: "_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "_common.yaml#/components/responses/Forbidden"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # POST /poci/compute-delta-batch — Trigger batch delta computation
+  # ─────────────────────────────────────────────────────────────────────────────
+  /poci/compute-delta-batch:
+    post:
+      operationId: computePociDeltaBatch
+      summary: Trigger POCI delta batch computation untuk semua instrumen POCI dalam calc run
+      description: |
+        Long-running Asynq job: untuk setiap instrumen is_poci=TRUE dalam calc_run_id,
+        hitung delta_ecl = current_lifetime_ecl − baseline, insert ecl.poci_delta_log,
+        post jurnal bila direction != ZERO (S2+S3).
+        Permission: poci.delta.compute (ROLE-IT-ADMIN / ROLE-RISK).
+        Rate limit: 10 req/min (SensitiveRateLimit, security-baseline.md DEC-027).
+        Returns 202 Accepted + jobId. Monitor via GET /api/v1/jobs/{jobId}.
+        Baseline missing per instrumen → error log entry (tidak halt seluruh batch, S2-AC3).
+        Duplicate guard: POCI_DELTA_DUPLICATE jika (calc_run_id, instrumen_id) sudah ada.
+        Periode lock: POCI_PERIODE_LOCKED jika periode CLOSED saat jurnal posting.
+      tags: [POCI Delta]
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [calcRunId]
+              properties:
+                calcRunId:
+                  type: string
+                  format: uuid
+                  description: "ECL calc run ID (harus SEALED atau COMPLETED)"
+      responses:
+        "202":
+          description: Job diterima, proses berjalan di background
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "_common.yaml#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [jobId, statusUrl, streamUrl]
+                        properties:
+                          jobId:
+                            type: string
+                            description: Asynq job ID (ULID format)
+                          type:
+                            type: string
+                            example: "POCI_COMPUTE_DELTA_BATCH"
+                          statusUrl:
+                            type: string
+                            example: "/api/v1/jobs/job_01HXYZ..."
+                          streamUrl:
+                            type: string
+                            example: "/api/v1/jobs/job_01HXYZ.../stream"
+        "400":
+          $ref: "_common.yaml#/components/responses/BadRequest"
+        "401":
+          $ref: "_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "_common.yaml#/components/responses/Forbidden"
+        "422":
+          description: |
+            POCI_PERIODE_LOCKED — periode CLOSED.
+            CALC_RUN_NOT_FOUND — calc_run_id tidak ada.
+            VALIDATION_FAILED — field wajib kosong.
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "_common.yaml#/components/responses/RateLimited"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Components
+# ─────────────────────────────────────────────────────────────────────────────
+components:
+  securitySchemes:
+    bearerAuth:
+      $ref: "_common.yaml#/components/securitySchemes/bearerAuth"
+
+  schemas:
+
+    # ── POCI Baseline ──────────────────────────────────────────────────────────
+
+    PociBaselineListItem:
+      type: object
+      required: [id, instrumenId, tanggalBaseline, lifetimeEclAtOrigination, creditAdjustedEir, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        instrumenId:
+          type: string
+          format: uuid
+        instrumenKode:
+          type: string
+          description: "Dari mst.instrumen.kode_instrumen (join)"
+        tanggalBaseline:
+          type: string
+          format: date
+          description: "DATE — tanggal penempatan POCI di-approve"
+        lifetimeEclAtOrigination:
+          type: number
+          description: "NUMERIC(20,4) IDR — lifetime ECL saat origination (immutable)"
+          example: 1250000000.0000
+        creditAdjustedEir:
+          type: number
+          description: "NUMERIC(10,8) — credit-adjusted EIR (PD-adjusted per DEC-013)"
+          example: 0.04500000
+        createdAt:
+          type: string
+          format: date-time
+
+    PociBaselineDetail:
+      allOf:
+        - $ref: "#/components/schemas/PociBaselineListItem"
+        - type: object
+          properties:
+            cashflowExpektasiJsonb:
+              type: object
+              description: "JSONB — PD-adjusted cashflow per periode sejak origination"
+              nullable: true
+            originationDate:
+              type: string
+              format: date
+            createdBy:
+              type: string
+              format: uuid
+
+    CapturePociBaselineRequest:
+      type: object
+      required: [instrumenId, lifetimeEclAtOrigination, creditAdjustedEir]
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+        lifetimeEclAtOrigination:
+          type: number
+          description: "NUMERIC(20,4) — lifetime ECL (bukan 12-month)"
+          example: 1250000000.0000
+        cashflowExpektasiJsonb:
+          type: object
+          description: "PD-adjusted cashflow array. Opsional jika hanya scalar."
+          nullable: true
+        creditAdjustedEir:
+          type: number
+          description: "NUMERIC(10,8) — EIR dari Newton-Raphson solver (DEC-013)"
+          example: 0.04500000
+        tanggalBaseline:
+          type: string
+          format: date
+          description: "Defaults to today jika tidak diisi"
+
+    # ── POCI Delta Log ─────────────────────────────────────────────────────────
+
+    PociDeltaLogItem:
+      type: object
+      required: [id, calcRunId, instrumenId, tanggalCompute, baselineEcl, currentEcl, deltaEcl, direction, status, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        calcRunId:
+          type: string
+          format: uuid
+        instrumenId:
+          type: string
+          format: uuid
+        instrumenKode:
+          type: string
+        tanggalCompute:
+          type: string
+          format: date
+        baselineEcl:
+          type: number
+          description: "NUMERIC(20,4) — snapshot dari poci_baseline.lifetime_ecl_at_origination"
+          example: 1250000000.0000
+        currentEcl:
+          type: number
+          description: "NUMERIC(20,4) — lifetime ECL hasil calc run periode ini"
+          example: 1450000000.0000
+        deltaEcl:
+          type: number
+          description: "NUMERIC(20,4) — signed: positif = deterioration, negatif = improvement"
+          example: 200000000.0000
+        direction:
+          type: string
+          enum: [INCREASE, DECREASE, ZERO]
+          description: "Derived dari sign(delta_ecl). INCREASE > 0, DECREASE < 0, ZERO = 0"
+        priorDeltaCumulative:
+          type: number
+          description: "NUMERIC(20,4) — Σ delta semua run sebelumnya untuk instrumen ini"
+          nullable: true
+        jurnalHeaderId:
+          type: string
+          format: uuid
+          nullable: true
+        periodeBulananId:
+          type: string
+          format: uuid
+          nullable: true
+        status:
+          type: string
+          enum: [COMPUTED, POSTED, SKIPPED_ZERO]
+        largeDeltaFlag:
+          type: boolean
+          description: "true jika |delta_ecl| > sys.parameter POCI_LARGE_DELTA_THRESHOLD"
+        createdAt:
+          type: string
+          format: date-time
+
+    PociDeltaHistoryItem:
+      allOf:
+        - $ref: "#/components/schemas/PociDeltaLogItem"
+
+    # ── POCI Dashboard Summary ────────────────────────────────────────────────
+
+    PociDeltaSummary:
+      type: object
+      required: [year, month, instrumenCount, deltaEclMtdIdr, deltaEclYtdIdr, netCumulativeDeltaIdr, directionBreakdown]
+      properties:
+        portofolioId:
+          type: string
+          format: uuid
+          nullable: true
+        year:
+          type: integer
+          example: 2026
+        month:
+          type: integer
+          example: 6
+        instrumenCount:
+          type: integer
+          description: "Jumlah instrumen POCI aktif di portofolio"
+        deltaEclMtdIdr:
+          type: number
+          description: "NUMERIC(20,4) — Σ delta_ecl semua run bulan ini"
+          example: 200000000.0000
+        deltaEclYtdIdr:
+          type: number
+          description: "NUMERIC(20,4) — Σ delta_ecl Jan–bulan ini"
+        netCumulativeDeltaIdr:
+          type: number
+          description: "NUMERIC(20,4) — Σ delta sejak origination semua instrumen"
+        directionBreakdown:
+          type: object
+          properties:
+            increase:
+              type: object
+              properties:
+                count: { type: integer }
+                amountIdr: { type: number }
+            decrease:
+              type: object
+              properties:
+                count: { type: integer }
+                amountIdr: { type: number }
+            zero:
+              type: object
+              properties:
+                count: { type: integer }
+        largeDeltaCount:
+          type: integer
+          description: "Jumlah instrumen dengan |delta_ecl| > threshold bulan ini"

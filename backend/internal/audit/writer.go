@@ -68,6 +68,13 @@ func NewWriter(db *sql.DB) *Writer {
 	return &Writer{db: db}
 }
 
+// IsReady returns true if the Writer has a non-nil database connection.
+// Used by writeAuditP5 to guard standalone writes (SoD violation attempts)
+// from panicking in test environments where db is nil.
+func (w *Writer) IsReady() bool {
+	return w != nil && w.db != nil
+}
+
 // TxWriter adalah Writer yang bound ke transaksi spesifik.
 type TxWriter struct {
 	tx *sql.Tx
