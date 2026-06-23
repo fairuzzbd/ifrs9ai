@@ -159,6 +159,11 @@ issues:
         - errcheck
         - gosec
         - unparam
+    # Test files: dot-imports allowed for black-box _test packages (common Go testing pattern).
+    - path: "_test\\.go$"
+      linters:
+        - revive
+      text: "dot-imports"
 
     # Mock / generated files (belt-and-suspenders in addition to skip-files above).
     - path: "(.*_mock\\.go|mocks/.*\\.go|.*\\.gen\\.go)"

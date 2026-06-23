@@ -1,0 +1,1878 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-D FX Rate Management (P5-M5)
+  version: "1.0.0"
+  description: |
+    Modul APP-D — FX Rate Management (Phase 5, Module 5).
+
+    Cakupan:
+      - List kurs dengan sort + filter + export (S1, S2, S3, S4, S5)
+      - Detail single kurs (S1)
+      - Manual upload kurs XLSX/CSV — ROLE-AKUN Maker (S2)
+      - Approve manual upload — ROLE-AKUN-CTL 4-eyes SoD (S3)
+      - Reject manual upload — ROLE-AKUN-CTL 4-eyes SoD (S3)
+      - Manual trigger BI JISDOR sync — ROLE-IT-ADMIN, Asynq job (S1)
+      - FX treatment routing per klasifikasi PSAK 71 (S5 — ifrs9-compliance-reviewer BLOCKING)
+
+    Dependensi:
+      - Phase 3 migration 000020 — mst.kurs existing schema (workflow_status, locked_flag, UNIQUE constraint)
+      - P5-M4 (merged) — hard-close approve men-set mst.kurs.locked_flag=TRUE (in-transaction)
+      - P5-M5 migration 000039 — NUMERIC precision upgrade + sys.holiday_calendar + kolom tambahan
+      - P5-M6 (upcoming) — MTM worker mengkonsumsi GET /master/kurs/treatment/{instrumen_id}
+      - DEC-016 (LOCKED) — NUMERIC(20,8) untuk kurs_tengah/beli/jual; shopspring/decimal di Go
+      - DEC-017 (LOCKED) — 4-eyes SoD: ROLE-AKUN (maker) ≠ ROLE-AKUN-CTL (approver)
+      - DEC-018 (LOCKED) — audit trail append-only, retensi 10+10 tahun
+      - DEC-021 (LOCKED) — Idempotency-Key wajib di mutating endpoint
+      - DEC-022 (LOCKED) — cursor-based pagination
+
+    State machine mst.kurs.workflow_status:
+      PENDING_APPROVAL → (approve, 4-eyes SoD) → APPROVED
+      PENDING_APPROVAL → (reject, 4-eyes SoD + reject_reason wajib) → REJECTED
+      APPROVED → (periode hard-close, P5-M4 CFO step-up MFA) → APPROVED[locked_flag=TRUE]
+      APPROVED[locked_flag=TRUE] → (periode reopen, P5-M4 CFO step-up MFA) → APPROVED[locked_flag=FALSE]
+      [JISDOR auto] → APPROVED langsung (bypass 4-eyes — BI JISDOR sudah otoritatif)
+
+    FX Treatment Routing (S5 — compliance-critical):
+      AC       + FCY → P&L_FOREIGN_EXCHANGE
+      FVTPL    + FCY → P&L_FOREIGN_EXCHANGE
+      FVOCI_DEBT     + FCY → OCI_FOREIGN_EXCHANGE_RESERVE (recycling ke P&L saat derecognition)
+      FVOCI_ELECTION + FCY → OCI_FOREIGN_EXCHANGE_RESERVE_NO_RECYCLING (irrevocable, PSAK 71 §5.7.5)
+      Any      + IDR → NO_FX_TREATMENT
+
+    BI JISDOR Worker (S1):
+      Asynq cron "30 3 * * 1-5" (10:30 WIB = 03:30 UTC, Senin–Jumat)
+      Skip jika sys.holiday_calendar match tanggal hari ini
+      Idempotent: UNIQUE(kode_mata_uang, tanggal_berlaku) — skip jika APPROVED sudah ada
+      Rate deviation > 20% → deviation_flag=TRUE + alert ROLE-AKUN + ROLE-AKUN-CTL; tetap insert
+      3 retry (interval 15 menit) → DLQ + alert
+      Manual trigger via POST /master/kurs/jisdor-sync (ROLE-IT-ADMIN) → Asynq jobId (async, §3)
+
+    Lock enforcement (S4):
+      FxRateLockMiddleware: cek locked_flag dari DB sebelum handler mutating
+      locked_flag=TRUE → 423 FX_RATE_LOCKED
+      DB trigger tg_kurs_locked_check (existing) → RAISE EXCEPTION jika bypass API
+
+    Audit events (all in-transaction kecuali advisory):
+      KURS.JISDOR_FETCH, KURS.JISDOR_SKIPPED, KURS.JISDOR_SKIPPED_PENDING_EXISTS (advisory)
+      KURS.DEVIATION_WARNING (advisory)
+      KURS.JISDOR_FETCH_FAILED (advisory + DLQ)
+      KURS.JISDOR_HOLIDAY_SKIP (advisory)
+      KURS.MANUAL_UPLOAD_SUBMITTED
+      KURS.APPROVED
+      KURS.REJECTED
+      KURS.LOCKED_BY_PERIODE_CLOSE (dari P5-M4 transaction)
+      KURS.UNLOCKED_BY_PERIODE_REOPEN (dari P5-M4 transaction)
+      KURS.FX_TREATMENT_QUERIED (sampling advisory)
+      KURS.EXPORT
+      KURS.INSERT_REJECTED_PERIODE_CLOSED (advisory)
+      KURS.APPROVE_REJECTED_SOD (advisory)
+
+    Error codes baru (ditambahkan ke _common.yaml):
+      FX_RATE_LOCKED           423 — mst.kurs.locked_flag = TRUE
+      KURS_DUPLICATE_DATE      409 — (kode_mata_uang, tanggal_berlaku) sudah APPROVED atau PENDING_APPROVAL
+      KURS_UPLOAD_VALIDATION_FAILED 422 — file upload gagal validasi (detail per row)
+      KLASIFIKASI_NOT_LOCKED   422 — FX treatment query untuk instrumen tanpa klasifikasi final
+      KURS_PERIODE_MISMATCH    422 — tanggal_berlaku tidak dalam periode OPEN manapun
+
+    Performance SLA:
+      GET /master/kurs (list):               ≤ 500 ms (cursor paginated, indexed)
+      GET /master/kurs/{id}:                 ≤ 100 ms (single row)
+      POST /master/kurs/upload:              ≤ 2 s (file parse + batch INSERT + audit)
+      POST /master/kurs/upload/{id}/approve: ≤ 300 ms (state update + audit)
+      POST /master/kurs/upload/{id}/reject:  ≤ 300 ms (state update + audit)
+      POST /master/kurs/jisdor-sync:         ≤ 200 ms (enqueue only; worker async)
+      GET /master/kurs/treatment/{id}:       ≤ 100 ms (lookup mst.instrumen)
+      GET /master/kurs/export (inline):      ≤ 3 s (≤ 10k row, stream)
+      GET /master/kurs/export (async):       ≤ 200 ms (enqueue only)
+
+    Schema changes: handoff → data-modeler, migration 000039.
+    BLOCKING compliance gate: S5 (FX treatment routing) → ifrs9-compliance-reviewer.
+    Security advisory: SoD enforcement S3, FxRateLockMiddleware S4, audit S2/S3.
+
+servers:
+  - url: /api/v1
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: kurs-list
+    description: "List, filter, sort, export kurs — DataTable pattern §1"
+  - name: kurs-upload
+    description: "Manual upload kurs XLSX/CSV (ROLE-AKUN Maker) dan approve/reject 4-eyes (ROLE-AKUN-CTL)"
+  - name: kurs-jisdor
+    description: "BI JISDOR manual trigger — ROLE-IT-ADMIN; Asynq long-running job (§3)"
+  - name: kurs-treatment
+    description: "FX gain/loss treatment routing per klasifikasi PSAK 71 — compliance-critical (S5)"
+
+paths:
+
+  # ===========================================================================
+  # GET /master/kurs — List dengan sort + filter + export (S1, S2, S3, S4, UX §1)
+  # ===========================================================================
+
+  /master/kurs:
+    get:
+      operationId: kursGetList
+      summary: List kurs dengan sort, filter, cursor pagination, dan export
+      description: |
+        AC: S1-AC1 (JISDOR hasil ter-list), S2-AC1 (upload ter-list PENDING_APPROVAL),
+            S3-AC1 (APPROVED ter-list), S4-AC1 (locked_flag=TRUE ter-list)
+
+        Cursor-paginated list mst.kurs. Default sort: tanggal_berlaku DESC, kode_mata_uang ASC.
+
+        Allowed sort columns: tanggal_berlaku, kode_mata_uang, kurs_tengah, workflow_status,
+          sumber_kurs, rate_deviation_pct, created_at.
+
+        Filter:
+          filter[kode_mata_uang]   — CHAR(3), mis. USD, EUR, JPY, SGD
+          filter[tanggal_berlaku]  — date range: ?filter[tanggal_berlaku]=between:2026-06-01,2026-06-30
+          filter[workflow_status]  — enum: PENDING_APPROVAL, APPROVED, REJECTED
+          filter[sumber_kurs]      — enum: BI_JISDOR, BI_KURS_TENGAH, INTERNAL, MANUAL
+          filter[locked_flag]      — boolean: true, false
+          filter[deviation_flag]   — boolean: true (hanya tampilkan yang ada deviation warning)
+          filter[upload_batch_id]  — UUID, filter per batch upload
+
+        Export:
+          ?export=csv atau ?export=xlsx
+          Dataset ≤ 10k row → inline (stream Content-Disposition)
+          Dataset > 10k row → 202 + jobId (Asynq async ke MinIO, §3 pattern)
+          Audit: KURS.EXPORT in-transaction per export
+
+        ROLE-AUDIT dapat akses include_deleted=true.
+        ROLE-MAKER-TR tidak memiliki permission kurs.read → 403 FORBIDDEN.
+
+        Permission: kurs.read
+        Roles: ROLE-AKUN, ROLE-AKUN-CTL, ROLE-RISK, ROLE-AUDIT, ROLE-IT-ADMIN
+        Rate limit: 60 req/min per user (read); 10 req/min per user (export)
+      tags: [kurs-list]
+      parameters:
+        - $ref: "./_common.yaml#/components/parameters/cursor"
+        - $ref: "./_common.yaml#/components/parameters/limit"
+        - $ref: "./_common.yaml#/components/parameters/sortParam"
+        - $ref: "./_common.yaml#/components/parameters/searchParam"
+        - name: "filter[kode_mata_uang]"
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: "^[A-Z]{3}$"
+            example: "USD"
+          description: "Filter berdasarkan kode mata uang (ISO 4217, 3 huruf kapital)."
+        - name: "filter[tanggal_berlaku]"
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            Filter tanggal berlaku. Mendukung operator:
+            - eq:2026-06-18
+            - between:2026-06-01,2026-06-30
+            - gte:2026-06-01
+            - lte:2026-06-30
+          example: "between:2026-06-01,2026-06-30"
+        - name: "filter[workflow_status]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [PENDING_APPROVAL, APPROVED, REJECTED]
+          description: "Filter berdasarkan workflow_status kurs."
+        - name: "filter[sumber_kurs]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [BI_JISDOR, BI_KURS_TENGAH, INTERNAL, MANUAL]
+          description: "Filter berdasarkan sumber kurs."
+        - name: "filter[locked_flag]"
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: "Filter berdasarkan locked_flag (true = dalam periode hard-closed)."
+        - name: "filter[deviation_flag]"
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: "Filter true untuk menampilkan hanya kurs dengan deviasi > 20% dari hari sebelumnya."
+        - name: "filter[upload_batch_id]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: "Filter berdasarkan batch upload ID."
+        - name: export
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [csv, xlsx]
+          description: |
+            Format export. Jika dataset ≤ 10k row → inline file (stream).
+            Jika > 10k row → 202 Accepted dengan jobId (async ke MinIO).
+        - $ref: "./_common.yaml#/components/parameters/includeDeleted"
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Trace ID untuk distributed tracing. Gateway inject otomatis.
+      responses:
+        "200":
+          description: List kurs dengan pagination
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KursListItem"
+                  pagination:
+                    $ref: "./_common.yaml#/components/schemas/PaginationResponse"
+                  appliedSort:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        col:
+                          type: string
+                        dir:
+                          type: string
+                          enum: [asc, desc]
+                  appliedFilter:
+                    type: object
+                    additionalProperties: true
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  - id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                    fxRateIdKode: "FX-USD-20260618"
+                    kodeMataUang: "USD"
+                    tanggalBerlaku: "2026-06-18"
+                    kursTengah: 16250.00000000
+                    kursBeli: null
+                    kursJual: null
+                    sumberKurs: "BI_JISDOR"
+                    workflowStatus: "APPROVED"
+                    lockedFlag: false
+                    deviationFlag: false
+                    rateDeviationPct: 0.9317
+                    periodeKode: "PRD-2026-06"
+                    makerId: null
+                    approverId: null
+                    approvedAt: null
+                    rejectReason: null
+                    uploadBatchId: null
+                    createdAt: "2026-06-18T10:30:05+07:00"
+                    createdBy: "00000000-0000-0000-0000-000000000001"
+                  - id: "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+                    fxRateIdKode: "FX-USD-20260617"
+                    kodeMataUang: "USD"
+                    tanggalBerlaku: "2026-06-17"
+                    kursTengah: 19500.00000000
+                    kursBeli: null
+                    kursJual: null
+                    sumberKurs: "BI_JISDOR"
+                    workflowStatus: "APPROVED"
+                    lockedFlag: false
+                    deviationFlag: true
+                    rateDeviationPct: 21.1180
+                    periodeKode: "PRD-2026-06"
+                    makerId: null
+                    approverId: null
+                    approvedAt: null
+                    rejectReason: null
+                    uploadBatchId: null
+                    createdAt: "2026-06-17T10:30:05+07:00"
+                    createdBy: "00000000-0000-0000-0000-000000000001"
+                pagination:
+                  nextCursor: "eyJpZCI6ImIyYzNkNC4uLiJ9"
+                  hasMore: true
+                  totalEstimate: 156
+                  limit: 50
+                appliedSort:
+                  - col: "tanggal_berlaku"
+                    dir: "desc"
+                appliedFilter:
+                  kodeMataUang: "USD"
+                meta:
+                  traceId: "01HXY..."
+        "202":
+          description: Export async — dataset > 10k row; Asynq job enqueued ke MinIO
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AsyncExportJobResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  jobId: "job_KURS_EXPORT_01HXYZ"
+                  type: "KURS_EXPORT"
+                  statusUrl: "/api/v1/jobs/job_KURS_EXPORT_01HXYZ"
+                  streamUrl: "/api/v1/jobs/job_KURS_EXPORT_01HXYZ/stream"
+                  message: "Export dataset besar dijadwalkan. File akan tersedia via link download setelah selesai."
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "./_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # GET /master/kurs/{id} — Detail single kurs
+  # ===========================================================================
+
+  /master/kurs/{id}:
+    get:
+      operationId: kursGetDetail
+      summary: Detail single kurs rate
+      description: |
+        AC: S3-AC1 (setelah approve, GET mengembalikan workflow_status='APPROVED')
+
+        Mengembalikan detail lengkap satu baris mst.kurs termasuk:
+          - jisdorFetchMetadata (untuk ROLE-IT-ADMIN)
+          - rejectReason (jika REJECTED)
+          - uploadBatchId + batch summary (jika manual upload)
+          - Audit trail summary (createdAt, createdBy, updatedAt)
+
+        ROLE-AUDIT dapat akses include_deleted=true (melalui query param jika soft-deleted).
+
+        Permission: kurs.read
+        Rate limit: 60 req/min per user
+      tags: [kurs-list]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "UUID dari mst.kurs row."
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Detail kurs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/KursDetail"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              examples:
+                approved_jisdor:
+                  summary: Kurs JISDOR APPROVED (USD 2026-06-18)
+                  value:
+                    data:
+                      id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                      fxRateIdKode: "FX-USD-20260618"
+                      kodeMataUang: "USD"
+                      tanggalBerlaku: "2026-06-18"
+                      kursTengah: 16250.00000000
+                      kursBeli: null
+                      kursJual: null
+                      sumberKurs: "BI_JISDOR"
+                      workflowStatus: "APPROVED"
+                      lockedFlag: false
+                      deviationFlag: false
+                      rateDeviationPct: 0.9317
+                      rejectReason: null
+                      uploadBatchId: null
+                      periodeKode: "PRD-2026-06"
+                      periodeBulananId: "c3d4e5f6-a7b8-9012-cdef-123456789012"
+                      makerId: null
+                      approverId: null
+                      approvedAt: null
+                      jisdorFetchMetadata:
+                        url: "https://www.bi.go.id/id/statistik/informasi-kurs/jisdor"
+                        fetchedAt: "2026-06-18T03:30:02Z"
+                        httpStatus: 200
+                        responseHash: "sha256:abc123..."
+                        retryCount: 0
+                      createdAt: "2026-06-18T10:30:05+07:00"
+                      createdBy: "00000000-0000-0000-0000-000000000001"
+                      updatedAt: "2026-06-18T10:30:05+07:00"
+                      updatedBy: "00000000-0000-0000-0000-000000000001"
+                      rowVersion: 1
+                    meta:
+                      traceId: "01HXY..."
+                pending_manual:
+                  summary: Kurs manual PENDING_APPROVAL (EUR 2026-06-18)
+                  value:
+                    data:
+                      id: "d4e5f6a7-b8c9-0123-def0-234567890123"
+                      fxRateIdKode: "FX-EUR-20260618"
+                      kodeMataUang: "EUR"
+                      tanggalBerlaku: "2026-06-18"
+                      kursTengah: 17530.00000000
+                      kursBeli: null
+                      kursJual: null
+                      sumberKurs: "MANUAL"
+                      workflowStatus: "PENDING_APPROVAL"
+                      lockedFlag: false
+                      deviationFlag: false
+                      rateDeviationPct: 0.5800
+                      rejectReason: null
+                      uploadBatchId: "e5f6a7b8-c9d0-1234-ef01-345678901234"
+                      periodeKode: "PRD-2026-06"
+                      periodeBulananId: "c3d4e5f6-a7b8-9012-cdef-123456789012"
+                      makerId: "f6a7b8c9-d0e1-2345-f012-456789012345"
+                      approverId: null
+                      approvedAt: null
+                      jisdorFetchMetadata: null
+                      createdAt: "2026-06-18T09:15:00+07:00"
+                      createdBy: "f6a7b8c9-d0e1-2345-f012-456789012345"
+                      updatedAt: "2026-06-18T09:15:00+07:00"
+                      updatedBy: "f6a7b8c9-d0e1-2345-f012-456789012345"
+                      rowVersion: 1
+                    meta:
+                      traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S2 — MANUAL UPLOAD (ROLE-AKUN, Maker)
+  # ===========================================================================
+
+  /master/kurs/upload:
+    post:
+      operationId: kursUpload
+      summary: Upload kurs manual via XLSX/CSV — ROLE-AKUN Maker; returns batch_id + parsing result
+      description: |
+        AC: S2-AC1, S2-AC2, S2-AC3, S2-AC4
+
+        ROLE-AKUN mengupload file XLSX atau CSV sesuai template baku.
+        Sistem memparse, memvalidasi, lalu batch-INSERT ke mst.kurs dengan workflow_status='PENDING_APPROVAL'.
+
+        Template kolom wajib: kode_mata_uang (CHAR3), tanggal_berlaku (DATE), kurs_tengah (NUMERIC).
+        Kolom opsional: kurs_beli, kurs_jual, catatan (wajib jika deviasi > threshold).
+
+        Validasi per row:
+          1. kode_mata_uang harus ada di mst.mata_uang — KURS_UPLOAD_VALIDATION_FAILED
+          2. kurs_tengah > 0 — KURS_UPLOAD_VALIDATION_FAILED
+          3. kurs_beli > 0 jika diisi — KURS_UPLOAD_VALIDATION_FAILED
+          4. kurs_jual > 0 jika diisi — KURS_UPLOAD_VALIDATION_FAILED
+          5. tanggal_berlaku dalam periode OPEN (status_periode='OPEN') — PERIODE_CLOSED (423)
+          6. Tidak ada (kode_mata_uang, tanggal_berlaku) dengan status APPROVED atau PENDING_APPROVAL
+             sudah ada di mst.kurs — KURS_DUPLICATE_DATE (409)
+          7. Deviasi > sys.config JISDOR_RATE_DEVIATION_THRESHOLD_PCT (default 20%):
+             catatan WAJIB diisi min 20 karakter — KURS_UPLOAD_VALIDATION_FAILED
+          8. tanggal_berlaku harus dalam range periode yang ada di mst.periode_buku OPEN
+             — KURS_PERIODE_MISMATCH (422) jika tidak cocok periode manapun
+
+        Jika SEMUA row valid: 202 Accepted + batch INSERT (satu transaksi) + audit per row.
+        Jika ADA row tidak valid: 422 KURS_UPLOAD_VALIDATION_FAILED + detail per baris. Tidak ada INSERT.
+
+        File asli disimpan ke MinIO (doc.upload → dokumen_bukti_id per kurs row).
+        Notifikasi ke ROLE-AKUN-CTL: "Ada N kurs manual PENDING_APPROVAL dari {maker}."
+
+        Permission: kurs.create
+        Roles: ROLE-AKUN
+        MFA: tidak wajib
+        Idempotency-Key: WAJIB (UUID v4)
+        Rate limit: 20 req/min per user
+      tags: [kurs-upload]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "UUID v4 unik per request. DEC-021."
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: |
+                    File XLSX atau CSV sesuai template baku.
+                    Max size: 5 MB. Max rows: 500 per batch.
+                    MIME: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+                          atau text/csv.
+                catatanUpload:
+                  type: string
+                  maxLength: 1000
+                  description: |
+                    Catatan upload untuk keseluruhan batch.
+                    Mis. "Upload manual karena JISDOR gangguan 2026-06-18".
+                  example: "Upload manual karena JISDOR gangguan 2026-06-18"
+                tanggalBerlakuOverride:
+                  type: string
+                  format: date
+                  description: |
+                    Opsional. Override tanggal_berlaku untuk semua row di file
+                    (berguna jika file tidak mengandung kolom tanggal).
+                  example: "2026-06-18"
+      responses:
+        "202":
+          description: Upload berhasil — semua row valid, batch INSERT sukses, status PENDING_APPROVAL
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/KursUploadResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              examples:
+                upload_success_3_rows:
+                  summary: S2-AC1 — Upload 3 mata uang berhasil, tidak ada deviasi
+                  value:
+                    data:
+                      uploadBatchId: "e5f6a7b8-c9d0-1234-ef01-345678901234"
+                      rowsParsed: 3
+                      rowsValid: 3
+                      rowsInvalid: 0
+                      status: "PENDING_APPROVAL"
+                      kursIds:
+                        - "f6a7b8c9-d0e1-2345-f012-456789012345"
+                        - "07b8c9d0-e1f2-3456-0123-567890123456"
+                        - "18c9d0e1-f2a3-4567-1234-678901234567"
+                      kursCreated:
+                        - kodeMataUang: "USD"
+                          tanggalBerlaku: "2026-06-18"
+                          kursTengah: 16250.00000000
+                          deviationFlag: false
+                          rateDeviationPct: 0.9317
+                        - kodeMataUang: "EUR"
+                          tanggalBerlaku: "2026-06-18"
+                          kursTengah: 17530.00000000
+                          deviationFlag: false
+                          rateDeviationPct: 0.5800
+                        - kodeMataUang: "JPY"
+                          tanggalBerlaku: "2026-06-18"
+                          kursTengah: 104.25000000
+                          deviationFlag: false
+                          rateDeviationPct: 0.2400
+                      deviationWarnings: []
+                      nextStep: "Menunggu approval ROLE-AKUN-CTL. Notifikasi telah dikirim ke Finance Controller."
+                      dokumenBuktiId: "29d0e1f2-a3b4-5678-2345-789012345678"
+                    meta:
+                      traceId: "01HXY..."
+                upload_with_deviation:
+                  summary: S2-AC2 (partial) — Upload USD dengan deviasi > 20% dan catatan tersedia
+                  value:
+                    data:
+                      uploadBatchId: "3a1b2c3d-e4f5-6789-3456-890123456789"
+                      rowsParsed: 1
+                      rowsValid: 1
+                      rowsInvalid: 0
+                      status: "PENDING_APPROVAL"
+                      kursIds:
+                        - "4b2c3d4e-f5a6-7890-4567-901234567890"
+                      kursCreated:
+                        - kodeMataUang: "USD"
+                          tanggalBerlaku: "2026-06-18"
+                          kursTengah: 19500.00000000
+                          deviationFlag: true
+                          rateDeviationPct: 21.1180
+                      deviationWarnings:
+                        - kodeMataUang: "USD"
+                          rateDeviationPct: 21.1180
+                          previousKursTengah: 16100.00000000
+                          message: "Deviasi 21.12% melebihi threshold 20%. Catatan wajib disertakan. Harap verifikasi data sebelum approve."
+                      nextStep: "Menunggu approval ROLE-AKUN-CTL. Badge DEVIATION WARNING akan tampil di antrian review."
+                      dokumenBuktiId: "5c3d4e5f-a6b7-8901-5678-012345678901"
+                    meta:
+                      traceId: "01HXY..."
+        "400":
+          description: Validasi field request gagal (file missing, format tidak valid, dll)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: VALIDATION_FAILED
+                  message: "File wajib dilampirkan. Format yang didukung: xlsx, csv."
+                  details:
+                    - field: "file"
+                      rule: "required"
+                      message: "File upload wajib ada"
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "409":
+          description: Duplikat — (kode_mata_uang, tanggal_berlaku) sudah APPROVED atau PENDING_APPROVAL
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: KURS_DUPLICATE_DATE
+                  message: "Kurs USD untuk 2026-06-18 sudah ada (APPROVED via BI_JISDOR). Tidak bisa di-override via manual upload. Jika ada koreksi, hubungi Finance Controller untuk proses adjustment."
+                  details:
+                    - field: "body.rows[0].kodeMataUang"
+                      rule: "unique_date"
+                      message: "Kurs USD 2026-06-18 sudah APPROVED."
+                  traceId: "01HXY..."
+        "422":
+          description: Validasi per-row file gagal — tidak ada INSERT
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                validation_failed_rows:
+                  summary: S2-AC2 — deviasi tanpa catatan + mata uang tidak dikenal
+                  value:
+                    error:
+                      code: KURS_UPLOAD_VALIDATION_FAILED
+                      message: "2 baris tidak valid dalam file upload. Tidak ada kurs yang diinsert."
+                      details:
+                        - row: 1
+                          field: "catatan"
+                          rule: "required_when_deviation"
+                          message: "Deviasi 21.12% melebihi threshold 20%. Kolom 'catatan' wajib diisi minimal 20 karakter untuk deviasi besar."
+                        - row: 2
+                          field: "kode_mata_uang"
+                          rule: "exists_in_mst_mata_uang"
+                          message: "Mata uang 'XYZ' tidak ditemukan di mst.mata_uang."
+                      traceId: "01HXY..."
+                periode_mismatch:
+                  summary: S2-AC3 partial — tanggal tidak cocok periode manapun yang OPEN
+                  value:
+                    error:
+                      code: KURS_PERIODE_MISMATCH
+                      message: "tanggal_berlaku 2026-05-15 tidak dalam range periode buku OPEN manapun. Periode PRD-2026-05 sudah hard-closed."
+                      details:
+                        - row: 1
+                          field: "tanggal_berlaku"
+                          rule: "must_be_in_open_periode"
+                          message: "2026-05-15 berada dalam PRD-2026-05 yang status_periode='CLOSED'. Upload kurs hanya untuk periode OPEN."
+                      traceId: "01HXY..."
+        "423":
+          description: Periode CLOSED — upload kurs untuk tanggal dalam periode hard-closed ditolak
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: FX_RATE_LOCKED
+                  message: "Kurs untuk periode PRD-2026-05 sudah dikunci (hard-closed). Tidak bisa menambah atau mengubah kurs. Hubungi CFO untuk reopen dalam grace window."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S3 — APPROVE MANUAL UPLOAD BATCH (ROLE-AKUN-CTL, 4-eyes SoD)
+  # ===========================================================================
+
+  /master/kurs/upload/{batch_id}/approve:
+    post:
+      operationId: kursUploadBatchApprove
+      summary: Approve batch upload kurs manual — ROLE-AKUN-CTL 4-eyes SoD; PENDING_APPROVAL → APPROVED
+      description: |
+        AC: S3-AC1, S3-AC3 (SoD), S3-AC4 (reject bukan endpoint ini)
+
+        ROLE-AKUN-CTL (Approver, user berbeda dari ROLE-AKUN Maker) menyetujui seluruh batch.
+        Bulk approve: semua kurs dalam batch yang masih PENDING_APPROVAL di-set APPROVED atomik.
+
+        Pre-conditions:
+          - Batch exists dan ada ≥ 1 kurs PENDING_APPROVAL
+          - approver_id ≠ batch.maker_id (SoD, DEC-017) — S3-AC3
+          - Masing-masing kurs belum di-lock (locked_flag=FALSE)
+
+        Sukses (in-transaction):
+          - UPDATE mst.kurs SET workflow_status='APPROVED', approver_id=actor_id, approved_at=now()
+            WHERE upload_batch_id={batch_id} AND workflow_status='PENDING_APPROVAL'
+          - INSERT aud.audit_log action=KURS.APPROVED per row
+          - Notifikasi ke maker: "Kurs manual batch {batch_id} telah disetujui. N kurs APPROVED dan aktif."
+
+        SoD violation → 403 SOD_VIOLATION + advisory audit KURS.APPROVE_REJECTED_SOD.
+
+        Permission: kurs.approve
+        Roles: ROLE-AKUN-CTL
+        MFA: wajib (DEC-026 ROLE-AKUN-CTL)
+        Idempotency-Key: WAJIB
+        Rate limit: 20 req/min per user
+      tags: [kurs-upload]
+      parameters:
+        - name: batch_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "UUID dari sys.upload_batch row (diperoleh dari response POST /master/kurs/upload)."
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "UUID v4 unik per request. DEC-021."
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KursApproveBody"
+            example:
+              comment: "Kurs manual 2026-06-18 telah diverifikasi dengan sumber Bloomberg. Disetujui."
+              signatureMethod: "JWT_STEP_UP"
+      responses:
+        "200":
+          description: Batch approved — semua kurs PENDING_APPROVAL dalam batch sekarang APPROVED
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/KursBatchApproveResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  uploadBatchId: "e5f6a7b8-c9d0-1234-ef01-345678901234"
+                  rowsApproved: 3
+                  kursApproved:
+                    - kursId: "f6a7b8c9-d0e1-2345-f012-456789012345"
+                      kodeMataUang: "USD"
+                      tanggalBerlaku: "2026-06-18"
+                      kursTengah: 16250.00000000
+                      workflowStatus: "APPROVED"
+                    - kursId: "07b8c9d0-e1f2-3456-0123-567890123456"
+                      kodeMataUang: "EUR"
+                      tanggalBerlaku: "2026-06-18"
+                      kursTengah: 17530.00000000
+                      workflowStatus: "APPROVED"
+                    - kursId: "18c9d0e1-f2a3-4567-1234-678901234567"
+                      kodeMataUang: "JPY"
+                      tanggalBerlaku: "2026-06-18"
+                      kursTengah: 104.25000000
+                      workflowStatus: "APPROVED"
+                  approvedBy: "a9b0c1d2-e3f4-5678-9012-345678901234"
+                  approvedAt: "2026-06-18T11:30:00+07:00"
+                  message: "3 kurs untuk 2026-06-18 berhasil disetujui dan aktif untuk digunakan sistem."
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "./_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          description: SoD violation atau permission tidak terpenuhi
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                sod_violation:
+                  summary: S3-AC3 — Maker mencoba approve batch sendiri
+                  value:
+                    error:
+                      code: SOD_VIOLATION
+                      message: "Anda tidak dapat meng-approve kurs yang Anda upload sendiri. Segregation of Duties wajib: approver_id ≠ maker_id (DEC-017)."
+                      details: []
+                      traceId: "01HXY..."
+                forbidden:
+                  summary: Permission kurs.approve tidak terpenuhi
+                  value:
+                    error:
+                      code: FORBIDDEN
+                      message: "Anda tidak memiliki permission 'kurs.approve'."
+                      details: []
+                      traceId: "01HXY..."
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          description: Transisi tidak valid — batch sudah APPROVED atau REJECTED
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: WORKFLOW_INVALID_TRANSITION
+                  message: "Batch e5f6a7b8... tidak memiliki kurs PENDING_APPROVAL. Kemungkinan sudah di-approve atau di-reject sebelumnya."
+                  details: []
+                  traceId: "01HXY..."
+        "423":
+          description: FX rate sudah locked (periode hard-closed setelah upload tapi sebelum approve)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: FX_RATE_LOCKED
+                  message: "Kurs dalam batch ini sudah terkunci karena periode hard-closed. Approve tidak dapat dilakukan."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S3 — REJECT MANUAL UPLOAD BATCH (ROLE-AKUN-CTL, 4-eyes SoD)
+  # ===========================================================================
+
+  /master/kurs/upload/{batch_id}/reject:
+    post:
+      operationId: kursUploadBatchReject
+      summary: Reject batch upload kurs manual — ROLE-AKUN-CTL; PENDING_APPROVAL → REJECTED
+      description: |
+        AC: S3-AC2, S3-AC3 (SoD), S3-AC4 (reject_reason wajib)
+
+        ROLE-AKUN-CTL menolak seluruh batch upload kurs. reject_reason WAJIB min 20 karakter.
+        Semua kurs PENDING_APPROVAL dalam batch di-set REJECTED atomik.
+
+        Pre-conditions:
+          - Batch exists, ada ≥ 1 kurs PENDING_APPROVAL
+          - approver_id ≠ batch.maker_id (SoD, DEC-017) — S3-AC3
+          - body.rejectReason minLength 20 karakter — S3-AC4
+
+        Sukses (in-transaction):
+          - UPDATE mst.kurs SET workflow_status='REJECTED', reject_reason=body.rejectReason,
+            approver_id=actor_id, approved_at=now()
+            WHERE upload_batch_id={batch_id} AND workflow_status='PENDING_APPROVAL'
+          - INSERT aud.audit_log action=KURS.REJECTED per row
+          - Notifikasi ke maker: "Kurs manual batch {batch_id} DITOLAK. Alasan: '{reject_reason}'. Harap re-upload."
+
+        Permission: kurs.reject
+        Roles: ROLE-AKUN-CTL
+        MFA: wajib (DEC-026 ROLE-AKUN-CTL)
+        Idempotency-Key: WAJIB
+        Rate limit: 20 req/min per user
+      tags: [kurs-upload]
+      parameters:
+        - name: batch_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "UUID dari sys.upload_batch (diperoleh dari response POST /master/kurs/upload)."
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "UUID v4 unik per request. DEC-021."
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KursRejectBody"
+            example:
+              rejectReason: "Kurs tengah USD 16250 tidak sesuai data BI JISDOR hari ini. Seharusnya 16100. Mohon re-upload dengan sumber yang tepat."
+              signatureMethod: "JWT_STEP_UP"
+      responses:
+        "200":
+          description: Batch rejected — semua kurs PENDING_APPROVAL dalam batch sekarang REJECTED
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/KursBatchRejectResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  uploadBatchId: "e5f6a7b8-c9d0-1234-ef01-345678901234"
+                  rowsRejected: 3
+                  workflowStatus: "REJECTED"
+                  rejectedBy: "a9b0c1d2-e3f4-5678-9012-345678901234"
+                  rejectReason: "Kurs tengah USD 16250 tidak sesuai data BI JISDOR hari ini. Seharusnya 16100. Mohon re-upload dengan sumber yang tepat."
+                  message: "3 kurs dalam batch ditolak. ROLE-AKUN telah dinotifikasi untuk re-upload."
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: rejectReason kosong atau terlalu pendek
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: VALIDATION_FAILED
+                  message: "1 field tidak valid"
+                  details:
+                    - field: "body.rejectReason"
+                      rule: "min_length:20"
+                      message: "rejectReason wajib diisi minimal 20 karakter saat menolak kurs manual."
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          description: SoD violation atau permission tidak terpenuhi
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: SOD_VIOLATION
+                  message: "Anda tidak dapat menolak kurs yang Anda upload sendiri. Segregation of Duties wajib: approver_id ≠ maker_id (DEC-017)."
+                  details: []
+                  traceId: "01HXY..."
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          description: Batch tidak memiliki kurs PENDING_APPROVAL
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: WORKFLOW_INVALID_TRANSITION
+                  message: "Batch tidak memiliki kurs PENDING_APPROVAL. Kemungkinan sudah di-approve atau di-reject sebelumnya."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S1 — BI JISDOR MANUAL SYNC (ROLE-IT-ADMIN, async Asynq job)
+  # ===========================================================================
+
+  /master/kurs/jisdor-sync:
+    post:
+      operationId: kursJisdorSync
+      summary: Manual trigger BI JISDOR sync — ROLE-IT-ADMIN; returns Asynq jobId (long-running §3)
+      description: |
+        AC: S1-AC1 (trigger manual), S1-AC3 (holiday skip), S1-AC4 (DLQ pada failure)
+
+        ROLE-IT-ADMIN men-trigger fetch JISDOR secara manual (mis. jika cron terlewat atau perlu
+        re-fetch). Endpoint enqueue Asynq job "integration:jisdor_fetch" dan return jobId untuk
+        JobProgressPanel (§3 UX pattern).
+
+        Logic worker yang di-trigger (sama dengan cron otomatis):
+          1. Cek sys.holiday_calendar untuk tanggal yang di-request. Jika libur → skip + advisory log.
+          2. Fetch kurs tengah dari BI JISDOR per mata uang (sumber_kurs_default = 'BI_JISDOR').
+          3. Idempotent: UNIQUE(kode_mata_uang, tanggal_berlaku) — skip jika APPROVED sudah ada.
+          4. Compute rate_deviation_pct vs hari kerja sebelumnya.
+          5. deviation_flag=TRUE jika > threshold → WARNING alert ke ROLE-AKUN + ROLE-AKUN-CTL.
+          6. Retry 3× (interval 15 menit) on HTTP error.
+          7. Setelah 3 retry exhausted: INSERT sys.dead_letter_queue + alert ROLE-AKUN + ROLE-IT-ADMIN.
+          8. Audit KURS.JISDOR_FETCH per row (in-transaction).
+
+        Parameter opsional:
+          - tanggalTarget: fetch untuk tanggal spesifik (default: hari ini). Berguna untuk backfill.
+          - Hanya dalam periode OPEN — tanggalTarget dalam CLOSED → ditolak FX_RATE_LOCKED.
+
+        Permission: kurs.sync
+        Roles: ROLE-IT-ADMIN
+        MFA: wajib (DEC-026 ROLE-IT-ADMIN)
+        Idempotency-Key: WAJIB
+        Rate limit: 10 req/jam per user (lebih ketat — potential abuse)
+      tags: [kurs-jisdor]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "UUID v4 unik per request. DEC-021."
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tanggalTarget:
+                  type: string
+                  format: date
+                  description: |
+                    Tanggal untuk fetch JISDOR. Default: hari ini (server TZ = Asia/Jakarta).
+                    Jika tanggal dalam periode CLOSED → 423 FX_RATE_LOCKED.
+                    Tidak boleh future date.
+                  example: "2026-06-18"
+                forceRefetch:
+                  type: boolean
+                  default: false
+                  description: |
+                    Jika true: fetch ulang meski sudah ada row APPROVED untuk tanggal ini.
+                    Existing row di-update HANYA jika tidak locked.
+                    Default false (idempotent skip jika sudah ada).
+            example:
+              tanggalTarget: "2026-06-18"
+              forceRefetch: false
+      responses:
+        "202":
+          description: JISDOR sync job enqueued — follow via JobProgressPanel (§3)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/JisdorSyncJobResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  jobId: "job_JISDOR_SYNC_01HXYZ"
+                  type: "JISDOR_SYNC"
+                  tanggalTarget: "2026-06-18"
+                  statusUrl: "/api/v1/jobs/job_JISDOR_SYNC_01HXYZ"
+                  streamUrl: "/api/v1/jobs/job_JISDOR_SYNC_01HXYZ/stream"
+                  estimatedCurrencies: 5
+                  message: "JISDOR sync dijadwalkan untuk 2026-06-18. Monitor progres via JobProgressPanel."
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: tanggalTarget format salah atau future date
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: VALIDATION_FAILED
+                  message: "1 field tidak valid"
+                  details:
+                    - field: "body.tanggalTarget"
+                      rule: "not_future_date"
+                      message: "tanggalTarget tidak boleh tanggal yang akan datang."
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "423":
+          description: Tanggal target dalam periode CLOSED — FX rate sudah locked
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: FX_RATE_LOCKED
+                  message: "Tanggal 2026-05-15 berada dalam periode PRD-2026-05 yang sudah hard-closed. JISDOR sync tidak dapat dilakukan untuk tanggal tersebut."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          description: Rate limited — 10 req/jam per user untuk endpoint sensitif ini
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: RATE_LIMITED
+                  message: "Terlalu banyak request JISDOR sync. Maksimal 10 kali per jam per user. Coba lagi dalam 3600 detik."
+                  details: []
+                  traceId: "01HXY..."
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S5 — FX TREATMENT ROUTING (compliance-critical — ifrs9-compliance-reviewer BLOCKING)
+  # ===========================================================================
+
+  /master/kurs/treatment/{instrumen_id}:
+    get:
+      operationId: kursTreatmentGetByInstrumen
+      summary: FX gain/loss treatment routing per klasifikasi PSAK 71 — compliance-critical (S5)
+      description: |
+        AC: S5-AC1, S5-AC2, S5-AC3, S5-AC4
+
+        Mengembalikan routing decision FX gain/loss untuk instrumen berdasarkan:
+          1. klasifikasi_psak71 di mst.instrumen (harus locked)
+          2. mata_uang di mst.instrumen
+
+        Routing matrix (PSAK 71 / IFRS 9):
+          AC       + FCY → P&L_FOREIGN_EXCHANGE        (FX_REALIZED/FX_UNREALIZED event)
+          FVTPL    + FCY → P&L_FOREIGN_EXCHANGE        (FX_UNREALIZED event)
+          FVOCI_DEBT   + FCY → OCI_FOREIGN_EXCHANGE_RESERVE     (recycled ke P&L saat derecognition, PSAK 71 §5.7.10)
+          FVOCI_ELECTION + FCY → OCI_FOREIGN_EXCHANGE_RESERVE_NO_RECYCLING (irrevocable, PSAK 71 §5.7.5)
+          Any      + IDR → NO_FX_TREATMENT             (tidak ada FX exposure)
+
+        Pre-conditions:
+          - instrumen_id exists dalam mst.instrumen
+          - mst.instrumen.klasifikasi_locked = TRUE (jika FALSE → 422 KLASIFIKASI_NOT_LOCKED)
+
+        Audit: KURS.FX_TREATMENT_QUERIED — sampling advisory (batch per 100 calls atau per
+        unique instrumen per hari, bukan setiap call untuk performa).
+
+        Digunakan secara internal oleh:
+          - P5-M6 MTM worker: sebelum posting FX gain/loss harian
+          - P5-M8 Penjualan service: FX recycling decision saat disposal
+          - P5-M9 Akrual harian: konversi EAD_FCY → EAD_IDR
+
+        PERINGATAN: endpoint ini menyentuh klasifikasi PSAK 71 dan routing jurnal.
+        Setiap perubahan logic routing WAJIB melewati ifrs9-compliance-reviewer (BLOCKING gate).
+        Referensi: PSAK 71 §5.7.10 (FVOCI debt FX OCI), §5.7.5 (FVOCI Election no recycling),
+        FSD-APP-D §2.4, SoW_v1.4 §10.3.
+
+        Permission: kurs.read + instrumen.read
+        Roles: ROLE-AKUN, ROLE-AKUN-CTL, ROLE-RISK, ROLE-AUDIT (dan internal service calls)
+        Rate limit: 120 req/min per user (higher limit — dipanggil oleh workers)
+      tags: [kurs-treatment]
+      parameters:
+        - name: instrumen_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "UUID dari mst.instrumen."
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: FX treatment routing decision berhasil ditentukan
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/KursTreatmentResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              examples:
+                fvoci_debt_usd:
+                  summary: S5-AC1 — Obligasi USD FVOCI_DEBT → OCI routing dengan recycling
+                  value:
+                    data:
+                      instrumenId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                      kodeInstrumen: "OBL-2026-00042"
+                      klasifikasiPsak71: "FVOCI_DEBT"
+                      matauang: "USD"
+                      klasifikasiLocked: true
+                      klasifikasiLockedAt: "2026-01-20T10:00:00+07:00"
+                      fxTreatment:
+                        routing: "OCI_FOREIGN_EXCHANGE_RESERVE"
+                        accountType: "OCI"
+                        ociRecycling: true
+                        jurnalEventCode: "FX_OCI_RESERVE"
+                        psak71Reference: "PSAK 71 §5.7.10 — FVOCI debt instrument: exchange differences in OCI"
+                        notes: "FX gain/loss di-post ke OCI. Saat derecognition (penjualan/jatuh tempo), OCI balance di-recycle ke P&L (REKLAS_OCI_PL event)."
+                    meta:
+                      traceId: "01HXY..."
+                fvoci_election_usd:
+                  summary: S5-AC2 — Saham USD FVOCI_ELECTION → OCI no-recycling (irrevocable)
+                  value:
+                    data:
+                      instrumenId: "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+                      kodeInstrumen: "SHM-2026-00015"
+                      klasifikasiPsak71: "FVOCI_ELECTION"
+                      matauang: "USD"
+                      klasifikasiLocked: true
+                      klasifikasiLockedAt: "2026-02-10T09:30:00+07:00"
+                      fxTreatment:
+                        routing: "OCI_FOREIGN_EXCHANGE_RESERVE_NO_RECYCLING"
+                        accountType: "OCI"
+                        ociRecycling: false
+                        jurnalEventCode: "FX_OCI_RESERVE_NO_RECYCLE"
+                        psak71Reference: "PSAK 71 §5.7.5 — FVOCI Election equity instrument: no P&L recycling on disposal (irrevocable election)"
+                        notes: "FX gain/loss di-post ke OCI. Saat disposal, OCI balance TIDAK di-recycle ke P&L. Keputusan FVOCI Election bersifat irrevocable."
+                    meta:
+                      traceId: "01HXY..."
+                deposito_idr_ac:
+                  summary: S5-AC3 — Deposito IDR AC → NO_FX_TREATMENT
+                  value:
+                    data:
+                      instrumenId: "c3d4e5f6-a7b8-9012-cdef-123456789012"
+                      kodeInstrumen: "DEP-2026-00001"
+                      klasifikasiPsak71: "AC"
+                      matauang: "IDR"
+                      klasifikasiLocked: true
+                      klasifikasiLockedAt: "2026-01-05T08:00:00+07:00"
+                      fxTreatment:
+                        routing: "NO_FX_TREATMENT"
+                        accountType: null
+                        ociRecycling: null
+                        jurnalEventCode: null
+                        psak71Reference: null
+                        notes: "Instrumen berdenominasi IDR — tidak ada FX gain/loss."
+                    meta:
+                      traceId: "01HXY..."
+                fvtpl_sgd:
+                  summary: FVTPL SGD obligasi → P&L routing
+                  value:
+                    data:
+                      instrumenId: "d4e5f6a7-b8c9-0123-def0-234567890123"
+                      kodeInstrumen: "OBL-2026-00088"
+                      klasifikasiPsak71: "FVTPL"
+                      matauang: "SGD"
+                      klasifikasiLocked: true
+                      klasifikasiLockedAt: "2026-01-15T11:00:00+07:00"
+                      fxTreatment:
+                        routing: "P&L_FOREIGN_EXCHANGE"
+                        accountType: "P&L"
+                        ociRecycling: null
+                        jurnalEventCode: "FX_UNREALIZED"
+                        psak71Reference: "PSAK 71 §5.7.1 — FVTPL: all fair value changes (including FX) in P&L"
+                        notes: "FX gain/loss di-post ke P&L (Laporan Laba Rugi) bersama MTM. Event code FX_UNREALIZED dipisah dari MTM_FVTPL untuk granularitas jurnal."
+                    meta:
+                      traceId: "01HXY..."
+                ac_eur:
+                  summary: AC EUR deposito → P&L FX routing
+                  value:
+                    data:
+                      instrumenId: "e5f6a7b8-c9d0-1234-ef01-345678901234"
+                      kodeInstrumen: "DEP-2026-00020"
+                      klasifikasiPsak71: "AC"
+                      matauang: "EUR"
+                      klasifikasiLocked: true
+                      klasifikasiLockedAt: "2026-01-08T14:00:00+07:00"
+                      fxTreatment:
+                        routing: "P&L_FOREIGN_EXCHANGE"
+                        accountType: "P&L"
+                        ociRecycling: null
+                        jurnalEventCode: "FX_REALIZED"
+                        psak71Reference: "PSAK 71 §5.4.1 — AC instrument: FX differences on monetary items in P&L"
+                        notes: "FX gain/loss instrumen AC di-post ke P&L. Untuk AC, event code FX_REALIZED dipakai saat settlement; FX_UNREALIZED saat period-end revaluation."
+                    meta:
+                      traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          description: Instrumen tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: NOT_FOUND
+                  message: "Instrumen tidak ditemukan atau sudah soft-deleted."
+                  details: []
+                  traceId: "01HXY..."
+        "422":
+          description: Klasifikasi instrumen belum di-lock — FX treatment tidak dapat ditentukan
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: KLASIFIKASI_NOT_LOCKED
+                  message: "Instrumen OBL-2026-00099 belum memiliki klasifikasi PSAK 71 yang locked. FX treatment tidak dapat ditentukan. Selesaikan SPPI Test + BM Assessment + Klasifikasi Approval terlebih dahulu."
+                  details:
+                    - field: "klasifikasi_locked"
+                      rule: "must_be_locked"
+                      message: "klasifikasi_psak71 harus locked sebelum FX treatment dapat diquery."
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+# ===========================================================================
+# Components
+# ===========================================================================
+
+components:
+  securitySchemes:
+    bearerAuth:
+      $ref: "./_common.yaml#/components/securitySchemes/bearerAuth"
+
+  parameters:
+    IdempotencyKeyHeader:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: "UUID v4 unik per request. Wajib di semua mutating endpoints (DEC-021). TTL 24 jam."
+
+    XTraceIdHeader:
+      name: X-Trace-Id
+      in: header
+      required: false
+      schema:
+        type: string
+      description: "Trace ID untuk distributed tracing. Gateway inject otomatis."
+
+  schemas:
+
+    # ---- Kurs List Item (untuk DataTable) -----------------------------------
+    KursListItem:
+      type: object
+      required:
+        - id
+        - fxRateIdKode
+        - kodeMataUang
+        - tanggalBerlaku
+        - kursTengah
+        - sumberKurs
+        - workflowStatus
+        - lockedFlag
+        - deviationFlag
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: "UUID primary key mst.kurs"
+        fxRateIdKode:
+          type: string
+          maxLength: 20
+          description: "Kode unik FX rate. Format: FX-{KODE}-{YYYYMMDD}. Mis. FX-USD-20260618."
+          example: "FX-USD-20260618"
+        kodeMataUang:
+          type: string
+          maxLength: 3
+          description: "ISO 4217 currency code (3 huruf kapital)."
+          example: "USD"
+        tanggalBerlaku:
+          type: string
+          format: date
+          description: "Tanggal berlaku kurs. UNIQUE bersama kodeMataUang."
+          example: "2026-06-18"
+        kursTengah:
+          type: number
+          format: double
+          description: |
+            Kurs tengah (IDR per 1 unit FCY). NUMERIC(20,8) di DB (DEC-016).
+            Presisi 8 desimal. Jangan gunakan float di Go (shopspring/decimal).
+          example: 16250.00000000
+        kursBeli:
+          type: number
+          format: double
+          nullable: true
+          description: "Kurs beli. NUMERIC(20,8). Null jika tidak di-input (JISDOR hanya tengah)."
+          example: null
+        kursJual:
+          type: number
+          format: double
+          nullable: true
+          description: "Kurs jual. NUMERIC(20,8). Null jika tidak di-input."
+          example: null
+        sumberKurs:
+          type: string
+          enum: [BI_JISDOR, BI_KURS_TENGAH, INTERNAL, MANUAL]
+          description: "Sumber kurs. BI_JISDOR untuk auto-fetch; MANUAL untuk manual upload."
+          example: "BI_JISDOR"
+        workflowStatus:
+          type: string
+          enum: [PENDING_APPROVAL, APPROVED, REJECTED]
+          description: |
+            Status workflow kurs.
+            PENDING_APPROVAL: manual upload menunggu approve ROLE-AKUN-CTL.
+            APPROVED: aktif, dapat dikonsumsi sistem (MTM, ECL, dll).
+            REJECTED: ditolak approver, perlu re-upload.
+          example: "APPROVED"
+        lockedFlag:
+          type: boolean
+          description: |
+            TRUE jika kurs sudah dikunci oleh periode hard-close (P5-M4).
+            locked=TRUE → 423 FX_RATE_LOCKED untuk setiap mutasi.
+          example: false
+        deviationFlag:
+          type: boolean
+          description: |
+            TRUE jika rate_deviation_pct melebihi threshold (default 20%).
+            Ditampilkan sebagai badge WARNING di UI.
+          example: false
+        rateDeviationPct:
+          type: number
+          format: double
+          nullable: true
+          description: |
+            Persentase deviasi dari hari kerja sebelumnya. NUMERIC(8,4).
+            NULL jika tidak ada data hari sebelumnya (hari pertama periode).
+            Positif = naik, negatif = turun.
+          example: 0.9317
+        periodeKode:
+          type: string
+          nullable: true
+          description: "Kode periode buku yang mencakup tanggal_berlaku. Mis. PRD-2026-06."
+          example: "PRD-2026-06"
+        makerId:
+          type: string
+          format: uuid
+          nullable: true
+          description: "User UUID yang mengupload kurs (untuk manual upload). NULL untuk JISDOR auto."
+        approverId:
+          type: string
+          format: uuid
+          nullable: true
+          description: "User UUID yang menyetujui. NULL jika belum approved."
+        approvedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Timestamp approve. NULL jika belum approved."
+        rejectReason:
+          type: string
+          nullable: true
+          description: "Alasan reject (min 20 karakter). NULL jika tidak REJECTED."
+        uploadBatchId:
+          type: string
+          format: uuid
+          nullable: true
+          description: "UUID batch upload jika kurs berasal dari manual upload file. NULL untuk JISDOR."
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-06-18T10:30:05+07:00"
+        createdBy:
+          type: string
+          format: uuid
+
+    # ---- Kurs Detail (extends KursListItem dengan metadata tambahan) ----------
+    KursDetail:
+      allOf:
+        - $ref: "#/components/schemas/KursListItem"
+        - type: object
+          properties:
+            periodeBulananId:
+              type: string
+              format: uuid
+              nullable: true
+              description: "FK ke mst.periode_buku(id)."
+            jisdorFetchMetadata:
+              type: object
+              nullable: true
+              description: |
+                Raw metadata BI JISDOR fetch. NULL untuk manual upload.
+                Hanya ditampilkan untuk ROLE-IT-ADMIN dan ROLE-AUDIT.
+              properties:
+                url:
+                  type: string
+                  description: "URL pattern yang di-hit (tidak full URL dengan params sensitif)."
+                fetchedAt:
+                  type: string
+                  format: date-time
+                httpStatus:
+                  type: integer
+                  example: 200
+                responseHash:
+                  type: string
+                  description: "SHA-256 hash dari response body untuk audit integrity."
+                retryCount:
+                  type: integer
+                  minimum: 0
+                  maximum: 3
+                  example: 0
+            updatedAt:
+              type: string
+              format: date-time
+            updatedBy:
+              type: string
+              format: uuid
+            rowVersion:
+              type: integer
+              minimum: 1
+              description: "Optimistic lock counter."
+
+    # ---- Upload Response -------------------------------------------------------
+    KursUploadResponse:
+      type: object
+      required:
+        - uploadBatchId
+        - rowsParsed
+        - rowsValid
+        - rowsInvalid
+        - status
+        - kursIds
+        - kursCreated
+        - deviationWarnings
+        - nextStep
+      properties:
+        uploadBatchId:
+          type: string
+          format: uuid
+          description: "UUID dari sys.upload_batch row. Digunakan untuk approve/reject endpoint."
+        rowsParsed:
+          type: integer
+          minimum: 1
+          description: "Total baris yang berhasil di-parse dari file."
+        rowsValid:
+          type: integer
+          minimum: 0
+          description: "Baris yang lolos validasi dan di-insert."
+        rowsInvalid:
+          type: integer
+          minimum: 0
+          description: "Baris yang gagal validasi. Jika > 0, tidak ada INSERT."
+        status:
+          type: string
+          enum: [PENDING_APPROVAL]
+          description: "Status kurs setelah upload. Selalu PENDING_APPROVAL."
+        kursIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: "UUID list dari kurs yang berhasil di-insert."
+        kursCreated:
+          type: array
+          description: "Summary kurs yang dibuat per row."
+          items:
+            type: object
+            required: [kodeMataUang, tanggalBerlaku, kursTengah, deviationFlag]
+            properties:
+              kodeMataUang:
+                type: string
+                example: "USD"
+              tanggalBerlaku:
+                type: string
+                format: date
+                example: "2026-06-18"
+              kursTengah:
+                type: number
+                format: double
+                example: 16250.00000000
+              deviationFlag:
+                type: boolean
+              rateDeviationPct:
+                type: number
+                format: double
+                nullable: true
+        deviationWarnings:
+          type: array
+          description: "Daftar mata uang dengan deviation_flag=TRUE (alert tapi tidak memblok)."
+          items:
+            type: object
+            properties:
+              kodeMataUang:
+                type: string
+              rateDeviationPct:
+                type: number
+                format: double
+              previousKursTengah:
+                type: number
+                format: double
+                nullable: true
+              message:
+                type: string
+        nextStep:
+          type: string
+          description: "Panduan langkah selanjutnya untuk user."
+        dokumenBuktiId:
+          type: string
+          format: uuid
+          nullable: true
+          description: "UUID MinIO dokumen asli yang di-upload (doc.upload FK)."
+
+    # ---- Approve Body --------------------------------------------------------
+    KursApproveBody:
+      type: object
+      required: [signatureMethod]
+      properties:
+        comment:
+          type: string
+          maxLength: 1000
+          description: "Komentar opsional dari approver untuk audit trail."
+          example: "Kurs manual 2026-06-18 telah diverifikasi dengan sumber Bloomberg. Disetujui."
+        signatureMethod:
+          type: string
+          enum: [JWT_STEP_UP, JWT_STANDARD]
+          description: "Metode signing. JWT_STEP_UP untuk compliance-audit trail."
+
+    # ---- Reject Body ---------------------------------------------------------
+    KursRejectBody:
+      type: object
+      required: [rejectReason, signatureMethod]
+      properties:
+        rejectReason:
+          type: string
+          minLength: 20
+          maxLength: 2000
+          description: |
+            Alasan penolakan WAJIB diisi minimal 20 karakter.
+            Constraint: mst.kurs.chk_kurs_reject_reason (DB level).
+          example: "Kurs tengah USD 16250 tidak sesuai data BI JISDOR hari ini. Seharusnya 16100."
+        signatureMethod:
+          type: string
+          enum: [JWT_STEP_UP, JWT_STANDARD]
+
+    # ---- Batch Approve Response -----------------------------------------------
+    KursBatchApproveResponse:
+      type: object
+      required:
+        - uploadBatchId
+        - rowsApproved
+        - workflowStatus
+        - approvedBy
+        - approvedAt
+        - message
+      properties:
+        uploadBatchId:
+          type: string
+          format: uuid
+        rowsApproved:
+          type: integer
+          minimum: 1
+        kursApproved:
+          type: array
+          items:
+            type: object
+            required: [kursId, kodeMataUang, tanggalBerlaku, kursTengah, workflowStatus]
+            properties:
+              kursId:
+                type: string
+                format: uuid
+              kodeMataUang:
+                type: string
+                example: "USD"
+              tanggalBerlaku:
+                type: string
+                format: date
+                example: "2026-06-18"
+              kursTengah:
+                type: number
+                format: double
+                example: 16250.00000000
+              workflowStatus:
+                type: string
+                enum: [APPROVED]
+        approvedBy:
+          type: string
+          format: uuid
+        approvedAt:
+          type: string
+          format: date-time
+        message:
+          type: string
+
+    # ---- Batch Reject Response -----------------------------------------------
+    KursBatchRejectResponse:
+      type: object
+      required:
+        - uploadBatchId
+        - rowsRejected
+        - workflowStatus
+        - rejectedBy
+        - rejectReason
+        - message
+      properties:
+        uploadBatchId:
+          type: string
+          format: uuid
+        rowsRejected:
+          type: integer
+          minimum: 1
+        workflowStatus:
+          type: string
+          enum: [REJECTED]
+        rejectedBy:
+          type: string
+          format: uuid
+        rejectReason:
+          type: string
+        message:
+          type: string
+
+    # ---- JISDOR Sync Job Response (async §3) --------------------------------
+    JisdorSyncJobResponse:
+      type: object
+      required: [jobId, type, tanggalTarget, statusUrl, streamUrl, message]
+      properties:
+        jobId:
+          type: string
+          description: "Asynq job ID untuk tracking via GET /api/v1/jobs/{jobId}."
+          example: "job_JISDOR_SYNC_01HXYZ"
+        type:
+          type: string
+          enum: [JISDOR_SYNC]
+        tanggalTarget:
+          type: string
+          format: date
+          description: "Tanggal yang di-fetch."
+          example: "2026-06-18"
+        statusUrl:
+          type: string
+          description: "URL status job. GET /api/v1/jobs/{jobId}."
+          example: "/api/v1/jobs/job_JISDOR_SYNC_01HXYZ"
+        streamUrl:
+          type: string
+          description: "URL SSE stream. GET /api/v1/jobs/{jobId}/stream."
+          example: "/api/v1/jobs/job_JISDOR_SYNC_01HXYZ/stream"
+        estimatedCurrencies:
+          type: integer
+          description: "Estimasi jumlah mata uang yang akan di-fetch."
+          example: 5
+        message:
+          type: string
+
+    # ---- Async Export Job Response ------------------------------------------
+    AsyncExportJobResponse:
+      type: object
+      required: [jobId, type, statusUrl, streamUrl, message]
+      properties:
+        jobId:
+          type: string
+          example: "job_KURS_EXPORT_01HXYZ"
+        type:
+          type: string
+          enum: [KURS_EXPORT]
+        statusUrl:
+          type: string
+          example: "/api/v1/jobs/job_KURS_EXPORT_01HXYZ"
+        streamUrl:
+          type: string
+          example: "/api/v1/jobs/job_KURS_EXPORT_01HXYZ/stream"
+        message:
+          type: string
+
+    # ---- FX Treatment Response (S5 — compliance-critical) -------------------
+    KursTreatmentResponse:
+      type: object
+      required:
+        - instrumenId
+        - kodeInstrumen
+        - klasifikasiPsak71
+        - matauang
+        - klasifikasiLocked
+        - fxTreatment
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+        kodeInstrumen:
+          type: string
+          description: "Kode instrumen dari mst.instrumen."
+          example: "OBL-2026-00042"
+        klasifikasiPsak71:
+          type: string
+          enum: [AC, FVOCI_DEBT, FVOCI_ELECTION, FVTPL]
+          nullable: true
+          description: "Klasifikasi PSAK 71 yang telah di-lock."
+        matauang:
+          type: string
+          maxLength: 3
+          description: "ISO 4217 currency code instrumen."
+          example: "USD"
+        klasifikasiLocked:
+          type: boolean
+          description: |
+            TRUE jika klasifikasi_psak71 sudah di-lock (SPPI+BM+Klasifikasi Approve selesai).
+            FALSE → KLASIFIKASI_NOT_LOCKED 422.
+        klasifikasiLockedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Timestamp ketika klasifikasi di-lock."
+        fxTreatment:
+          type: object
+          required: [routing]
+          properties:
+            routing:
+              type: string
+              enum:
+                - P&L_FOREIGN_EXCHANGE
+                - OCI_FOREIGN_EXCHANGE_RESERVE
+                - OCI_FOREIGN_EXCHANGE_RESERVE_NO_RECYCLING
+                - NO_FX_TREATMENT
+              description: |
+                Routing decision FX gain/loss:
+                - P&L_FOREIGN_EXCHANGE: ke Laporan Laba Rugi (AC + FVTPL + FCY)
+                - OCI_FOREIGN_EXCHANGE_RESERVE: ke OCI, recycled ke P&L saat derecognition (FVOCI_DEBT + FCY)
+                - OCI_FOREIGN_EXCHANGE_RESERVE_NO_RECYCLING: ke OCI, irrevocable — no recycling (FVOCI_ELECTION + FCY)
+                - NO_FX_TREATMENT: tidak ada FX exposure (instrumen IDR)
+            accountType:
+              type: string
+              enum: [P&L, OCI]
+              nullable: true
+              description: "Target akun jenis: P&L (Laba Rugi) atau OCI (Penghasilan Komprehensif Lain)."
+            ociRecycling:
+              type: boolean
+              nullable: true
+              description: |
+                TRUE: OCI balance di-recycle ke P&L saat derecognition (FVOCI_DEBT).
+                FALSE: OCI balance tidak pernah di-recycle — irrevocable (FVOCI_ELECTION).
+                NULL: tidak berlaku (P&L routing atau IDR).
+            jurnalEventCode:
+              type: string
+              nullable: true
+              description: |
+                Event code untuk jurnal routing (lihat mapping jurnal master P5-M2).
+                FX_REALIZED, FX_UNREALIZED, FX_OCI_RESERVE, FX_OCI_RESERVE_NO_RECYCLE, null.
+              example: "FX_OCI_RESERVE"
+            psak71Reference:
+              type: string
+              nullable: true
+              description: "Referensi pasal PSAK 71 yang menjadi dasar routing."
+              example: "PSAK 71 §5.7.10 — FVOCI debt instrument: exchange differences in OCI"
+            notes:
+              type: string
+              nullable: true
+              description: "Penjelasan tambahan routing decision."
