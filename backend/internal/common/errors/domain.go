@@ -260,6 +260,13 @@ const (
 	CodeScheduledEmailSMTPFailed  Code = "SCHEDULED_EMAIL_SMTP_FAILED" // 500 — SMTP failed after 3 retries (S5-AC3)
 	CodeExportFormatUnsupported   Code = "EXPORT_FORMAT_UNSUPPORTED"   // 400 — format not csv/xlsx/pdf (S3-AC3)
 
+	// P5-M14 Reports — 25 report endpoints (APP-E-REPORTS-001..005).
+	CodeReportNotFound        Code = "REPORT_NOT_FOUND"         // 404 — slug not in registry
+	CodeReportParamsInvalid   Code = "REPORT_PARAMS_INVALID"    // 400 — invalid sort/filter col or sensitivity weights
+	CodeReportPeriodeInvalid  Code = "REPORT_PERIODE_INVALID"   // 422 — date range outside data bounds
+	CodeReportQueryTimeout    Code = "REPORT_QUERY_TIMEOUT"     // 422 — statement_timeout exceeded (30s)
+	CodeReportPermissionDenied Code = "REPORT_PERMISSION_DENIED" // 403 — missing report.{slug}.read or .export
+
 	// P5-M2 Jurnal Engine codes (APP-D-JRNL-001..016).
 	// State machine: docs/state-machines/p5-m2-jurnal-engine.md §6.
 	CodeJurnalEventNotMapped             Code = "JURNAL_EVENT_NOT_MAPPED"               // 422 — no APPROVED_ACTIVE mapping for eventCode
@@ -492,6 +499,16 @@ func (c Code) HTTPStatus() int {
 		return http.StatusInternalServerError // 500
 	case CodeExportFormatUnsupported:
 		return http.StatusBadRequest // 400
+
+	// P5-M14 Report codes.
+	case CodeReportNotFound:
+		return http.StatusNotFound // 404
+	case CodeReportParamsInvalid:
+		return http.StatusBadRequest // 400
+	case CodeReportPermissionDenied:
+		return http.StatusForbidden // 403
+	case CodeReportPeriodeInvalid, CodeReportQueryTimeout:
+		return http.StatusUnprocessableEntity // 422
 
 	case CodePeriodeClosed, CodeECLParamFrozen:
 		return 423 // Locked
