@@ -252,6 +252,14 @@ const (
 	CodeBulkRollbackGraceExpired  Code = "BULK_ROLLBACK_GRACE_EXPIRED"  // 422 — grace window expired (S5-AC2)
 	CodeBulkApproveSoDViolation   Code = "BULK_APPROVE_SOD_VIOLATION"   // 403 — approver = maker (S4-AC2)
 
+	// P5-M13 Reporting MV Foundation codes (APP-E-RPT-001..006).
+	CodeExportTooLarge            Code = "EXPORT_TOO_LARGE"            // 422 — dataset > REPORT_EXPORT_MAX_ROWS (S4-AC3)
+	CodeExportPermissionDenied    Code = "EXPORT_PERMISSION_DENIED"    // 403 — report.{slug}.export missing; not ROLE-AUDIT (S3-AC4)
+	CodeMVRefreshLocked           Code = "MV_REFRESH_LOCKED"           // 423 — concurrent refresh same MV in progress (S2-AC3)
+	CodeMVRefreshFailed           Code = "MV_REFRESH_FAILED"           // 500 — worker refresh failed (S2-AC4)
+	CodeScheduledEmailSMTPFailed  Code = "SCHEDULED_EMAIL_SMTP_FAILED" // 500 — SMTP failed after 3 retries (S5-AC3)
+	CodeExportFormatUnsupported   Code = "EXPORT_FORMAT_UNSUPPORTED"   // 400 — format not csv/xlsx/pdf (S3-AC3)
+
 	// P5-M2 Jurnal Engine codes (APP-D-JRNL-001..016).
 	// State machine: docs/state-machines/p5-m2-jurnal-engine.md §6.
 	CodeJurnalEventNotMapped             Code = "JURNAL_EVENT_NOT_MAPPED"               // 422 — no APPROVED_ACTIVE mapping for eventCode
@@ -472,6 +480,18 @@ func (c Code) HTTPStatus() int {
 		CodeJurnalAmountInvalid, CodeJurnalDlqDiscardReasonTooShort,
 		CodeJurnalMappingWorkflowGate:
 		return http.StatusUnprocessableEntity
+
+	// P5-M13 Reporting codes.
+	case CodeExportTooLarge:
+		return http.StatusUnprocessableEntity // 422
+	case CodeExportPermissionDenied:
+		return http.StatusForbidden // 403
+	case CodeMVRefreshLocked:
+		return 423 // Locked
+	case CodeMVRefreshFailed, CodeScheduledEmailSMTPFailed:
+		return http.StatusInternalServerError // 500
+	case CodeExportFormatUnsupported:
+		return http.StatusBadRequest // 400
 
 	case CodePeriodeClosed, CodeECLParamFrozen:
 		return 423 // Locked

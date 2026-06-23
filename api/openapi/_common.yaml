@@ -460,6 +460,13 @@ components:
         - BULK_PERIODE_LOCKED           # 423 — mst.periode_buku.status_periode = 'CLOSED' saat upload (S1) atau commit (S3)
         - BULK_ROLLBACK_GRACE_EXPIRED   # 422 — now() > committed_at + BULK_ROLLBACK_GRACE_DAYS; grace window configurable via sys.config_param (S5-AC2)
         - BULK_APPROVE_SOD_VIOLATION    # 403 — approver_id = batch.created_by (maker); DEC-017 server-side enforce (S4-AC2)
+        # APP-E P5-M13 — Reporting MV Foundation
+        - EXPORT_TOO_LARGE              # 422 — dataset > REPORT_EXPORT_MAX_ROWS (default 100.000); tolak sebelum job dibuat (S4-AC3)
+        - EXPORT_PERMISSION_DENIED      # 403 — user tidak punya report.{slug}.export; bukan ROLE-AUDIT (S3-AC4)
+        - MV_REFRESH_LOCKED             # 423 — concurrent refresh MV yang sama sedang berjalan; advisory lock held (S2-AC3)
+        - MV_REFRESH_FAILED             # 500 — Asynq worker refresh MV gagal (DB error, lock timeout); lihat DLQ (S2-AC4)
+        - SCHEDULED_EMAIL_SMTP_FAILED   # 500 — SMTP send gagal setelah REPORT_SMTP_RETRY_MAX (default 3) retry; job di-DLQ (S5-AC3)
+        - EXPORT_FORMAT_UNSUPPORTED     # 400 — format param bukan csv/xlsx/pdf (S3-AC3)
 
     # ---- Timestamps -------------------------------------------------------
     TimestampISO:
