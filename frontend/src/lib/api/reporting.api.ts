@@ -290,10 +290,14 @@ export interface JobStatusResponse {
   currentStep?: string;
   startedAt?: string;
   estimatedCompletionAt?: string;
+  completedAt?: string;
   result?: unknown;
   error?: unknown;
   canCancel?: boolean;
   createdBy?: string;
+  createdByUsername?: string;
+  resultUrl?: string;
+  durationSeconds?: number | null;
 }
 
 export const jobApi = {
