@@ -1,0 +1,993 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-D Mapping Jurnal CRUD + 6-Eyes Workflow (P5-M12)
+  version: "1.0.0"
+  description: |
+    Mapping Jurnal CRUD: list, get, create DRAFT, edit DRAFT, submit, review (4-eyes/6-eyes),
+    approve (4-eyes), approve-2 (6-eyes ROLE-RISK + step-up MFA), reject, bulk import XLSX,
+    RPT-19 Coverage Dashboard, RPT-20 Validation, RPT-21 Change History.
+
+    Workflow states: DRAFT → PENDING_REVIEW → PENDING_APPROVAL (4-eyes) → APPROVED_ACTIVE
+                                           → PENDING_APPROVAL_2 (6-eyes regulated) → APPROVED_ACTIVE
+    Reject at any step → DRAFT.
+    Regulated events (REGULATED_EVENT_CODES from sys.config) require 6-eyes + step-up MFA ROLE-RISK.
+
+    References: P5-M12-S1..S5, DEC-017/018/021/022/027, FSD-APP-D.
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ─── List ───────────────────────────────────────────────────────────────────
+  /api/v1/mapping-jurnal:
+    get:
+      operationId: listMappingJurnal
+      summary: List semua event codes dengan mapping aktif (§1 sort/filter/export)
+      tags: [MappingJurnal]
+      parameters:
+        - $ref: "../openapi/_common.yaml#/components/parameters/cursor"
+        - $ref: "../openapi/_common.yaml#/components/parameters/limit"
+        - name: sort
+          in: query
+          schema:
+            type: string
+          description: "multi-column, e.g. event_code:asc,updated_at:desc"
+        - name: q
+          in: query
+          schema:
+            type: string
+          description: Global text search (event_code, nama_event)
+        - name: filter[workflow_status]
+          in: query
+          schema:
+            type: string
+            enum: [DRAFT, PENDING_REVIEW, PENDING_APPROVAL, PENDING_APPROVAL_2, APPROVED_ACTIVE]
+        - name: filter[workflow_path]
+          in: query
+          schema:
+            type: string
+            enum: ["4-eyes", "6-eyes"]
+        - name: filter[regulated_flag]
+          in: query
+          schema:
+            type: boolean
+        - name: filter[event_code]
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List mapping jurnal headers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MappingJurnalHeaderSummary"
+                  pagination:
+                    $ref: "../openapi/_common.yaml#/components/schemas/Pagination"
+                  meta:
+                    $ref: "../openapi/_common.yaml#/components/schemas/Meta"
+        "400":
+          $ref: "../openapi/_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "../openapi/_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "../openapi/_common.yaml#/components/responses/Forbidden"
+
+  /api/v1/mapping-jurnal/export:
+    get:
+      operationId: exportMappingJurnal
+      summary: Export mapping jurnal CSV/XLSX (respect filter aktif; §1 export pattern)
+      tags: [MappingJurnal]
+      parameters:
+        - name: format
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [csv, xlsx]
+        - name: filter[workflow_status]
+          in: query
+          schema:
+            type: string
+        - name: filter[regulated_flag]
+          in: query
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: File stream (inline export < 10k rows)
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+                example: 'attachment; filename="mapping-jurnal-20260622.xlsx"'
+        "202":
+          description: Async export job (> 10k rows) — returns jobId
+          content:
+            application/json:
+              schema:
+                $ref: "../openapi/_common.yaml#/components/schemas/JobAccepted"
+        "401":
+          $ref: "../openapi/_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "../openapi/_common.yaml#/components/responses/Forbidden"
+
+  /api/v1/mapping-jurnal/bulk-import:
+    post:
+      operationId: bulkImportMappingJurnal
+      summary: Import XLSX bulk mapping (P5-M11 upload_batch pattern, batch_type=MAPPING_BULK)
+      tags: [MappingJurnal]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: XLSX file ≤ 20MB, kolom event_code/akun_debit/akun_kredit/debit_kredit/jumlah_calc/urutan
+      responses:
+        "202":
+          description: Parsing job accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/BulkImportResult"
+                  meta:
+                    $ref: "../openapi/_common.yaml#/components/schemas/Meta"
+        "400":
+          $ref: "../openapi/_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "../openapi/_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "../openapi/_common.yaml#/components/responses/Forbidden"
+        "422":
+          $ref: "../openapi/_common.yaml#/components/responses/UnprocessableEntity"
+        "423":
+          $ref: "../openapi/_common.yaml#/components/responses/PeriodeLocked"
+
+  # ─── Per-event-code ─────────────────────────────────────────────────────────
+  /api/v1/mapping-jurnal/{event_code}:
+    get:
+      operationId: getMappingJurnalDetail
+      summary: Get header detail + active version + detail rows + version history
+      tags: [MappingJurnal]
+      parameters:
+        - name: event_code
+          in: path
+          required: true
+          schema:
+            type: string
+            example: ECL_PEMBENTUKAN
+      responses:
+        "200":
+          description: Mapping jurnal detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/MappingJurnalHeaderDetail"
+                  meta:
+                    $ref: "../openapi/_common.yaml#/components/schemas/Meta"
+        "401":
+          $ref: "../openapi/_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "../openapi/_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "../openapi/_common.yaml#/components/responses/NotFound"
+
+  /api/v1/mapping-jurnal/{event_code}/new-version:
+    post:
+      operationId: createMappingJurnalNewVersion
+      summary: Edit APPROVED_ACTIVE mapping — INSERT new DRAFT version (immutable versioning DEC-018)
+      tags: [MappingJurnal]
+      parameters:
+        - name: event_code
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewVersionRequest"
+      responses:
+        "201":
+          description: New DRAFT version created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/MappingJurnalHeaderSummary"
+                  meta:
+                    $ref: "../openapi/_common.yaml#/components/schemas/Meta"
+        "400":
+          $ref: "../openapi/_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "../openapi/_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "../openapi/_common.yaml#/components/responses/Forbidden"
+        "409":
+          description: MAPPING_DUPLICATE_VERSION
+          content:
+            application/json:
+              schema:
+                $ref: "../openapi/_common.yaml#/components/schemas/ErrorEnvelope"
+        "422":
+          $ref: "../openapi/_common.yaml#/components/responses/UnprocessableEntity"
+
+  # ─── Version-level workflow ─────────────────────────────────────────────────
+  /api/v1/mapping-jurnal/{event_code}/version/{version_id}/submit:
+    post:
+      operationId: submitMappingJurnal
+      summary: DRAFT → PENDING_REVIEW (ROLE-AKUN maker)
+      tags: [MappingJurnal]
+      parameters:
+        - name: event_code
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: version_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowActionRequest"
+      responses:
+        "200":
+          description: Submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowActionResponse"
+        "400":
+          $ref: "../openapi/_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "../openapi/_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "../openapi/_common.yaml#/components/responses/Forbidden"
+        "422":
+          $ref: "../openapi/_common.yaml#/components/responses/UnprocessableEntity"
+
+  /api/v1/mapping-jurnal/{event_code}/version/{version_id}/review:
+    post:
+      operationId: reviewMappingJurnal
+      summary: |
+        PENDING_REVIEW → PENDING_APPROVAL (4-eyes) or PENDING_APPROVAL_2 (6-eyes regulated).
+        ROLE-AKUN-CTL. SoD vs maker. Comment ≥ 30 chars.
+      tags: [MappingJurnal]
+      parameters:
+        - name: event_code
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: version_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReviewRequest"
+      responses:
+        "200":
+          description: Reviewed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowActionResponse"
+        "400":
+          $ref: "../openapi/_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "../openapi/_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "../openapi/_common.yaml#/components/responses/Forbidden"
+        "422":
+          $ref: "../openapi/_common.yaml#/components/responses/UnprocessableEntity"
+
+  /api/v1/mapping-jurnal/{event_code}/version/{version_id}/approve:
+    post:
+      operationId: approveMappingJurnal
+      summary: |
+        4-eyes path: PENDING_APPROVAL → APPROVED_ACTIVE. ROLE-AKUN-CTL approver.
+        SoD vs maker+reviewer. Periode lock check. Prior ACTIVE version effective_to flipped atomically.
+      tags: [MappingJurnal]
+      parameters:
+        - name: event_code
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: version_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApproveRequest"
+      responses:
+        "200":
+          description: Approved and ACTIVE
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowActionResponse"
+        "401":
+          $ref: "../openapi/_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "../openapi/_common.yaml#/components/responses/Forbidden"
+        "422":
+          $ref: "../openapi/_common.yaml#/components/responses/UnprocessableEntity"
+        "423":
+          description: MAPPING_PERIODE_LOCKED
+          content:
+            application/json:
+              schema:
+                $ref: "../openapi/_common.yaml#/components/schemas/ErrorEnvelope"
+
+  /api/v1/mapping-jurnal/{event_code}/version/{version_id}/approve-2:
+    post:
+      operationId: approve2MappingJurnal
+      summary: |
+        6-eyes path: PENDING_APPROVAL_2 → APPROVED_ACTIVE. ROLE-RISK only.
+        Requires X-Step-Up-Token (DEC-027). SoD vs M+R+A. Periode lock check.
+      tags: [MappingJurnal]
+      parameters:
+        - name: event_code
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: version_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: X-Step-Up-Token
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Step-up MFA token (DEC-027). Freshness ≤ 5 min enforced server-side.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApproveRequest"
+      responses:
+        "200":
+          description: Approved (6-eyes) and ACTIVE
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowActionResponse"
+        "401":
+          $ref: "../openapi/_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "../openapi/_common.yaml#/components/responses/Forbidden"
+        "422":
+          $ref: "../openapi/_common.yaml#/components/responses/UnprocessableEntity"
+        "423":
+          description: MAPPING_PERIODE_LOCKED
+          content:
+            application/json:
+              schema:
+                $ref: "../openapi/_common.yaml#/components/schemas/ErrorEnvelope"
+
+  /api/v1/mapping-jurnal/{event_code}/version/{version_id}/reject:
+    post:
+      operationId: rejectMappingJurnal
+      summary: Reject at any workflow step → DRAFT. Reviewer or Approver. Reason ≥ 30 chars.
+      tags: [MappingJurnal]
+      parameters:
+        - name: event_code
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: version_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RejectRequest"
+      responses:
+        "200":
+          description: Rejected back to DRAFT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowActionResponse"
+        "401":
+          $ref: "../openapi/_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "../openapi/_common.yaml#/components/responses/Forbidden"
+        "422":
+          $ref: "../openapi/_common.yaml#/components/responses/UnprocessableEntity"
+
+  # ─── Reports ─────────────────────────────────────────────────────────────────
+  /api/v1/reports/rpt-19-mapping-coverage:
+    get:
+      operationId: getRpt19MappingCoverage
+      summary: RPT-19 Mapping Coverage Dashboard (GAP badges, DLQ-linked events)
+      tags: [MappingJurnalReports]
+      responses:
+        "200":
+          description: Coverage summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Rpt19Coverage"
+                  meta:
+                    $ref: "../openapi/_common.yaml#/components/schemas/Meta"
+        "401":
+          $ref: "../openapi/_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "../openapi/_common.yaml#/components/responses/Forbidden"
+
+  /api/v1/reports/rpt-19-mapping-coverage/export:
+    get:
+      operationId: exportRpt19MappingCoverage
+      summary: Export RPT-19 CSV/XLSX
+      tags: [MappingJurnalReports]
+      parameters:
+        - name: format
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [csv, xlsx]
+      responses:
+        "200":
+          description: Inline file stream
+        "401":
+          $ref: "../openapi/_common.yaml#/components/responses/Unauthorized"
+
+  /api/v1/reports/rpt-20-mapping-validation:
+    get:
+      operationId: getRpt20MappingValidation
+      summary: RPT-20 Validation Report — akun non-null + balanced + COA valid per ACTIVE mapping
+      tags: [MappingJurnalReports]
+      responses:
+        "200":
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Rpt20Validation"
+                  meta:
+                    $ref: "../openapi/_common.yaml#/components/schemas/Meta"
+        "401":
+          $ref: "../openapi/_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "../openapi/_common.yaml#/components/responses/Forbidden"
+
+  /api/v1/reports/rpt-20-mapping-validation/export:
+    get:
+      operationId: exportRpt20MappingValidation
+      summary: Export RPT-20 XLSX (two sheets — all mappings + issues only)
+      tags: [MappingJurnalReports]
+      parameters:
+        - name: format
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [csv, xlsx]
+      responses:
+        "200":
+          description: Inline file stream
+        "401":
+          $ref: "../openapi/_common.yaml#/components/responses/Unauthorized"
+
+  /api/v1/reports/rpt-21-mapping-history:
+    get:
+      operationId: getRpt21MappingHistory
+      summary: RPT-21 Change History (audit log MAPPING.* per event_code, cursor-paged §1)
+      tags: [MappingJurnalReports]
+      parameters:
+        - $ref: "../openapi/_common.yaml#/components/parameters/cursor"
+        - $ref: "../openapi/_common.yaml#/components/parameters/limit"
+        - name: sort
+          in: query
+          schema:
+            type: string
+          description: "e.g. event_time:desc"
+        - name: filter[event_code]
+          in: query
+          schema:
+            type: string
+        - name: filter[actor_role]
+          in: query
+          schema:
+            type: string
+        - name: filter[action]
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Audit log entries for MAPPING.* actions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AuditLogEntry"
+                  pagination:
+                    $ref: "../openapi/_common.yaml#/components/schemas/Pagination"
+                  meta:
+                    $ref: "../openapi/_common.yaml#/components/schemas/Meta"
+        "401":
+          $ref: "../openapi/_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "../openapi/_common.yaml#/components/responses/Forbidden"
+
+  /api/v1/reports/rpt-21-mapping-history/export:
+    get:
+      operationId: exportRpt21MappingHistory
+      summary: Export RPT-21 CSV/XLSX (> 10k rows → async job per §1)
+      tags: [MappingJurnalReports]
+      parameters:
+        - name: format
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [csv, xlsx]
+        - name: filter[event_code]
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Inline file stream (< 10k rows)
+        "202":
+          description: Async job (> 10k rows)
+          content:
+            application/json:
+              schema:
+                $ref: "../openapi/_common.yaml#/components/schemas/JobAccepted"
+        "401":
+          $ref: "../openapi/_common.yaml#/components/responses/Unauthorized"
+
+# ─── Components ───────────────────────────────────────────────────────────────
+components:
+  schemas:
+    MappingWorkflowStatus:
+      type: string
+      enum:
+        - DRAFT
+        - PENDING_REVIEW
+        - PENDING_APPROVAL
+        - PENDING_APPROVAL_2
+        - APPROVED_ACTIVE
+
+    MappingJurnalHeaderSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        eventCode:
+          type: string
+          example: ECL_PEMBENTUKAN
+        namaEvent:
+          type: string
+        kategoriEvent:
+          type: string
+        workflowStatus:
+          $ref: "#/components/schemas/MappingWorkflowStatus"
+        workflowPath:
+          type: string
+          enum: ["4-eyes", "6-eyes"]
+        regulatedFlag:
+          type: boolean
+        aktifFlag:
+          type: boolean
+        parentId:
+          type: string
+          format: uuid
+          nullable: true
+        effectiveFrom:
+          type: string
+          format: date-time
+          nullable: true
+        effectiveTo:
+          type: string
+          format: date-time
+          nullable: true
+        makerId:
+          type: string
+          format: uuid
+          nullable: true
+        reviewerId:
+          type: string
+          format: uuid
+          nullable: true
+        approverId:
+          type: string
+          format: uuid
+          nullable: true
+        approver2Id:
+          type: string
+          format: uuid
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+
+    MappingJurnalDetail:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        headerId:
+          type: string
+          format: uuid
+        akunDebit:
+          type: string
+          nullable: true
+          description: COA account code for debit leg
+        akunKredit:
+          type: string
+          nullable: true
+          description: COA account code for credit leg
+        debitKredit:
+          type: string
+          enum: [D, K]
+          description: D = debit, K = kredit
+        jumlahCalc:
+          type: string
+          description: Formula string, e.g. 'ECL_weighted'
+          nullable: true
+        urutan:
+          type: integer
+          description: Sort order within event
+
+    MappingJurnalHeaderDetail:
+      allOf:
+        - $ref: "#/components/schemas/MappingJurnalHeaderSummary"
+        - type: object
+          properties:
+            detail:
+              type: array
+              items:
+                $ref: "#/components/schemas/MappingJurnalDetail"
+            versionHistory:
+              type: array
+              items:
+                $ref: "#/components/schemas/MappingJurnalHeaderSummary"
+            klasifikasiBerlaku:
+              type: array
+              items:
+                type: string
+              nullable: true
+              description: "Klasifikasi that apply; null = all"
+            catatan:
+              type: string
+              nullable: true
+            rejectReason:
+              type: string
+              nullable: true
+            reviewerSignedAt:
+              type: string
+              format: date-time
+              nullable: true
+            approverSignedAt:
+              type: string
+              format: date-time
+              nullable: true
+            approver2SignedAt:
+              type: string
+              format: date-time
+              nullable: true
+
+    NewVersionRequest:
+      type: object
+      required: [reason, detail]
+      properties:
+        reason:
+          type: string
+          minLength: 10
+          description: Business reason for version change
+        detail:
+          type: array
+          items:
+            type: object
+            required: [akunDebit, akunKredit, debitKredit, urutan]
+            properties:
+              akunDebit:
+                type: string
+              akunKredit:
+                type: string
+              debitKredit:
+                type: string
+                enum: [D, K]
+              jumlahCalc:
+                type: string
+                nullable: true
+              urutan:
+                type: integer
+
+    WorkflowActionRequest:
+      type: object
+      required: [comment]
+      properties:
+        comment:
+          type: string
+          minLength: 1
+
+    ReviewRequest:
+      type: object
+      required: [comment, signatureMethod]
+      properties:
+        comment:
+          type: string
+          minLength: 30
+          description: Review comment, minimum 30 characters
+        signatureMethod:
+          type: string
+          enum: [JWT_STEP_UP]
+
+    ApproveRequest:
+      type: object
+      required: [comment, signatureMethod]
+      properties:
+        comment:
+          type: string
+          minLength: 10
+        signatureMethod:
+          type: string
+          enum: [JWT_STEP_UP]
+
+    RejectRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 30
+          description: Reject reason, minimum 30 characters
+
+    WorkflowActionResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            eventCode:
+              type: string
+            workflowStatus:
+              $ref: "#/components/schemas/MappingWorkflowStatus"
+            aktifFlag:
+              type: boolean
+            updatedAt:
+              type: string
+              format: date-time
+        meta:
+          $ref: "../openapi/_common.yaml#/components/schemas/Meta"
+
+    BulkImportResult:
+      type: object
+      properties:
+        batchId:
+          type: string
+        batchType:
+          type: string
+          example: MAPPING_BULK
+        totalRows:
+          type: integer
+        validRows:
+          type: integer
+        invalidRows:
+          type: integer
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              row:
+                type: integer
+              col:
+                type: string
+              errorCode:
+                type: string
+              error:
+                type: string
+
+    Rpt19CoverageEvent:
+      type: object
+      properties:
+        eventCode:
+          type: string
+        namaEvent:
+          type: string
+        workflowStatus:
+          $ref: "#/components/schemas/MappingWorkflowStatus"
+        activeDetailCount:
+          type: integer
+        missingAkunCount:
+          type: integer
+          description: Detail rows with null akun_debit or akun_kredit
+        lastDlqError:
+          type: string
+          format: date-time
+          nullable: true
+        gapCoverage:
+          type: string
+          enum: [OK, MISSING, INCOMPLETE]
+          description: OK=APPROVED_ACTIVE+no nulls; MISSING=no APPROVED_ACTIVE; INCOMPLETE=APPROVED_ACTIVE but has null akun
+
+    Rpt19Coverage:
+      type: object
+      properties:
+        totalEvents:
+          type: integer
+        activeEvents:
+          type: integer
+        missingEvents:
+          type: integer
+        gapEvents:
+          type: array
+          items:
+            $ref: "#/components/schemas/Rpt19CoverageEvent"
+
+    Rpt20Issue:
+      type: object
+      properties:
+        eventCode:
+          type: string
+        headerId:
+          type: string
+          format: uuid
+        errorCodes:
+          type: array
+          items:
+            type: string
+        details:
+          type: string
+
+    Rpt20Validation:
+      type: object
+      properties:
+        totalActiveMappings:
+          type: integer
+        validMappings:
+          type: integer
+        invalidMappings:
+          type: integer
+        issues:
+          type: array
+          items:
+            $ref: "#/components/schemas/Rpt20Issue"
+
+    AuditLogEntry:
+      type: object
+      properties:
+        eventId:
+          type: string
+          format: uuid
+        eventTime:
+          type: string
+          format: date-time
+        actorUserId:
+          type: string
+          format: uuid
+        actorRole:
+          type: string
+        action:
+          type: string
+          example: MAPPING.REVIEWED
+        entityType:
+          type: string
+        entityId:
+          type: string
+          format: uuid
+        beforeJsonb:
+          type: object
+          nullable: true
+        afterJsonb:
+          type: object
+          nullable: true
+        traceId:
+          type: string
+          nullable: true

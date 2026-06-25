@@ -111,10 +111,15 @@ const (
 	// Still emitted in Phase 4.5 for RoutingPOCIComputed. DEC-POCI-002.
 	WarnPOCIRequiresFullCAEIR = "ECL_POCI_REQUIRES_FULL_CREDIT_ADJUSTED_EIR"
 
-	// WarnPOCIECLRepresentsInitialBaseline is emitted when ECL for a POCI instrument
-	// represents the full initial-baseline lifetime ECL, NOT the change-in-ECL-since-origination.
-	// Per PSAK 71 §5.5.13, the correct POCI ECL delta is computed starting Phase 5.
-	// DEC-POCI-001: Phase 4.5 limitation — baseline persisted; delta deferred.
+	// WarnPOCIECLRepresentsInitialBaseline was emitted in Phase 4.5 when the ECL for a POCI
+	// instrument represented the full initial-baseline lifetime ECL, not the delta since
+	// origination. Superseded by P5-M10 POCI delta computation (pocidelta package).
+	//
+	// Deprecated: Do NOT append to new ComputeResult.Warnings. Kept only for backward
+	// compatibility with consumers (e.g. E2E test fixtures, stored result rows) that
+	// may reference this code. New code must use pocidelta.ComputeDeltaForCalcRun.
+	//
+	// Reference: PSAK 71 §5.5.13, DEC-POCI-001, P5-M10.
 	WarnPOCIECLRepresentsInitialBaseline = "POCI_ECL_REPRESENTS_INITIAL_BASELINE_NOT_DELTA"
 
 	// WarnFVTPLSkip is emitted for FVTPL / FVOCI_ELECTION instruments.

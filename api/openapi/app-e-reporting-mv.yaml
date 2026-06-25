@@ -1,0 +1,625 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-E Reporting MV Foundation (P5-M13)
+  version: "1.0.0"
+  description: |
+    P5-M13 Reporting MV Foundation:
+    - 8 Materialized Views (rpt.mv_*)
+    - On-demand + cron Asynq MV refresh
+    - Export engine: CSV / XLSX / PDF + watermark + SHA-256
+    - Async export (>10k rows) via Asynq + MinIO + SMTP notif
+    - Scheduled email config (ROLE-AKUN-CTL) + opt-out
+
+    References: P5-M13-S1..S5, FSD-APP-E §6, DEC-007 (Asynq), DEC-018 (audit), DEC-021 (idempotency), DEC-022 (cursor).
+
+servers:
+  - url: /api/v1
+
+security:
+  - bearerAuth: []
+
+paths:
+
+  # ---------------------------------------------------------------------------
+  # S1/S2 — MV Status + Refresh
+  # ---------------------------------------------------------------------------
+  /admin/mv-status:
+    get:
+      operationId: listMVStatus
+      summary: List 8 MV metadata + last refresh status (S1-AC2)
+      description: |
+        Mengembalikan metadata 8 Materialized Views (rpt.mv_*):
+        last_refresh_at, row_count, status, last_error.
+        Query di-route ke read-replica (MV_DSN env) jika tersedia.
+        Permission: sys.mv_refresh.read (ROLE-IT-ADMIN, ROLE-AUDIT).
+      tags: [reporting-mv]
+      parameters:
+        - $ref: "_common.yaml#/components/parameters/cursor"
+        - $ref: "_common.yaml#/components/parameters/limit"
+        - $ref: "_common.yaml#/components/parameters/sortParam"
+      responses:
+        "200":
+          description: List MV status
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "_common.yaml#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/MVStatusItem"
+        "401":
+          $ref: "_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "_common.yaml#/components/responses/Forbidden"
+
+  /admin/mv-refresh:
+    post:
+      operationId: triggerMVRefresh
+      summary: Manual trigger CONCURRENT MV refresh (S2-AC3)
+      description: |
+        ROLE-IT-ADMIN trigger refresh satu atau semua MV.
+        Jika mv_name tidak di-set → semua 8 MV di-refresh (batch enqueue).
+        Jika MV sedang berjalan → MV_REFRESH_LOCKED 423.
+        Enqueue Asynq job; return 202 {jobId, statusUrl, streamUrl}.
+        Rate limit: 10 req/min (SensitiveRateLimit).
+        Idempotency-Key wajib.
+      tags: [reporting-mv]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MVRefreshRequest"
+      responses:
+        "202":
+          description: Refresh job enqueued
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "_common.yaml#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/AsyncJobRef"
+        "423":
+          description: MV refresh sedang berjalan (MV_REFRESH_LOCKED)
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/ErrorEnvelope"
+        "401":
+          $ref: "_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "_common.yaml#/components/responses/Forbidden"
+
+  # ---------------------------------------------------------------------------
+  # S3/S4 — Export Engine
+  # ---------------------------------------------------------------------------
+  /reports/{slug}/export:
+    get:
+      operationId: exportReport
+      summary: Export report (CSV/XLSX/PDF); inline <10k rows, async ≥10k (S3/S4)
+      description: |
+        Export satu laporan dalam format CSV, XLSX, atau PDF.
+        - dataset ≤ REPORT_EXPORT_INLINE_THRESHOLD (default 10.000): HTTP 200 stream langsung.
+        - dataset > threshold: HTTP 202 Accepted + Asynq job.
+        - dataset > REPORT_EXPORT_MAX_ROWS (default 100.000): HTTP 422 EXPORT_TOO_LARGE.
+        Permission: report.{slug}.export ATAU audit_log.read (ROLE-AUDIT bypass semua).
+        Watermark footer setiap sheet/halaman: "RAHASIA - BLIPS Tugu Re — exported {ts} by {user}".
+        SHA-256 hash file dicatat di sys.export_log.
+        Audit: EXPORT.GENERATED in-transaction.
+      tags: [reporting-export]
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+            enum:
+              - mv-status-periode
+              - mv-jurnal-summary
+              - mv-gl-delivery-status
+              - mv-mtm-daily-summary
+              - mv-akrual-summary
+              - mv-renewal-summary
+              - mv-penjualan-summary
+              - mv-poci-delta-summary
+          description: MV report slug
+        - name: format
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [csv, xlsx, pdf]
+          description: Export format
+        - name: periode_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Filter by periode_id (optional)
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Inline export (≤10k rows)
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "202":
+          description: Async export job enqueued (>10k rows)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "_common.yaml#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/AsyncJobRef"
+        "400":
+          description: EXPORT_FORMAT_UNSUPPORTED
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/ErrorEnvelope"
+        "403":
+          description: EXPORT_PERMISSION_DENIED
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/ErrorEnvelope"
+        "422":
+          description: EXPORT_TOO_LARGE
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/ErrorEnvelope"
+        "401":
+          $ref: "_common.yaml#/components/responses/Unauthorized"
+
+  /reports/export-log:
+    get:
+      operationId: listExportLog
+      summary: List export history with sort/filter/cursor-paging (S3-AC1)
+      description: |
+        Cursor-based list sys.export_log entries.
+        Sort/filter: created_at, format, report_slug, status, requested_by.
+        Permission: report.export_log.read OR audit_log.read (ROLE-AUDIT).
+      tags: [reporting-export]
+      parameters:
+        - $ref: "_common.yaml#/components/parameters/cursor"
+        - $ref: "_common.yaml#/components/parameters/limit"
+        - $ref: "_common.yaml#/components/parameters/sortParam"
+        - $ref: "_common.yaml#/components/parameters/searchParam"
+        - name: "filter[format]"
+          in: query
+          schema:
+            type: string
+            enum: [csv, xlsx, pdf]
+        - name: "filter[status]"
+          in: query
+          schema:
+            type: string
+            enum: [REQUESTED, COMPUTING, COMPLETED, FAILED]
+      responses:
+        "200":
+          description: Export log list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "_common.yaml#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/ExportLogItem"
+        "401":
+          $ref: "_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "_common.yaml#/components/responses/Forbidden"
+
+  /reports/export/{export_id}/download:
+    get:
+      operationId: downloadExport
+      summary: Get signed MinIO URL or stream export file; audit EXPORT.DOWNLOADED (S4-AC4)
+      description: |
+        Untuk async exports: return redirect 302 ke MinIO signed URL (TTL 24h).
+        Untuk inline exports selesai: stream file langsung.
+        Audit EXPORT.DOWNLOADED dicatat in-transaction.
+        Permission: report.export_log.read OR audit_log.read.
+      tags: [reporting-export]
+      parameters:
+        - name: export_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Inline file stream
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "302":
+          description: Redirect to MinIO signed URL
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+        "404":
+          $ref: "_common.yaml#/components/responses/NotFound"
+        "401":
+          $ref: "_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "_common.yaml#/components/responses/Forbidden"
+
+  # ---------------------------------------------------------------------------
+  # S5 — Scheduled Email Config
+  # ---------------------------------------------------------------------------
+  /reports/scheduled-emails:
+    get:
+      operationId: listScheduledEmails
+      summary: List scheduled email configurations (S5)
+      description: |
+        Cursor-based list sys.scheduled_email rows.
+        Permission: report.scheduled_email.read (ROLE-AKUN-CTL, ROLE-AUDIT).
+      tags: [reporting-scheduled-email]
+      parameters:
+        - $ref: "_common.yaml#/components/parameters/cursor"
+        - $ref: "_common.yaml#/components/parameters/limit"
+        - $ref: "_common.yaml#/components/parameters/sortParam"
+      responses:
+        "200":
+          description: Scheduled email list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "_common.yaml#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/ScheduledEmailItem"
+        "401":
+          $ref: "_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "_common.yaml#/components/responses/Forbidden"
+
+    post:
+      operationId: createScheduledEmail
+      summary: Create scheduled email config (ROLE-AKUN-CTL) (S5-AC1)
+      description: |
+        ROLE-AKUN-CTL membuat jadwal email terjadwal untuk satu laporan.
+        Validasi: cron syntax; recipients non-empty; report_slug valid.
+        Audit: SCHEDULED_EMAIL.CREATED in-transaction.
+        Idempotency-Key wajib.
+      tags: [reporting-scheduled-email]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScheduledEmailRequest"
+      responses:
+        "201":
+          description: Scheduled email created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "_common.yaml#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ScheduledEmailItem"
+        "400":
+          $ref: "_common.yaml#/components/responses/BadRequest"
+        "401":
+          $ref: "_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "_common.yaml#/components/responses/Forbidden"
+
+  /reports/scheduled-emails/{id}:
+    delete:
+      operationId: deleteScheduledEmail
+      summary: Soft-delete scheduled email config (ROLE-AKUN-CTL) (S5)
+      description: |
+        Soft-delete: set deleted_at. Pending sends in Asynq are abandoned.
+        Audit: SCHEDULED_EMAIL.DELETED in-transaction.
+        Idempotency-Key wajib.
+      tags: [reporting-scheduled-email]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Soft-deleted
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/SuccessEnvelope"
+        "404":
+          $ref: "_common.yaml#/components/responses/NotFound"
+        "401":
+          $ref: "_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "_common.yaml#/components/responses/Forbidden"
+
+  /reports/scheduled-emails/{id}/opt-out:
+    post:
+      operationId: optOutScheduledEmail
+      summary: Recipient opt-out (signed token in email link, no auth required) (S5-AC4)
+      description: |
+        Diakses tanpa auth JWT (penerima email klik link opt-out).
+        Signed token di-verify; email di-append ke sys.scheduled_email_optout.
+        Config TIDAK dihapus — hanya email ini yang tidak terkirim ke depannya.
+      tags: [reporting-scheduled-email]
+      security: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: token
+          in: query
+          required: true
+          schema:
+            type: string
+          description: HMAC-SHA256 signed token dari email link
+        - name: email
+          in: query
+          required: true
+          schema:
+            type: string
+            format: email
+      responses:
+        "200":
+          description: Opt-out recorded
+          content:
+            application/json:
+              schema:
+                $ref: "_common.yaml#/components/schemas/SuccessEnvelope"
+        "400":
+          $ref: "_common.yaml#/components/responses/BadRequest"
+        "404":
+          $ref: "_common.yaml#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      $ref: "_common.yaml#/components/securitySchemes/bearerAuth"
+
+  schemas:
+
+    MVStatusItem:
+      type: object
+      required: [mvName, status, lastRefreshAt, rowCount]
+      properties:
+        mvName:
+          type: string
+          example: "rpt.mv_jurnal_summary"
+        status:
+          type: string
+          enum: [IDLE, REFRESHING, FAILED]
+        lastRefreshAt:
+          type: string
+          format: date-time
+          nullable: true
+        rowCount:
+          type: integer
+          nullable: true
+        lastError:
+          type: string
+          nullable: true
+        triggeredBy:
+          type: string
+          enum: [CRON, HARD_CLOSE, MANUAL]
+          nullable: true
+
+    MVRefreshRequest:
+      type: object
+      properties:
+        mvName:
+          type: string
+          description: "Nama MV spesifik (mis. 'rpt.mv_jurnal_summary'). Jika null → refresh semua 8 MV."
+          nullable: true
+          example: "rpt.mv_jurnal_summary"
+
+    AsyncJobRef:
+      type: object
+      required: [jobId, statusUrl, streamUrl]
+      properties:
+        jobId:
+          type: string
+          description: Asynq job ID (ULID or UUID)
+        statusUrl:
+          type: string
+          format: uri
+          example: "/api/v1/jobs/job_01HXYZ"
+        streamUrl:
+          type: string
+          format: uri
+          example: "/api/v1/jobs/job_01HXYZ/stream"
+
+    ExportLogItem:
+      type: object
+      required: [id, reportSlug, format, status, requestedBy, requestedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        reportSlug:
+          type: string
+        format:
+          type: string
+          enum: [csv, xlsx, pdf]
+        status:
+          type: string
+          enum: [REQUESTED, COMPUTING, COMPLETED, FAILED]
+        rowCount:
+          type: integer
+          nullable: true
+        fileSha256:
+          type: string
+          nullable: true
+          description: SHA-256 hex of exported file bytes
+        minioPath:
+          type: string
+          nullable: true
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+        requestedBy:
+          type: string
+          format: uuid
+        requestedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+        downloadedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    ScheduledEmailRequest:
+      type: object
+      required: [reportSlug, format, frequency, sendTime, recipients]
+      properties:
+        reportSlug:
+          type: string
+          enum:
+            - mv-status-periode
+            - mv-jurnal-summary
+            - mv-gl-delivery-status
+            - mv-mtm-daily-summary
+            - mv-akrual-summary
+            - mv-renewal-summary
+            - mv-penjualan-summary
+            - mv-poci-delta-summary
+        format:
+          type: string
+          enum: [csv, xlsx, pdf]
+        frequency:
+          type: string
+          enum: [daily, weekly, monthly]
+        sendTime:
+          type: string
+          description: "Waktu kirim HH:MM+07:00 (WIB)"
+          example: "07:00+07:00"
+        recipients:
+          type: array
+          items:
+            type: string
+            format: email
+          minItems: 1
+          maxItems: 50
+        active:
+          type: boolean
+          default: true
+        subjectTemplate:
+          type: string
+          description: "Template judul email. Placeholder: {tanggal}, {report_slug}"
+        bodyTemplate:
+          type: string
+          description: "Template body email. Placeholder: {tanggal}, {file_hash}, {report_slug}"
+
+    ScheduledEmailItem:
+      type: object
+      required: [id, reportSlug, format, frequency, sendTime, active]
+      properties:
+        id:
+          type: string
+          format: uuid
+        reportSlug:
+          type: string
+        format:
+          type: string
+          enum: [csv, xlsx, pdf]
+        frequency:
+          type: string
+          enum: [daily, weekly, monthly]
+        sendTime:
+          type: string
+        recipients:
+          type: array
+          items:
+            type: string
+            format: email
+        active:
+          type: boolean
+        lastSentAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastStatus:
+          type: string
+          enum: [SENT, FAILED, PENDING]
+          nullable: true
+        optOutCount:
+          type: integer
+          description: Number of recipients who have opted out
+        createdAt:
+          type: string
+          format: date-time
+        createdBy:
+          type: string
+          format: uuid

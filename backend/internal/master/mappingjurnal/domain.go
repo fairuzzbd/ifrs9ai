@@ -80,11 +80,40 @@ type Header struct {
 	WorkflowStatus       WorkflowStatus `db:"workflow_status"`
 	WorkflowInstanceID   *uuid.UUID     `db:"workflow_instance_id"`
 
+	// ─── P5-M12 6-eyes workflow fields (added migration 000035 + 000049) ──────
+	WorkflowPath string `db:"workflow_path"` // "4-eyes" | "6-eyes"
+
+	// SoD principals (filled progressively as workflow transitions)
+	MakerID     *uuid.UUID `db:"maker_id"`
+	ReviewerID  *uuid.UUID `db:"reviewer_id"`
+	ApproverID  *uuid.UUID `db:"approver_id"`
+	Approver2ID *uuid.UUID `db:"approver_2_id"` // 6-eyes only
+
+	// Signature hashes + timestamps per step
+	ReviewerSignedAt       *time.Time `db:"reviewer_signed_at"`
+	ReviewerSignatureHash  []byte     `db:"reviewer_signature_hash"`
+	CommentReview          *string    `db:"comment_review"`
+	ApproverSignedAt       *time.Time `db:"approver_signed_at"`
+	ApproverSignatureHash  []byte     `db:"approver_signature_hash"`
+	CommentApprove         *string    `db:"comment_approve"`
+	Approver2SignedAt      *time.Time `db:"approver_2_signed_at"`
+	Approver2SignatureHash []byte     `db:"approver_2_signature_hash"`
+	CommentApprove2        *string    `db:"comment_approve_2"`
+	SubmitAt               *time.Time `db:"submit_at"`
+	RejectReason           *string    `db:"reject_reason"`
+
+	// ─── P5-M12 version chain fields (added migration 000049) ─────────────────
+	ParentID       *uuid.UUID `db:"parent_id"`        // nil = first version
+	EffectiveFrom  *time.Time `db:"effective_from"`   // set on INSERT
+	EffectiveTo    *time.Time `db:"effective_to"`     // 'infinity' while active
+	RegulatedFlag  bool       `db:"regulated_flag"`   // drives 4-eyes vs 6-eyes
+	StepUpTokenRef []byte     `db:"step_up_token_ref"` // SHA-256 of X-Step-Up-Token (approve-2)
+
 	// Audit fields
 	CreatedAt  time.Time  `db:"created_at"`
-	CreatedBy  *uuid.UUID `db:"created_by"`
-	UpdatedAt  *time.Time `db:"updated_at"`
-	UpdatedBy  *uuid.UUID `db:"updated_by"`
+	CreatedBy  uuid.UUID  `db:"created_by"`
+	UpdatedAt  time.Time  `db:"updated_at"`
+	UpdatedBy  uuid.UUID  `db:"updated_by"`
 	DeletedAt  *time.Time `db:"deleted_at"`
 	DeletedBy  *uuid.UUID `db:"deleted_by"`
 	RowVersion int64      `db:"row_version"`
@@ -99,6 +128,11 @@ type Detail struct {
 	Urutan               int             `db:"urutan"`
 	KodeAkunID           uuid.UUID       `db:"kode_akun_id"`
 	DKIndicator          string          `db:"dk_indicator"` // DEBIT | KREDIT
+	// AkunDebitCode and AkunKreditCode are the text COA codes stored in
+	// mst.mapping_jurnal_detail.akun_debit / akun_kredit (added migration 000049).
+	// Populated by GetDetailsByP5HeaderID; empty for legacy detail rows.
+	AkunDebitCode  string `db:"akun_debit"`
+	AkunKreditCode string `db:"akun_kredit"`
 	SumberAmount         string          `db:"sumber_amount"`
 	KlasifikasiFilter    *string         `db:"klasifikasi_filter"`
 	TipeInstrumenFilter  []string        `db:"tipe_instrumen_filter"`
@@ -110,9 +144,9 @@ type Detail struct {
 
 	// Audit fields (no workflow_status — detail inherits from header)
 	CreatedAt  time.Time  `db:"created_at"`
-	CreatedBy  *uuid.UUID `db:"created_by"`
-	UpdatedAt  *time.Time `db:"updated_at"`
-	UpdatedBy  *uuid.UUID `db:"updated_by"`
+	CreatedBy  uuid.UUID  `db:"created_by"`
+	UpdatedAt  time.Time  `db:"updated_at"`
+	UpdatedBy  uuid.UUID  `db:"updated_by"`
 	DeletedAt  *time.Time `db:"deleted_at"`
 	DeletedBy  *uuid.UUID `db:"deleted_by"`
 	RowVersion int64      `db:"row_version"`
@@ -339,15 +373,15 @@ func ToHeaderResponse(hd *HeaderWithDetails) HeaderResponse {
 		s := h.WorkflowInstanceID.String()
 		r.WorkflowInstanceID = &s
 	}
-	if h.CreatedBy != nil {
+	{
 		s := h.CreatedBy.String()
 		r.CreatedBy = &s
 	}
-	if h.UpdatedAt != nil {
+	{
 		s := h.UpdatedAt.Format(time.RFC3339)
 		r.UpdatedAt = &s
 	}
-	if h.UpdatedBy != nil {
+	{
 		s := h.UpdatedBy.String()
 		r.UpdatedBy = &s
 	}

@@ -1610,3 +1610,35 @@ func TestDBPeriodeBukuReader_NilDB_ListClosedBulananSince_ReturnsEmpty(t *testin
 		t.Errorf("expected empty slice for nil-db reader, got %d items", len(result))
 	}
 }
+
+// ─── M3: POCI gate in staging engine ─────────────────────────────────────────
+
+// TestEvaluateInstrumen_POCI_Skips_Staging verifies that a POCI instrument is
+// returned as Skipped=true without writing stage_history (PSAK 71 §5.5.13, P5-M10 M3).
+func TestEvaluateInstrumen_POCI_Skips_Staging(t *testing.T) {
+	dpdRepo := newMockDPDRepo()
+	histRepo := newMockHistRepo()
+	overRepo := newMockOverrideRepo()
+
+	// Build a mock instrumen with IsPOCI = true
+	instrumen := defaultMockInstrumen()
+	instrumen.snap.IsPOCI = true
+
+	svc := newTestService(dpdRepo, histRepo, overRepo, instrumen, &mockPeriodeReader{})
+
+	ctx := ctxWithActor(uuid.New().String(), "ROLE-RISK", "TUGURE")
+	result, err := svc.EvaluateSingleInstrumen(ctx, uuid.New(), time.Now().UTC(), nil)
+	if err != nil {
+		t.Fatalf("M3: unexpected error for POCI instrument: %v", err)
+	}
+	if !result.Skipped {
+		t.Error("M3: POCI instrument must return Skipped=true from staging engine")
+	}
+	if result.HistoryRowsInserted != 0 {
+		t.Errorf("M3: POCI instrument must NOT write stage_history; got %d rows", result.HistoryRowsInserted)
+	}
+	// Skip reason must reference POCI / PSAK 71 §5.5.13
+	if result.SkipReason == "" {
+		t.Error("M3: SkipReason must be non-empty for POCI gate")
+	}
+}
