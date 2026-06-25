@@ -14,9 +14,13 @@ import (
 	"blips-ifrs9.tugu-re.com/internal/master/kurs"
 )
 
+// Ensure repoStub also satisfies RepositoryP5M5 at compile time.
+var _ kurs.RepositoryP5M5 = (*repoStub)(nil)
+
 // ─── Repo stub ────────────────────────────────────────────────────────────────
 
 // repoStub is a flexible Repository stub that delegates to whichever sub-stubs are set.
+// It implements both Repository and RepositoryP5M5.
 type repoStub struct {
 	createErr       error
 	getByIDVal      *kurs.Kurs
@@ -35,9 +39,15 @@ type repoStub struct {
 	exportReader    io.Reader
 	exportCount     int
 	exportErr       error
-}
 
-var _ kurs.Repository = (*repoStub)(nil)
+	// P5-M5 stub fields
+	batchRows          []*kurs.Kurs
+	isHoliday          bool
+	configParams       map[string]string
+	previousRate       *decimal.Decimal
+	instrumenKlasifikasi string
+	instrumenMataUang  string
+}
 
 func (r *repoStub) Create(_ context.Context, _ *sql.Tx, _ *kurs.Kurs) error {
 	return r.createErr
@@ -89,6 +99,57 @@ func (r *repoStub) ExportAll(_ context.Context, _ listquery.Query) (io.Reader, i
 }
 
 var errTestNoDB = fmt.Errorf("test: no database available")
+
+// ─── RepositoryP5M5 stub methods ─────────────────────────────────────────────
+
+func (r *repoStub) InsertBatch(_ context.Context, _ *sql.Tx, _ []*kurs.Kurs) error {
+	return r.createErr
+}
+
+func (r *repoStub) GetBatchByID(_ context.Context, _ uuid.UUID) ([]*kurs.Kurs, error) {
+	return r.batchRows, nil
+}
+
+func (r *repoStub) SetBatchApproved(_ context.Context, _ *sql.Tx, _ uuid.UUID, _ uuid.UUID) (int64, error) {
+	return int64(len(r.batchRows)), nil
+}
+
+func (r *repoStub) SetBatchRejected(_ context.Context, _ *sql.Tx, _ uuid.UUID, _ string, _ uuid.UUID) (int64, error) {
+	return int64(len(r.batchRows)), nil
+}
+
+func (r *repoStub) GetPreviousActiveRate(_ context.Context, _ string, _ time.Time) (*decimal.Decimal, error) {
+	return r.previousRate, nil
+}
+
+func (r *repoStub) IsHoliday(_ context.Context, _ time.Time) (bool, error) {
+	return r.isHoliday, nil
+}
+
+func (r *repoStub) GetConfigParam(_ context.Context, key string) (string, error) {
+	if r.configParams != nil {
+		if v, ok := r.configParams[key]; ok {
+			return v, nil
+		}
+	}
+	return "", fmt.Errorf("config key %q not found in stub", key)
+}
+
+func (r *repoStub) GetInstrumenForTreatment(_ context.Context, _ uuid.UUID) (string, string, error) {
+	return r.instrumenKlasifikasi, r.instrumenMataUang, nil
+}
+
+func (r *repoStub) InsertDLQEntry(_ context.Context, _ time.Time, _, _, _ string, _ []byte) error {
+	return nil
+}
+
+func (r *repoStub) LockRatesForPeriode(_ context.Context, _ *sql.Tx, _ uuid.UUID) error {
+	return nil
+}
+
+func (r *repoStub) UnlockRatesForPeriode(_ context.Context, _ *sql.Tx, _ uuid.UUID) error {
+	return nil
+}
 
 // ─── Test fixtures ────────────────────────────────────────────────────────────
 

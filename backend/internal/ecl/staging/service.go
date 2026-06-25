@@ -101,6 +101,9 @@ type InstrumenSnapshot struct {
 	Status            string // AKTIF | MATURED | etc.
 	TanggalPenempatan time.Time
 	TenantID          string
+	// IsPOCI: M3 fix — POCI instruments bypass the staging engine per PSAK 71 §5.5.13.
+	// Populated from mst.instrumen.is_poci by DBInstrumenReader.GetByID.
+	IsPOCI bool
 }
 
 // ─── Service ─────────────────────────────────────────────────────────────────
@@ -166,6 +169,17 @@ func (s *Service) EvaluateSingleInstrumen(ctx context.Context, instrumenID uuid.
 	instrumen, err := s.instrumenReader.GetByID(ctx, instrumenID)
 	if err != nil {
 		return nil, ErrStagingInstrumenNotFound(instrumenID.String())
+	}
+
+	// M3 fix: POCI instruments bypass staging entirely per PSAK 71 §5.5.13.
+	// Stage is always 'POCI' — the pocidelta package handles delta ECL (P5-M10).
+	// Do NOT write stage_history for POCI instruments.
+	if instrumen.IsPOCI {
+		return &EvaluationResult{
+			InstrumenID: instrumenID,
+			Skipped:     true,
+			SkipReason:  "POCI instrument — staging bypassed per PSAK 71 §5.5.13. Use pocidelta package for delta ECL (P5-M10).",
+		}, nil
 	}
 
 	// FVTPL → no ECL → skip.

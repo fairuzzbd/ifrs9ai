@@ -369,10 +369,14 @@ func (o *ECLOrchestrator) handlePOCI(ctx context.Context, req ComputeRequest, in
 	result.FlagPOCI = true
 
 	// Append POCI warnings:
-	//   1. WarnPOCIRequiresFullCAEIR — jurnal P&L booking not yet wired (Phase 5).
-	//   2. WarnPOCIECLRepresentsInitialBaseline — Phase 4.5 baseline limitation.
+	//   1. WarnPOCIRequiresFullCAEIR — jurnal P&L booking is now handled by P5-M10 pocidelta package.
+	//      Kept here for consumers that inspect warnings; see WarnPOCIRequiresFullCAEIR docs.
+	//   2. WarnPOCIECLRepresentsInitialBaseline — REMOVED in P5-M10. P5-M10 pocidelta package
+	//      now computes the correct delta (current_ecl − baseline). Do NOT re-add.
+	//      The constant is preserved in domain.go for backward compat with existing consumers
+	//      reading stored result rows, but should not be appended to new results.
 	//   3. WarnPOCIStageForcedToLifetime — only when Stage 1 was forced to Stage 2 (F3 fix).
-	result.Warnings = append(result.Warnings, WarnPOCIRequiresFullCAEIR, WarnPOCIECLRepresentsInitialBaseline)
+	result.Warnings = append(result.Warnings, WarnPOCIRequiresFullCAEIR)
 	result.Warnings = append(result.Warnings, pociWarnings...)
 
 	return result, nil
