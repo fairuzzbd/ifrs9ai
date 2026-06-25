@@ -115,11 +115,11 @@ export default function PenempatanNewPage() {
         {
           action: {
             label: "Lihat detail",
-            onClick: () => router.push(`/trx/penempatan/${penempatan.id}`),
+            onClick: () => router.push(`/transaksi/penempatan/${penempatan.id}`),
           },
         },
       );
-      router.push(`/trx/penempatan/${penempatan.id}`);
+      router.push(`/transaksi/penempatan/${penempatan.id}`);
     } catch (err) {
       if (isApiError(err)) {
         // Set field errors if validation
@@ -150,7 +150,7 @@ export default function PenempatanNewPage() {
     <div className="p-6 space-y-4">
       {/* Breadcrumb */}
       <nav aria-label="Breadcrumb" className="flex items-center gap-1 text-sm text-gray-500">
-        <Link href="/trx/penempatan" className="hover:underline">
+        <Link href="/transaksi/penempatan" className="hover:underline">
           Penempatan Deposito
         </Link>
         <ChevronRight className="h-4 w-4" aria-hidden="true" />
@@ -439,7 +439,7 @@ export default function PenempatanNewPage() {
                   {submitting ? "Menyimpan..." : "Simpan sebagai Konsep"}
                 </Button>
                 <Button type="button" variant="outline" asChild>
-                  <Link href="/trx/penempatan">Batal</Link>
+                  <Link href="/transaksi/penempatan">Batal</Link>
                 </Button>
               </div>
             </form>

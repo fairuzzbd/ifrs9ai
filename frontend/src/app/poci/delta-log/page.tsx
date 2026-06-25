@@ -77,6 +77,7 @@ function usePociDeltaLogFilters() {
 
 function PociDeltaLogContent() {
   const filters = usePociDeltaLogFilters();
+  const { setSort } = filters;
 
   const [cursorHistory, setCursorHistory] = React.useState<string[]>([""]);
   const [pageIndex, setPageIndex] = React.useState(0);
@@ -108,8 +109,8 @@ function PociDeltaLogContent() {
 
   React.useEffect(() => {
     const [s] = sorting;
-    if (s) void filters.setSort(`${s.id}:${s.desc ? "desc" : "asc"}`);
-  }, [sorting]);
+    if (s) void setSort(`${s.id}:${s.desc ? "desc" : "asc"}`);
+  }, [sorting, setSort]);
 
   const activeFilters: ActiveFilter[] = [];
   if (filters.filterDirection)

@@ -72,7 +72,7 @@ function PociInstrumenHistoryContent() {
   React.useEffect(() => {
     const [s] = sorting;
     if (s) void setSort(`${s.id}:${s.desc ? "desc" : "asc"}`);
-  }, [sorting]);
+  }, [sorting, setSort]);
 
   const items = historyData?.data ?? [];
   const pagination = historyData?.pagination;

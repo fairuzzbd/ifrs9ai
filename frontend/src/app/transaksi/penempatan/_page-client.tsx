@@ -150,7 +150,7 @@ export default function PenempatanListPage() {
         export: format,
       };
       const url =
-        `/api/v1/trx/penempatan-deposito?export=${format}` +
+        `/api/v1/transaksi/penempatan-deposito?export=${format}` +
         (searchValue ? `&q=${encodeURIComponent(searchValue)}` : "") +
         (statusFilter ? `&filter[workflow_status]=${statusFilter}` : "");
       // Trigger download
@@ -173,7 +173,7 @@ export default function PenempatanListPage() {
         header: "Kode",
         cell: ({ row }) => (
           <Link
-            href={`/trx/penempatan/${row.original.id}`}
+            href={`/transaksi/penempatan/${row.original.id}`}
             className="font-mono text-sm text-blue-600 hover:underline"
           >
             {row.original.kodeTransaksi}
@@ -236,11 +236,11 @@ export default function PenempatanListPage() {
 
           const menuItems: { label: string; href?: string; onClick?: () => void; destructive?: boolean }[] = [];
 
-          menuItems.push({ label: "Lihat Detail", href: `/trx/penempatan/${item.id}` });
+          menuItems.push({ label: "Lihat Detail", href: `/transaksi/penempatan/${item.id}` });
 
           if (ws === "DRAFT" && isMaker) {
-            menuItems.push({ label: "Edit", href: `/trx/penempatan/${item.id}/edit` });
-            menuItems.push({ label: "Submit", href: `/trx/penempatan/${item.id}` });
+            menuItems.push({ label: "Edit", href: `/transaksi/penempatan/${item.id}/edit` });
+            menuItems.push({ label: "Submit", href: `/transaksi/penempatan/${item.id}` });
             menuItems.push({
               label: "Batalkan",
               onClick: () => setWithdrawTarget(item),
@@ -249,7 +249,7 @@ export default function PenempatanListPage() {
           }
 
           if (ws === "APPROVED_ACTIVE" && isMaker) {
-            menuItems.push({ label: "Ajukan Terminasi", href: `/trx/penempatan/${item.id}` });
+            menuItems.push({ label: "Ajukan Terminasi", href: `/transaksi/penempatan/${item.id}` });
           }
 
           return (
@@ -348,7 +348,7 @@ export default function PenempatanListPage() {
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-semibold text-gray-900">Penempatan Deposito</h1>
           <Button asChild>
-            <Link href="/trx/penempatan/new">
+            <Link href="/transaksi/penempatan/new">
               <Plus className="mr-2 h-4 w-4" aria-hidden="true" />
               Buat Penempatan
             </Link>
@@ -385,7 +385,7 @@ export default function PenempatanListPage() {
           onRetry={() => void loadData(null)}
           createButton={
             <Button asChild size="sm">
-              <Link href="/trx/penempatan/new">
+              <Link href="/transaksi/penempatan/new">
                 <Plus className="mr-1.5 h-4 w-4" aria-hidden="true" />
                 Buat Penempatan
               </Link>

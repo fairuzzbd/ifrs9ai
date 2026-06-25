@@ -46,6 +46,7 @@ function usePociBaselineFilters() {
 
 function PociBaselineContent() {
   const filters = usePociBaselineFilters();
+  const { setSort } = filters;
 
   const [cursorHistory, setCursorHistory] = React.useState<string[]>([""]);
   const [pageIndex, setPageIndex] = React.useState(0);
@@ -74,8 +75,8 @@ function PociBaselineContent() {
 
   React.useEffect(() => {
     const [s] = sorting;
-    if (s) void filters.setSort(`${s.id}:${s.desc ? "desc" : "asc"}`);
-  }, [sorting]);
+    if (s) void setSort(`${s.id}:${s.desc ? "desc" : "asc"}`);
+  }, [sorting, setSort]);
 
   const columns: ColumnDef<PociBaselineListItem>[] = [
     {

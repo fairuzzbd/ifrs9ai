@@ -107,7 +107,7 @@ function DryRunContent() {
         <BulkDryRunResultPanel result={dryRunResult} />
       ) : (
         <p className="text-sm text-muted-foreground">
-          DRY_RUN belum pernah dijalankan untuk batch ini. Klik "Ulangi DRY_RUN" untuk memulai.
+          DRY_RUN belum pernah dijalankan untuk batch ini. Klik &ldquo;Ulangi DRY_RUN&rdquo; untuk memulai.
         </p>
       )}
     </div>

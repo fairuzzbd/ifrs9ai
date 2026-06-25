@@ -280,7 +280,7 @@ export default function PenempatanDetailPage({ params }: PageProps) {
     await withActionLoading(async () => {
       await penempatanApi.withdraw(penempatan.id);
       notify.success(`Penempatan ${penempatan.kodeTransaksi} berhasil dibatalkan.`);
-      router.push("/trx/penempatan");
+      router.push("/transaksi/penempatan");
     });
   };
 
@@ -355,7 +355,7 @@ export default function PenempatanDetailPage({ params }: PageProps) {
       <div className="p-6">
         <p className="text-gray-500">Penempatan tidak ditemukan.</p>
         <Button asChild className="mt-4">
-          <Link href="/trx/penempatan">Kembali ke Daftar</Link>
+          <Link href="/transaksi/penempatan">Kembali ke Daftar</Link>
         </Button>
       </div>
     );
@@ -372,7 +372,7 @@ export default function PenempatanDetailPage({ params }: PageProps) {
       )}
       {/* Breadcrumb */}
       <nav aria-label="Breadcrumb" className="flex items-center gap-1 text-sm text-gray-500">
-        <Link href="/trx/penempatan" className="hover:underline">Penempatan Deposito</Link>
+        <Link href="/transaksi/penempatan" className="hover:underline">Penempatan Deposito</Link>
         <ChevronRight className="h-4 w-4" aria-hidden="true" />
         <span className="text-gray-900">{penempatan.kodeTransaksi}</span>
       </nav>
@@ -557,7 +557,7 @@ export default function PenempatanDetailPage({ params }: PageProps) {
               {ws === "DRAFT" && isMaker && (
                 <>
                   <Button asChild size="sm" variant="outline" className="w-full">
-                    <Link href={`/trx/penempatan/${id}/edit`}>
+                    <Link href={`/transaksi/penempatan/${id}/edit`}>
                       <Edit className="mr-1.5 h-4 w-4" aria-hidden="true" />
                       Edit
                     </Link>

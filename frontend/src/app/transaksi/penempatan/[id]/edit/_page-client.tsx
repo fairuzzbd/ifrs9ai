@@ -146,11 +146,11 @@ export default function PenempatanEditPage({ params }: PageProps) {
         {
           action: {
             label: "Lihat detail",
-            onClick: () => router.push(`/trx/penempatan/${id}`),
+            onClick: () => router.push(`/transaksi/penempatan/${id}`),
           },
         },
       );
-      router.push(`/trx/penempatan/${id}`);
+      router.push(`/transaksi/penempatan/${id}`);
     } catch (err) {
       if (isValidationError(err)) {
         err.details.forEach((d) => {
@@ -201,7 +201,7 @@ export default function PenempatanEditPage({ params }: PageProps) {
       <div className="p-6">
         <p className="text-gray-500">Penempatan tidak ditemukan.</p>
         <Button asChild className="mt-4">
-          <Link href="/trx/penempatan">Kembali</Link>
+          <Link href="/transaksi/penempatan">Kembali</Link>
         </Button>
       </div>
     );
@@ -212,9 +212,9 @@ export default function PenempatanEditPage({ params }: PageProps) {
     return (
       <div className="p-6">
         <nav aria-label="Breadcrumb" className="flex items-center gap-1 text-sm text-gray-500 mb-6">
-          <Link href="/trx/penempatan" className="hover:underline">Penempatan Deposito</Link>
+          <Link href="/transaksi/penempatan" className="hover:underline">Penempatan Deposito</Link>
           <ChevronRight className="h-4 w-4" aria-hidden="true" />
-          <Link href={`/trx/penempatan/${id}`} className="hover:underline">{penempatan.kodeTransaksi}</Link>
+          <Link href={`/transaksi/penempatan/${id}`} className="hover:underline">{penempatan.kodeTransaksi}</Link>
           <ChevronRight className="h-4 w-4" aria-hidden="true" />
           <span className="text-gray-900">Edit</span>
         </nav>
@@ -228,7 +228,7 @@ export default function PenempatanEditPage({ params }: PageProps) {
             <PenempatanStatusBadge status={penempatan.workflowStatus} />
             <div className="mt-6">
               <Button asChild variant="outline">
-                <Link href={`/trx/penempatan/${id}`}>Lihat Detail</Link>
+                <Link href={`/transaksi/penempatan/${id}`}>Lihat Detail</Link>
               </Button>
             </div>
           </CardContent>
@@ -243,9 +243,9 @@ export default function PenempatanEditPage({ params }: PageProps) {
     <div className="p-6 space-y-4">
       {/* Breadcrumb */}
       <nav aria-label="Breadcrumb" className="flex items-center gap-1 text-sm text-gray-500">
-        <Link href="/trx/penempatan" className="hover:underline">Penempatan Deposito</Link>
+        <Link href="/transaksi/penempatan" className="hover:underline">Penempatan Deposito</Link>
         <ChevronRight className="h-4 w-4" aria-hidden="true" />
-        <Link href={`/trx/penempatan/${id}`} className="hover:underline">
+        <Link href={`/transaksi/penempatan/${id}`} className="hover:underline">
           {penempatan.kodeTransaksi}
         </Link>
         <ChevronRight className="h-4 w-4" aria-hidden="true" />
@@ -533,7 +533,7 @@ export default function PenempatanEditPage({ params }: PageProps) {
                 asChild
                 disabled={submitting}
               >
-                <Link href={`/trx/penempatan/${id}`}>Batal</Link>
+                <Link href={`/transaksi/penempatan/${id}`}>Batal</Link>
               </Button>
               <Button type="submit" disabled={submitting}>
                 {submitting && (
