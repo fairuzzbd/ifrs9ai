@@ -1,0 +1,1971 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-B MTM Daily Job + Manual Upload (P5-M6)
+  version: "1.0.0"
+  description: |
+    Modul APP-B (transaksi) — Mark-to-Market Harian + Manual Upload (Phase 5, Module 6).
+
+    Cakupan:
+      - List MTM dengan sort + filter + export (S1, S2, S3)
+      - Detail single MTM row (S1)
+      - Manual upload harga MTM XLSX/CSV — ROLE-AKUN Maker (S2)
+      - Batch detail dengan row breakdown (S2)
+      - Override approve per row — ROLE-AKUN-CTL, SoD (S4)
+      - Override reject per row — ROLE-AKUN-CTL, SoD (S4)
+      - Manual trigger MTM cron — ROLE-IT-ADMIN, Asynq long-running (S1)
+      - STALE_PRICE alerts list (S3)
+
+    AC ID coverage:
+      S1-AC1 (auto-post normal), S1-AC2 (deviation→PENDING_REVIEW), S1-AC3 (STALE_PRICE),
+      S1-AC4 (DLQ + alert), S2-AC1 (upload berhasil), S2-AC2 (AC instrumen ditolak),
+      S2-AC3 (periode CLOSED), S2-AC4 (idempotency replay), S3-AC1 (antrian PENDING_REVIEW+STALE),
+      S3-AC2 (STALE > 5 hari eskalasi RISK), S3-AC3 (kurs FCY unavailable),
+      S3-AC4 (config threshold update), S4-AC1 (override-approve jurnal posted),
+      S4-AC2 (override-reject jurnal tidak posted), S4-AC3 (SoD violation),
+      S4-AC4 (reject comment terlalu pendek), S5-AC1 (FVOCI_DEBT FCY routing),
+      S5-AC2 (FVOCI_ELECTION routing), S5-AC3 (AC skip), S5-AC4 (POCI routing)
+
+    Dependensi:
+      - P5-M1 (mst.instrumen ACTIVE + klasifikasi_psak71 locked) — MTM hanya untuk ACTIVE non-AC
+      - P5-M2 (jurnal engine) — AUTO_POSTED dan APPROVED call POST /jurnal/post-entry
+      - P5-M3 (feed staging IBPA/BEI/KSEI) — cron membaca sys.ibpa_feed_staging dst
+      - P5-M4 (periode close) — hard-close set locked_flag=TRUE pada trx.mtm rows
+      - P5-M5 (mst.kurs APPROVED) — FCY instrumen perlu kurs_tengah untuk konversi EAD_IDR
+      - Migration 000040 (trx.mtm) + 000041 (sys.upload_batch MTM FK + config)
+      - DEC-016 (LOCKED) — NUMERIC(20,8) harga; NUMERIC(20,4) nilai IDR; shopspring/decimal
+      - DEC-017 (LOCKED) — 4-eyes SoD: uploader (maker) ≠ override_approver
+      - DEC-018 (LOCKED) — audit trail append-only, retensi 10+10 tahun
+      - DEC-021 (LOCKED) — Idempotency-Key wajib di mutating endpoint
+      - DEC-022 (LOCKED) — cursor-based pagination
+
+    State machine trx.mtm.status:
+      PENDING_REVIEW (deviation > threshold OR manual upload OR STALE_PRICE override request)
+        → [override-approve, ROLE-AKUN-CTL, SoD] → APPROVED
+        → [override-reject, ROLE-AKUN-CTL, SoD] → REJECTED (terminal)
+      AUTO_POSTED (cron path normal, delta_pct ≤ threshold, harga fresh) — read-only after post
+      APPROVED (override-approve → jurnal posted) — read-only
+      REJECTED — terminal, jurnal tidak diposting
+      STALE_PRICE (harga_age_days > threshold) — not posted; alert ROLE-AKUN-CTL
+
+    MTM Cron worker (S1 — Asynq):
+      Schedule: "0 11 * * 1-5" (18:00 WIB = 11:00 UTC, Senin-Jumat)
+      Idempotent: UNIQUE(instrumen_id, tanggal_mtm, harga_sumber) — skip jika status != REJECTED
+      Partial run: satu instrumen error tidak rollback yang lain
+      Retry 3× interval 15 menit → DLQ sys.dead_letter_queue + alert ROLE-IT-ADMIN
+      Progress via sys.job + Redis pub/sub (SSE) → <JobProgressPanel> (UX rule §3)
+      Performance SLA: ≤ 5 menit untuk 1000 instrumen
+
+    Price deviation threshold (S3):
+      sys.config_param MTM_PRICE_DEVIATION_THRESHOLD_PCT (default 5.0%)
+      ABS(delta_pct) > threshold → deviation_flag=TRUE, status=PENDING_REVIEW
+
+    Stale price threshold (S3):
+      sys.config_param MTM_PRICE_STALE_DAYS (default 5)
+      harga_age_days > threshold → stale_price_flag=TRUE, status=STALE_PRICE
+
+    Jurnal routing matrix (S5 — ifrs9-compliance-reviewer BLOCKING):
+      FVOCI_DEBT IDR    → MTM_FVOCI
+      FVOCI_DEBT FCY    → MTM_FVOCI + MTM_FX_OCI_RESERVE (§B5.7.2A — dua jurnal terpisah)
+      FVOCI_ELECTION    → MTM_FVOCI_ELECTION (no P&L recycling, irrevocable §5.7.5)
+      FVTPL             → MTM_FVTPL
+      POCI              → MTM_FVTPL_POCI (no Stage escalation)
+      AC                → SKIP (MTM_INSTRUMEN_AC_SKIP)
+
+    FX treatment: call P5-M5 GET /master/kurs/treatment/{instrumen_id} for FCY instrumen.
+
+    Periode lock: MtmLockMiddleware checks locked_flag before any mutation.
+      locked_flag=TRUE → 423 MTM_PERIODE_LOCKED (mirror FxRateLockMiddleware pattern P5-M5)
+      DB trigger tg_mtm_locked_check (BEFORE UPDATE OR DELETE ON trx.mtm) as defence-in-depth.
+
+    Override flow + SoD (S4):
+      override_approver_id ≠ uploader_id enforced server-side (not only DB constraint)
+      DB constraint chk_mtm_sod as safety net second layer
+      SoD violation → 403 MTM_OVERRIDE_SOD_VIOLATION + advisory audit MTM.OVERRIDE_REJECTED_SOD
+
+    Audit events (all in-transaction kecuali advisory):
+      MTM.AUTO_POSTED, MTM.PENDING_REVIEW, MTM.STALE_PRICE_ALERT
+      MTM.UPLOADED, MTM.OVERRIDE_APPROVED, MTM.OVERRIDE_REJECTED
+      MTM.OVERRIDE_REJECTED_SOD (advisory), MTM.HOLIDAY_SKIP (advisory)
+      MTM.CRON_FAILED (advisory + DLQ), MTM.INSTRUMEN_AC_SKIP (advisory, batch per run)
+      MTM.EXPORT (in-transaction per export call)
+
+    Error codes baru (ditambahkan ke _common.yaml):
+      MTM_PRICE_STALE            422 — stale_price_flag=TRUE; jurnal tidak dapat diposting otomatis
+      MTM_PRICE_DEVIATION_REJECTED 422 — notifikasi ke uploader saat override-reject baris deviation
+      MTM_BATCH_NOT_FOUND        404 — upload_batch_id tidak ditemukan
+      MTM_OVERRIDE_SOD_VIOLATION 403 — override_approver_id = uploader_id (SoD violation)
+      MTM_INSTRUMEN_AC_SKIP      422 — instrumen AC dimasukkan ke upload MTM
+      MTM_PERIODE_LOCKED         423 — mutasi trx.mtm saat locked_flag=TRUE (periode CLOSED)
+
+    Performance SLA:
+      GET /trx/mtm (list):                ≤ 500 ms (cursor paginated, indexed)
+      GET /trx/mtm/{id}:                  ≤ 100 ms (single row)
+      POST /trx/mtm/upload/batch:         ≤ 3 s (parse XLSX/CSV + batch INSERT + audit)
+      GET /trx/mtm/upload/batch/{id}:     ≤ 200 ms
+      POST /trx/mtm/{id}/override-approve: ≤ 300 ms (state update + jurnal call + audit)
+      POST /trx/mtm/{id}/override-reject:  ≤ 300 ms
+      POST /trx/mtm/cron/trigger:          ≤ 200 ms (enqueue only; worker async)
+      GET /trx/mtm/alerts/stale-price:     ≤ 300 ms
+      MTM cron worker (1000 instrumen):    ≤ 5 menit wall-clock
+
+    Schema: migration 000040 (trx.mtm) + 000041 (sys.config MTM keys + mst.mapping_jurnal seed).
+    BLOCKING compliance gate: S5 (jurnal routing) → ifrs9-compliance-reviewer.
+    BLOCKING security gate: S4 (SoD + audit) → security-engineer.
+    ecl-eir-engineer: POCI MTM_FVTPL_POCI tidak double-count ECL (advisory cross-check).
+    integration-engineer: IBPA/BEI/KSEI real feed adapter (deferred; cron reads from staging tables).
+
+servers:
+  - url: /api/v1
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: mtm-list
+    description: "List, filter, sort, export MTM rows — DataTable pattern §1"
+  - name: mtm-upload
+    description: "Manual upload harga MTM XLSX/CSV (ROLE-AKUN Maker) dan batch detail"
+  - name: mtm-override
+    description: "Override approve/reject per row — ROLE-AKUN-CTL, SoD enforced (S4)"
+  - name: mtm-cron
+    description: "Manual trigger MTM cron — ROLE-IT-ADMIN; Asynq long-running job (§3 UX)"
+  - name: mtm-alerts
+    description: "STALE_PRICE alert list — ROLE-AKUN-CTL monitoring (S3)"
+
+paths:
+
+  # ===========================================================================
+  # GET /trx/mtm — List dengan sort + filter + export (S1, S2, S3, UX §1)
+  # ===========================================================================
+
+  /trx/mtm:
+    get:
+      operationId: mtmGetList
+      summary: List MTM rows dengan sort, filter, cursor pagination, dan export
+      description: |
+        AC: S1-AC1 (AUTO_POSTED ter-list), S1-AC2 (PENDING_REVIEW ter-list),
+            S1-AC3 (STALE_PRICE ter-list), S3-AC1 (antrian PENDING_REVIEW + STALE_PRICE),
+            S2-AC1 (uploaded ter-list)
+
+        Cursor-paginated list trx.mtm. Default sort: tanggal_mtm DESC, created_at DESC.
+
+        Allowed sort columns: tanggal_mtm, instrumen_kode, klasifikasi_psak71, delta_pct,
+          harga_age_days, status, harga_sumber, created_at.
+
+        Filter:
+          filter[instrumen_id]       — UUID mst.instrumen
+          filter[instrumen_kode]     — text partial match (like:%substr%)
+          filter[tanggal_mtm]        — date range: between:2026-06-01,2026-06-30
+          filter[status]             — enum: AUTO_POSTED, PENDING_REVIEW, APPROVED, REJECTED, STALE_PRICE
+                                       Multi-value: filter[status][]=PENDING_REVIEW&filter[status][]=STALE_PRICE
+          filter[klasifikasi_psak71] — enum: FVOCI_DEBT, FVTPL, FVOCI_ELECTION, POCI
+          filter[deviation_flag]     — boolean: true (hanya baris dengan deviasi > threshold)
+          filter[stale_price_flag]   — boolean: true (hanya baris STALE_PRICE)
+          filter[harga_sumber]       — enum: IBPA, BEI, KSEI, MANUAL, IBPA_MANUAL, BEI_MANUAL
+          filter[upload_batch_id]    — UUID, filter per batch upload
+          filter[periode_bulanan_id] — UUID mst.periode_buku
+
+        Export:
+          ?export=csv atau ?export=xlsx
+          Dataset ≤ 10k row → inline stream (Content-Disposition)
+          Dataset > 10k row → 202 + jobId (Asynq async ke MinIO, §3 UX pattern)
+          Audit: MTM.EXPORT in-transaction per export
+
+        Permission: mtm.read
+        Roles: ROLE-AKUN, ROLE-AKUN-CTL, ROLE-RISK, ROLE-AUDIT, ROLE-IT-ADMIN
+        Rate limit: 60 req/min per user (read); 10 req/min per user (export)
+      tags: [mtm-list]
+      parameters:
+        - $ref: "./_common.yaml#/components/parameters/cursor"
+        - $ref: "./_common.yaml#/components/parameters/limit"
+        - $ref: "./_common.yaml#/components/parameters/sortParam"
+        - $ref: "./_common.yaml#/components/parameters/searchParam"
+        - name: "filter[instrumen_id]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: "Filter berdasarkan instrumen UUID."
+        - name: "filter[instrumen_kode]"
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 30
+          description: "Partial match kode instrumen (server-side ILIKE)."
+          example: "OBL-00"
+        - name: "filter[tanggal_mtm]"
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            Filter tanggal MTM. Operator: eq:2026-06-18, between:2026-06-01,2026-06-30,
+            gte:2026-06-01, lte:2026-06-30.
+          example: "between:2026-06-01,2026-06-30"
+        - name: "filter[status]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [AUTO_POSTED, PENDING_REVIEW, APPROVED, REJECTED, STALE_PRICE]
+          description: "Filter status. Multi-value via filter[status][]= notation."
+          example: "PENDING_REVIEW"
+        - name: "filter[klasifikasi_psak71]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [FVOCI_DEBT, FVTPL, FVOCI_ELECTION, POCI]
+          description: "Filter berdasarkan klasifikasi PSAK 71 snapshot instrumen."
+        - name: "filter[deviation_flag]"
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: "true = tampilkan hanya baris dengan deviation_flag=TRUE."
+        - name: "filter[stale_price_flag]"
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: "true = tampilkan hanya baris dengan stale_price_flag=TRUE."
+        - name: "filter[harga_sumber]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [IBPA, BEI, KSEI, MANUAL, IBPA_MANUAL, BEI_MANUAL]
+          description: "Filter berdasarkan sumber harga."
+        - name: "filter[upload_batch_id]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: "Filter berdasarkan batch upload ID (untuk hasil manual upload)."
+        - name: "filter[periode_bulanan_id]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: "Filter berdasarkan periode buku ID."
+        - name: export
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [csv, xlsx]
+          description: |
+            Format export. Dataset ≤ 10k row → inline file (stream).
+            Dataset > 10k row → 202 Accepted dengan jobId (async ke MinIO).
+        - $ref: "./_common.yaml#/components/parameters/includeDeleted"
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Trace ID. Gateway inject otomatis.
+      responses:
+        "200":
+          description: List MTM dengan pagination
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MtmListItem"
+                  pagination:
+                    $ref: "./_common.yaml#/components/schemas/PaginationResponse"
+                  appliedSort:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        col:
+                          type: string
+                        dir:
+                          type: string
+                          enum: [asc, desc]
+                  appliedFilter:
+                    type: object
+                    additionalProperties: true
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  - id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                    instrumenId: "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+                    instrumenKode: "OBL-0042"
+                    instrumenNama: "Obligasi FR0089 2028"
+                    tanggalMtm: "2026-06-18"
+                    hargaSumber: "IBPA"
+                    hargaPasarIdr: 16006250.0000
+                    hargaBukuIdr: 15840000.0000
+                    deltaIdr: 166250.0000
+                    deltaPct: 1.0496
+                    hargaAgeDays: 0
+                    stalePriceFlag: false
+                    deviationFlag: false
+                    status: "AUTO_POSTED"
+                    klasifikasiSnapshot: "FVOCI_DEBT"
+                    jurnalEventCode: "MTM_FVOCI"
+                    jurnalEntryId: "c3d4e5f6-a7b8-9012-cdef-123456789012"
+                    uploaderId: null
+                    overrideApproverId: null
+                    overrideAt: null
+                    lockedFlag: false
+                    createdAt: "2026-06-18T18:00:10+07:00"
+                  - id: "d4e5f6a7-b8c9-0123-def0-234567890123"
+                    instrumenId: "e5f6a7b8-c9d0-1234-ef01-345678901234"
+                    instrumenKode: "OBL-0088"
+                    instrumenNama: "Obligasi BUMN 2030"
+                    tanggalMtm: "2026-06-18"
+                    hargaSumber: "IBPA"
+                    hargaPasarIdr: 9000000.0000
+                    hargaBukuIdr: 9900000.0000
+                    deltaIdr: -900000.0000
+                    deltaPct: -9.0909
+                    hargaAgeDays: 0
+                    stalePriceFlag: false
+                    deviationFlag: true
+                    status: "PENDING_REVIEW"
+                    klasifikasiSnapshot: "FVTPL"
+                    jurnalEventCode: null
+                    jurnalEntryId: null
+                    uploaderId: null
+                    overrideApproverId: null
+                    overrideAt: null
+                    lockedFlag: false
+                    createdAt: "2026-06-18T18:00:12+07:00"
+                pagination:
+                  nextCursor: "eyJpZCI6ImQ0ZTVmNi4uLiJ9"
+                  hasMore: true
+                  totalEstimate: 847
+                  limit: 50
+                appliedSort:
+                  - col: "tanggal_mtm"
+                    dir: "desc"
+                appliedFilter:
+                  status: "PENDING_REVIEW"
+                meta:
+                  traceId: "01HXY..."
+        "202":
+          description: Export async — dataset > 10k row; Asynq job enqueued ke MinIO
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/MtmAsyncExportJobResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  jobId: "job_MTM_EXPORT_01HXYZ"
+                  type: "MTM_EXPORT"
+                  statusUrl: "/api/v1/jobs/job_MTM_EXPORT_01HXYZ"
+                  streamUrl: "/api/v1/jobs/job_MTM_EXPORT_01HXYZ/stream"
+                  message: "Export dataset besar dijadwalkan. File tersedia via download link setelah selesai."
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          $ref: "./_common.yaml#/components/responses/ValidationFailed"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # GET /trx/mtm/{id} — Detail single MTM row
+  # ===========================================================================
+
+  /trx/mtm/{id}:
+    get:
+      operationId: mtmGetDetail
+      summary: Detail single MTM row
+      description: |
+        AC: S4-AC1 (verify status=APPROVED setelah override-approve)
+
+        Mengembalikan detail lengkap satu trx.mtm row termasuk:
+          - harga_pasar_fcy, kurs_tengah (FCY instrumen)
+          - override_comment, override_approver_id (jika override)
+          - jurnal_event_code(s) (bisa lebih dari satu untuk FVOCI_DEBT FCY)
+          - upload_batch_id + batch summary (jika manual upload)
+          - locked_flag (dari periode hard-close P5-M4)
+
+        Permission: mtm.read
+        Roles: ROLE-AKUN, ROLE-AKUN-CTL, ROLE-RISK, ROLE-AUDIT, ROLE-IT-ADMIN
+        Rate limit: 60 req/min per user
+      tags: [mtm-list]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "UUID dari trx.mtm row."
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Detail MTM row
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/MtmDetail"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              examples:
+                auto_posted_fvoci_fcv:
+                  summary: S1-AC1 — AUTO_POSTED OBL-0042 FVOCI_DEBT USD (dual jurnal §B5.7.2A)
+                  value:
+                    data:
+                      id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                      instrumenId: "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+                      instrumenKode: "OBL-0042"
+                      instrumenNama: "Obligasi FR0089 2028"
+                      periodeBulananId: "c3d4e5f6-a7b8-9012-cdef-123456789012"
+                      tanggalMtm: "2026-06-18"
+                      hargaSumber: "IBPA"
+                      hargaTanggal: "2026-06-18"
+                      hargaAgeDays: 0
+                      hargaPasarFcy: 98.50000000
+                      hargaPasarIdr: 16006250.0000
+                      hargaBukuIdr: 15840000.0000
+                      deltaIdr: 166250.0000
+                      deltaPct: 1.0496
+                      kursId: "f6a7b8c9-d0e1-2345-f012-456789012345"
+                      kursTengah: 16250.00000000
+                      stalePriceFlag: false
+                      deviationFlag: false
+                      status: "AUTO_POSTED"
+                      klasifikasiSnapshot: "FVOCI_DEBT"
+                      treatmentSnapshot: "OCI_FOREIGN_EXCHANGE_RESERVE"
+                      jurnalEventCodes: ["MTM_FVOCI", "MTM_FX_OCI_RESERVE"]
+                      jurnalEntryId: "07b8c9d0-e1f2-3456-0123-567890123456"
+                      uploadBatchId: null
+                      uploaderId: null
+                      overrideApproverId: null
+                      overrideComment: null
+                      overrideAt: null
+                      lockedFlag: false
+                      cronJobId: "job_MTM_CRON_01HXYZ"
+                      createdAt: "2026-06-18T18:00:10+07:00"
+                      createdBy: "00000000-0000-0000-0000-000000000001"
+                      updatedAt: "2026-06-18T18:00:10+07:00"
+                      updatedBy: "00000000-0000-0000-0000-000000000001"
+                      rowVersion: 1
+                    meta:
+                      traceId: "01HXY..."
+                pending_review_deviation:
+                  summary: S1-AC2 — PENDING_REVIEW OBL-0088 FVTPL (deviation > threshold)
+                  value:
+                    data:
+                      id: "d4e5f6a7-b8c9-0123-def0-234567890123"
+                      instrumenId: "e5f6a7b8-c9d0-1234-ef01-345678901234"
+                      instrumenKode: "OBL-0088"
+                      instrumenNama: "Obligasi BUMN 2030"
+                      periodeBulananId: "c3d4e5f6-a7b8-9012-cdef-123456789012"
+                      tanggalMtm: "2026-06-18"
+                      hargaSumber: "IBPA"
+                      hargaTanggal: "2026-06-18"
+                      hargaAgeDays: 0
+                      hargaPasarFcy: null
+                      hargaPasarIdr: 9000000.0000
+                      hargaBukuIdr: 9900000.0000
+                      deltaIdr: -900000.0000
+                      deltaPct: -9.0909
+                      kursId: null
+                      kursTengah: null
+                      stalePriceFlag: false
+                      deviationFlag: true
+                      status: "PENDING_REVIEW"
+                      klasifikasiSnapshot: "FVTPL"
+                      treatmentSnapshot: "P&L_FOREIGN_EXCHANGE"
+                      jurnalEventCodes: null
+                      jurnalEntryId: null
+                      uploadBatchId: null
+                      uploaderId: null
+                      overrideApproverId: null
+                      overrideComment: null
+                      overrideAt: null
+                      lockedFlag: false
+                      cronJobId: "job_MTM_CRON_01HXYZ"
+                      createdAt: "2026-06-18T18:00:12+07:00"
+                      createdBy: "00000000-0000-0000-0000-000000000001"
+                      updatedAt: "2026-06-18T18:00:12+07:00"
+                      updatedBy: "00000000-0000-0000-0000-000000000001"
+                      rowVersion: 1
+                    meta:
+                      traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S2 — MANUAL UPLOAD MTM (ROLE-AKUN, Maker)
+  # ===========================================================================
+
+  /trx/mtm/upload/batch:
+    post:
+      operationId: mtmUploadBatch
+      summary: Upload harga MTM manual via XLSX/CSV — ROLE-AKUN Maker; returns batch_id + parse summary
+      description: |
+        AC: S2-AC1, S2-AC2, S2-AC3, S2-AC4
+
+        ROLE-AKUN mengupload file XLSX atau CSV sesuai template baku.
+        Sistem memparse, memvalidasi, lalu batch-INSERT ke trx.mtm dengan status='PENDING_REVIEW'.
+        ROLE-AKUN-CTL dinotifikasi untuk review.
+
+        Template kolom wajib:
+          kode_instrumen (VARCHAR 20 REQUIRED) — harus ACTIVE, klasifikasi non-AC, deleted_at IS NULL
+          tanggal_mtm    (DATE REQUIRED)        — YYYY-MM-DD, dalam periode OPEN
+          harga_pasar    (NUMERIC REQUIRED)     — > 0, presisi 8 desimal, dalam mata uang instrumen
+          harga_sumber   (VARCHAR 30 OPTIONAL)  — default 'MANUAL'; bisa 'IBPA_MANUAL', 'BEI_MANUAL'
+          catatan        (TEXT OPTIONAL)        — wajib jika override existing row atau deviation > threshold
+
+        Validasi per row:
+          1. kode_instrumen ada di mst.instrumen ACTIVE — NOT_FOUND / VALIDATION_FAILED
+          2. klasifikasi_psak71 NOT IN ('AC') — MTM_INSTRUMEN_AC_SKIP (422)
+          3. harga_pasar > 0 — VALIDATION_FAILED
+          4. tanggal_mtm dalam periode mst.periode_buku OPEN — MTM_PERIODE_LOCKED (423)
+          5. instrumen tidak duplicate (instrumen_id, tanggal_mtm, harga_sumber) dengan
+             status AUTO_POSTED atau APPROVED (non-REJECTED) — CONFLICT (409)
+          6. Jika instrumen FCY: mst.kurs APPROVED tanggal_mtm tersedia — MTM_PRICE_STALE (422) jika tidak ada
+
+        Jika SEMUA row valid: 202 Accepted + batch INSERT (satu transaksi) + audit per row.
+        Jika ADA row tidak valid: 422 VALIDATION_FAILED + detail per baris. Tidak ada INSERT.
+
+        File asli disimpan ke MinIO (doc.upload linkage via upload_batch_id).
+        Notifikasi ke ROLE-AKUN-CTL: "Ada N MTM manual PENDING_REVIEW dari {maker}."
+
+        Permission: mtm.create
+        Roles: ROLE-AKUN
+        MFA: tidak wajib
+        Idempotency-Key: WAJIB (UUID v4) — DEC-021
+        Rate limit: 20 req/min per user
+      tags: [mtm-upload]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "UUID v4 unik per request. DEC-021."
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: |
+                    File XLSX atau CSV sesuai template baku.
+                    Max size: 10 MB. Max rows: 500 per batch.
+                    MIME: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+                          atau text/csv.
+                catatanUpload:
+                  type: string
+                  maxLength: 1000
+                  description: |
+                    Catatan upload untuk keseluruhan batch.
+                    Mis. "Upload harga manual OBL-0088 dari Bloomberg 2026-06-18".
+                  example: "Upload harga manual OBL-0088 dari Bloomberg 2026-06-18"
+                tanggalMtmOverride:
+                  type: string
+                  format: date
+                  description: |
+                    Opsional. Override tanggal_mtm untuk semua row di file
+                    (berguna jika file tidak mengandung kolom tanggal).
+                  example: "2026-06-18"
+      responses:
+        "202":
+          description: Upload berhasil — semua row valid, batch INSERT sukses, status PENDING_REVIEW
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/MtmUploadBatchResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              examples:
+                upload_success:
+                  summary: S2-AC1 — Upload 1 instrumen OBL-0088 berhasil, PENDING_REVIEW
+                  value:
+                    data:
+                      uploadBatchId: "18c9d0e1-f2a3-4567-1234-678901234567"
+                      rowsParsed: 1
+                      rowsValid: 1
+                      rowsInvalid: 0
+                      status: "PENDING_REVIEW"
+                      mtmIds:
+                        - "29d0e1f2-a3b4-5678-2345-789012345678"
+                      rowsCreated:
+                        - instrumenKode: "OBL-0088"
+                          tanggalMtm: "2026-06-18"
+                          hargaPasarFcy: 97.50000000
+                          hargaPasarIdr: 1584375.0000
+                          hargaSumber: "IBPA_MANUAL"
+                          deviationFlag: false
+                          deltaPct: -1.5152
+                          stalePriceFlag: false
+                      stalePriceWarnings: []
+                      deviationWarnings: []
+                      nextStep: "Menunggu approval ROLE-AKUN-CTL. Notifikasi telah dikirim ke Finance Controller."
+                    meta:
+                      traceId: "01HXY..."
+                upload_with_deviation:
+                  summary: S2-AC1 (partial) — Upload dengan deviasi > threshold, still PENDING_REVIEW
+                  value:
+                    data:
+                      uploadBatchId: "3a1b2c3d-e4f5-6789-3456-890123456789"
+                      rowsParsed: 1
+                      rowsValid: 1
+                      rowsInvalid: 0
+                      status: "PENDING_REVIEW"
+                      mtmIds:
+                        - "4b2c3d4e-f5a6-7890-4567-901234567890"
+                      rowsCreated:
+                        - instrumenKode: "OBL-0088"
+                          tanggalMtm: "2026-06-18"
+                          hargaPasarFcy: 90.00000000
+                          hargaPasarIdr: 1462500.0000
+                          hargaSumber: "IBPA_MANUAL"
+                          deviationFlag: true
+                          deltaPct: -7.3000
+                          stalePriceFlag: false
+                      stalePriceWarnings: []
+                      deviationWarnings:
+                        - instrumenKode: "OBL-0088"
+                          deltaPct: -7.30
+                          thresholdPct: 5.0
+                          message: "Deviasi 7.30% melebihi threshold 5%. Finance Controller wajib verifikasi sebelum jurnal diposting."
+                      nextStep: "Menunggu approval ROLE-AKUN-CTL. Badge DEVIATION WARNING akan tampil di antrian review."
+                    meta:
+                      traceId: "01HXY..."
+        "400":
+          description: Field request tidak valid (file missing, format tidak valid)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: VALIDATION_FAILED
+                  message: "File wajib dilampirkan. Format yang didukung: xlsx, csv."
+                  details:
+                    - field: "file"
+                      rule: "required"
+                      message: "File upload wajib ada"
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "409":
+          description: Duplikat — (instrumen_id, tanggal_mtm, harga_sumber) sudah AUTO_POSTED atau APPROVED
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: CONFLICT
+                  message: "MTM OBL-0088 untuk 2026-06-18 sumber IBPA_MANUAL sudah ada dengan status AUTO_POSTED. Tidak bisa di-override via upload baru."
+                  details:
+                    - field: "body.rows[0].kodeInstrumen"
+                      rule: "unique_mtm_per_instrumen_tanggal_sumber"
+                      message: "OBL-0088 2026-06-18 IBPA_MANUAL sudah AUTO_POSTED."
+                  traceId: "01HXY..."
+        "422":
+          description: Validasi per-row gagal — tidak ada INSERT
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                ac_instrumen:
+                  summary: S2-AC2 — Instrumen AC diupload
+                  value:
+                    error:
+                      code: MTM_INSTRUMEN_AC_SKIP
+                      message: "1 baris tidak valid: instrumen AC tidak dapat di-MTM per PSAK 71 §4.1.2."
+                      details:
+                        - row: 1
+                          field: "kodeInstrumen"
+                          rule: "klasifikasi_not_ac"
+                          message: "DEP-0001 berklasifikasi AC — tidak ada MTM untuk AC per PSAK 71. Hapus baris ini dari file upload."
+                      traceId: "01HXY..."
+                stale_price_kurs:
+                  summary: S3-AC3 — Kurs FCY tidak tersedia
+                  value:
+                    error:
+                      code: MTM_PRICE_STALE
+                      message: "Kurs USD untuk 2026-06-18 tidak tersedia (APPROVED). MTM OBL-0088 tidak dapat dihitung."
+                      details:
+                        - row: 1
+                          field: "hargaPasar"
+                          rule: "kurs_available_for_fcy"
+                          message: "Instrumen OBL-0088 berdenominasi USD tapi kurs USD 2026-06-18 belum APPROVED. Upload kurs manual via P5-M5 terlebih dahulu."
+                      traceId: "01HXY..."
+        "423":
+          description: Periode CLOSED — upload MTM untuk tanggal dalam periode hard-closed ditolak
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: MTM_PERIODE_LOCKED
+                  message: "Periode PRD-2026-05 sudah hard-closed. Tidak bisa menambah MTM untuk 2026-05-15."
+                  details:
+                    - field: "body.rows[0].tanggalMtm"
+                      rule: "periode_must_be_open"
+                      message: "2026-05-15 berada dalam PRD-2026-05 (CLOSED). Upload MTM hanya untuk periode OPEN."
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # GET /trx/mtm/upload/batch/{batch_id} — Batch detail dengan row breakdown
+  # ===========================================================================
+
+  /trx/mtm/upload/batch/{batch_id}:
+    get:
+      operationId: mtmGetUploadBatch
+      summary: Batch upload MTM detail dengan row breakdown
+      description: |
+        AC: S2-AC1 (verify batch created)
+
+        Mengembalikan detail batch upload beserta breakdown per row:
+          - status setiap row (mtm_id, instrumen_kode, status, deviation_flag, stale_price_flag)
+          - error per row jika validasi parsial gagal
+          - upload metadata (uploader, catatan_upload, file info)
+
+        Permission: mtm.read
+        Roles: ROLE-AKUN (own batches only), ROLE-AKUN-CTL, ROLE-AUDIT, ROLE-IT-ADMIN
+        Rate limit: 60 req/min per user
+      tags: [mtm-upload]
+      parameters:
+        - name: batch_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "UUID dari sys.upload_batch row (diperoleh dari POST /trx/mtm/upload/batch)."
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Batch detail dengan row breakdown
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/MtmUploadBatchDetail"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  uploadBatchId: "18c9d0e1-f2a3-4567-1234-678901234567"
+                  uploaderId: "f6a7b8c9-d0e1-2345-f012-456789012345"
+                  uploaderName: "Siti Akuntansi"
+                  catatanUpload: "Upload harga manual OBL-0088 dari Bloomberg 2026-06-18"
+                  rowsParsed: 1
+                  rowsValid: 1
+                  rowsInvalid: 0
+                  status: "PENDING_REVIEW"
+                  createdAt: "2026-06-18T09:15:00+07:00"
+                  rows:
+                    - lineNumber: 1
+                      mtmId: "29d0e1f2-a3b4-5678-2345-789012345678"
+                      instrumenKode: "OBL-0088"
+                      instrumenId: "e5f6a7b8-c9d0-1234-ef01-345678901234"
+                      tanggalMtm: "2026-06-18"
+                      hargaPasarFcy: 97.50000000
+                      hargaPasarIdr: 1584375.0000
+                      deltaPct: -1.5152
+                      deviationFlag: false
+                      stalePriceFlag: false
+                      rowStatus: "PENDING_REVIEW"
+                      rowErrorMsg: null
+                meta:
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          description: Batch tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: MTM_BATCH_NOT_FOUND
+                  message: "Upload batch 18c9d0e1-... tidak ditemukan. Pastikan batch_id benar dan Anda memiliki akses."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S4 — OVERRIDE APPROVE (ROLE-AKUN-CTL, SoD enforced)
+  # ===========================================================================
+
+  /trx/mtm/{id}/override-approve:
+    post:
+      operationId: mtmOverrideApprove
+      summary: Override approve MTM row — ROLE-AKUN-CTL; PENDING_REVIEW → APPROVED; call P5-M2 jurnal
+      description: |
+        AC: S4-AC1, S4-AC3 (SoD), S4-AC2 (jurnal diposting)
+
+        ROLE-AKUN-CTL (user berbeda dari uploader) menyetujui satu MTM row.
+        Saat approve: call P5-M2 POST /api/v1/jurnal/post-entry dengan event_code dari routing matrix.
+
+        Pre-conditions:
+          - trx.mtm.status IN ('PENDING_REVIEW', 'STALE_PRICE')
+          - override_approver_id ≠ uploader_id (SoD, DEC-017) — S4-AC3
+          - locked_flag = FALSE (periode tidak CLOSED)
+          - comment WAJIB ada (min 30 karakter untuk DEVIATION row; best practice untuk semua)
+
+        Sukses (in-transaction):
+          1. UPDATE trx.mtm SET status='APPROVED', override_approver_id, override_comment, override_at
+          2. Call P5-M2 jurnal engine (event_code dari resolveJurnalEventCode)
+          3. UPDATE trx.mtm SET jurnal_entry_id, jurnal_event_code
+          4. INSERT aud.audit_log action=MTM.OVERRIDE_APPROVED
+          5. Notifikasi ke uploader (jika manual upload)
+
+        SoD violation → 403 MTM_OVERRIDE_SOD_VIOLATION + advisory audit MTM.OVERRIDE_REJECTED_SOD.
+        Jurnal engine call gagal → rollback seluruh transaksi + 500 INTERNAL.
+
+        Permission: mtm.override
+        Roles: ROLE-AKUN-CTL
+        MFA: wajib (DEC-026 ROLE-AKUN-CTL)
+        Idempotency-Key: WAJIB
+        Rate limit: 20 req/min per user
+      tags: [mtm-override]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "UUID dari trx.mtm row dalam status PENDING_REVIEW atau STALE_PRICE."
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "UUID v4 unik per request. DEC-021."
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MtmOverrideApproveBody"
+            example:
+              comment: "Harga terverifikasi via Bloomberg terminal. Delta 7.3% wajar karena rilis FOMC. Disetujui."
+              signatureMethod: "JWT_STEP_UP"
+      responses:
+        "200":
+          description: Override approve berhasil — status APPROVED, jurnal diposting via P5-M2
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/MtmOverrideApproveResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  mtmId: "d4e5f6a7-b8c9-0123-def0-234567890123"
+                  instrumenKode: "OBL-0042"
+                  status: "APPROVED"
+                  jurnalEntryId: "5c3d4e5f-a6b7-8901-5678-012345678901"
+                  jurnalEventCodes: ["MTM_FVOCI"]
+                  approvedBy: "a9b0c1d2-e3f4-5678-9012-345678901234"
+                  approvedAt: "2026-06-18T14:30:00+07:00"
+                  message: "Override MTM OBL-0042 2026-06-18 disetujui. Jurnal MTM_FVOCI berhasil diposting."
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: Validasi body gagal (comment terlalu pendek)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: VALIDATION_FAILED
+                  message: "1 field tidak valid"
+                  details:
+                    - field: "body.comment"
+                      rule: "min_length:30"
+                      message: "comment wajib minimal 30 karakter untuk override-approve MTM dengan deviasi."
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          description: SoD violation atau permission tidak terpenuhi
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                sod_violation:
+                  summary: S4-AC3 — Uploader mencoba approve MTM yang dia upload sendiri
+                  value:
+                    error:
+                      code: MTM_OVERRIDE_SOD_VIOLATION
+                      message: "Anda tidak dapat meng-approve MTM yang Anda upload sendiri. SoD: override_approver_id ≠ uploader_id (DEC-017)."
+                      details:
+                        - field: "actor.userId"
+                          rule: "sod_approver_ne_uploader"
+                          message: "User UUID matches uploader_id."
+                      traceId: "01HXY..."
+                forbidden:
+                  summary: Permission mtm.override tidak terpenuhi
+                  value:
+                    error:
+                      code: FORBIDDEN
+                      message: "Anda tidak memiliki permission 'mtm.override'."
+                      details: []
+                      traceId: "01HXY..."
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          description: Transisi tidak valid — status bukan PENDING_REVIEW atau STALE_PRICE
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: WORKFLOW_INVALID_TRANSITION
+                  message: "Override-approve hanya valid dari status PENDING_REVIEW atau STALE_PRICE. Status saat ini: AUTO_POSTED."
+                  details:
+                    - field: "status"
+                      rule: "invalid_transition"
+                      message: "AUTO_POSTED → APPROVED tidak valid via override-approve."
+                  traceId: "01HXY..."
+        "423":
+          description: Periode CLOSED — MTM sudah locked
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: MTM_PERIODE_LOCKED
+                  message: "MTM untuk periode ini sudah dikunci (hard-closed). Override tidak dapat dilakukan."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S4 — OVERRIDE REJECT (ROLE-AKUN-CTL, SoD enforced)
+  # ===========================================================================
+
+  /trx/mtm/{id}/override-reject:
+    post:
+      operationId: mtmOverrideReject
+      summary: Override reject MTM row — ROLE-AKUN-CTL; PENDING_REVIEW → REJECTED; comment ≥ 30 char
+      description: |
+        AC: S4-AC2, S4-AC3 (SoD), S4-AC4 (comment < 30 char)
+
+        ROLE-AKUN-CTL menolak satu MTM row. comment WAJIB ≥ 30 karakter (DEC-017).
+        Jurnal TIDAK diposting. Notifikasi ke uploader (manual upload) atau ROLE-AKUN (cron row).
+
+        Pre-conditions:
+          - trx.mtm.status IN ('PENDING_REVIEW', 'STALE_PRICE')
+          - override_approver_id ≠ uploader_id (SoD, DEC-017)
+          - locked_flag = FALSE
+          - body.comment minLength 30 karakter — S4-AC4
+
+        Sukses (in-transaction):
+          1. UPDATE trx.mtm SET status='REJECTED', override_approver_id, override_comment, override_at
+          2. INSERT aud.audit_log action=MTM.OVERRIDE_REJECTED
+          3. Notifikasi ke uploader: "MTM {instrumen} {tanggal} DITOLAK. Alasan: '{comment}'."
+
+        SoD violation → 403 MTM_OVERRIDE_SOD_VIOLATION.
+
+        Permission: mtm.override
+        Roles: ROLE-AKUN-CTL
+        MFA: wajib (DEC-026 ROLE-AKUN-CTL)
+        Idempotency-Key: WAJIB
+        Rate limit: 20 req/min per user
+      tags: [mtm-override]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "UUID dari trx.mtm row dalam status PENDING_REVIEW atau STALE_PRICE."
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "UUID v4 unik per request. DEC-021."
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MtmOverrideRejectBody"
+            example:
+              comment: "Harga 90.00 tidak sesuai IBPA hari ini (seharusnya 98.50). Harap re-upload dengan referensi sumber yang benar."
+              signatureMethod: "JWT_STEP_UP"
+      responses:
+        "200":
+          description: Override reject berhasil — status REJECTED, jurnal tidak diposting
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/MtmOverrideRejectResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  mtmId: "d4e5f6a7-b8c9-0123-def0-234567890123"
+                  instrumenKode: "OBL-0042"
+                  status: "REJECTED"
+                  rejectedBy: "a9b0c1d2-e3f4-5678-9012-345678901234"
+                  rejectedAt: "2026-06-18T14:45:00+07:00"
+                  comment: "Harga 90.00 tidak sesuai IBPA hari ini (seharusnya 98.50). Harap re-upload dengan referensi sumber yang benar."
+                  message: "MTM OBL-0042 2026-06-18 ditolak. ROLE-AKUN telah dinotifikasi untuk re-upload."
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: comment terlalu pendek (< 30 char) — S4-AC4
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: VALIDATION_FAILED
+                  message: "1 field tidak valid"
+                  details:
+                    - field: "body.comment"
+                      rule: "min_length:30"
+                      message: "comment wajib minimal 30 karakter untuk override-reject MTM."
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          description: SoD violation atau permission tidak terpenuhi
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: MTM_OVERRIDE_SOD_VIOLATION
+                  message: "Anda tidak dapat menolak MTM yang Anda upload sendiri. SoD: override_approver_id ≠ uploader_id (DEC-017)."
+                  details: []
+                  traceId: "01HXY..."
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          description: Transisi tidak valid
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: WORKFLOW_INVALID_TRANSITION
+                  message: "Override-reject hanya valid dari status PENDING_REVIEW atau STALE_PRICE. Status saat ini: APPROVED."
+                  details: []
+                  traceId: "01HXY..."
+        "423":
+          $ref: "./_common.yaml#/components/responses/PeriodeClosed"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S1 — MTM CRON MANUAL TRIGGER (ROLE-IT-ADMIN, async Asynq)
+  # ===========================================================================
+
+  /trx/mtm/cron/trigger:
+    post:
+      operationId: mtmCronTrigger
+      summary: Manual trigger MTM cron — ROLE-IT-ADMIN; returns Asynq jobId (long-running §3)
+      description: |
+        AC: S1-AC1 (trigger manual jika cron terlewat), S1-AC4 (DLQ pada failure)
+
+        ROLE-IT-ADMIN men-trigger MTM daily run secara manual (mis. jika cron terlewat atau
+        ada instrumen baru yang perlu immediate MTM). Endpoint enqueue Asynq job
+        "trx:mtm_daily_run" dan return jobId untuk <JobProgressPanel> (§3 UX pattern).
+
+        Logic worker yang di-trigger (sama dengan cron otomatis 18:00 WIB):
+          1. Cek sys.holiday_calendar untuk tanggal_target. Jika libur → skip + advisory log.
+          2. Fetch harga dari sys.ibpa_feed_staging / sys.bei_feed_staging / sys.ksei_feed_staging.
+          3. Idempotent: UNIQUE(instrumen_id, tanggal_mtm, harga_sumber) — skip jika status != REJECTED.
+          4. Compute delta_idr, delta_pct; evaluate deviation_flag dan stale_price_flag.
+          5. FCY: call P5-M5 GET /master/kurs/treatment/{instrumen_id} untuk FX routing.
+          6. AC: SKIP per resolveJurnalEventCode.
+          7. AUTO_POSTED → call P5-M2 POST /jurnal/post-entry in-transaction.
+          8. PENDING_REVIEW + STALE_PRICE → notif ROLE-AKUN-CTL.
+          9. Retry 3× (interval 15 menit) on error → DLQ sys.dead_letter_queue + alert ROLE-IT-ADMIN.
+
+        Progress phases (§3 UX):
+          Phase 1: "Membaca daftar instrumen aktif non-AC ({N} instrumen)..."
+          Phase 2: "Menghitung MTM instrumen {i} dari {N}: {kode}"
+          Phase 3: "Posting jurnal AUTO_POSTED ({X} transaksi)..."
+          Complete: "{auto_posted} auto-posted, {pending_review} pending review, {stale} stale, {ac_skip} AC skipped."
+
+        Parameter opsional:
+          tanggalTarget: tanggal MTM run (default: hari ini). Tidak boleh future date.
+          Tanggal dalam periode CLOSED → 423 MTM_PERIODE_LOCKED.
+
+        Permission: mtm.trigger
+        Roles: ROLE-IT-ADMIN
+        MFA: wajib (DEC-026 ROLE-IT-ADMIN)
+        Idempotency-Key: WAJIB
+        Rate limit: 10 req/jam per user
+      tags: [mtm-cron]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "UUID v4 unik per request. DEC-021."
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tanggalTarget:
+                  type: string
+                  format: date
+                  description: |
+                    Tanggal untuk MTM run. Default: hari ini (server TZ = Asia/Jakarta).
+                    Tidak boleh future date.
+                    Jika tanggal dalam periode CLOSED → 423 MTM_PERIODE_LOCKED.
+                  example: "2026-06-18"
+                forceRerun:
+                  type: boolean
+                  default: false
+                  description: |
+                    Jika true: re-run untuk instrumen yang sudah AUTO_POSTED atau APPROVED.
+                    Existing row di-update HANYA jika tidak locked.
+                    Default false (idempotent skip jika sudah ada).
+            example:
+              tanggalTarget: "2026-06-18"
+              forceRerun: false
+      responses:
+        "202":
+          description: MTM cron job enqueued — follow via JobProgressPanel (§3 UX)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/MtmCronJobResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  jobId: "job_MTM_CRON_01HXYZ"
+                  type: "MTM_DAILY_RUN"
+                  tanggalTarget: "2026-06-18"
+                  statusUrl: "/api/v1/jobs/job_MTM_CRON_01HXYZ"
+                  streamUrl: "/api/v1/jobs/job_MTM_CRON_01HXYZ/stream"
+                  estimatedInstrumen: 1000
+                  message: "MTM cron dijadwalkan untuk 2026-06-18. Monitor progres via JobProgressPanel."
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: tanggalTarget format salah atau future date
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: VALIDATION_FAILED
+                  message: "1 field tidak valid"
+                  details:
+                    - field: "body.tanggalTarget"
+                      rule: "not_future_date"
+                      message: "tanggalTarget tidak boleh tanggal yang akan datang."
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "423":
+          description: Tanggal target dalam periode CLOSED
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: MTM_PERIODE_LOCKED
+                  message: "Tanggal 2026-05-15 berada dalam periode PRD-2026-05 yang sudah hard-closed. MTM run tidak dapat dilakukan untuk tanggal tersebut."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          description: Rate limited — 10 req/jam untuk endpoint sensitif ini
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: RATE_LIMITED
+                  message: "Terlalu banyak request MTM cron trigger. Maksimal 10 kali per jam per user."
+                  details: []
+                  traceId: "01HXY..."
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ===========================================================================
+  # S3 — STALE_PRICE ALERTS LIST (ROLE-AKUN-CTL monitoring)
+  # ===========================================================================
+
+  /trx/mtm/alerts/stale-price:
+    get:
+      operationId: mtmAlertsStalePrice
+      summary: List current STALE_PRICE alerts — ROLE-AKUN-CTL monitoring dashboard (S3)
+      description: |
+        AC: S3-AC1 (antrian STALE_PRICE), S3-AC2 (harga > 5 hari — escalation flag), S3-AC3 (kurs FCY unavailable)
+
+        Mengembalikan daftar MTM rows dengan stale_price_flag=TRUE saat ini
+        (status IN ('STALE_PRICE', 'PENDING_REVIEW') AND stale_price_flag=TRUE).
+
+        Default sort: harga_age_days DESC (paling lama pertama), tanggal_mtm ASC.
+
+        Kolom wajib per baris:
+          instrumen_kode, klasifikasi_psak71, tanggal_mtm, harga_tanggal, harga_age_days,
+          status, stale_price_reason ('HARGA_TIDAK_TERSEDIA' | 'KURS_FCY_TIDAK_TERSEDIA'),
+          eskalasi_flag (TRUE jika harga_age_days > MTM_PRICE_STALE_DAYS × 1.5 atau > 7 — eskalasi ke ROLE-RISK)
+
+        Threshold dan config sumber:
+          sys.config_param MTM_PRICE_STALE_DAYS (default 5)
+          Eskalasi ke ROLE-RISK: harga_age_days > 2 × MTM_PRICE_STALE_DAYS (default > 10) ATAU
+          harga_age_days > sys.config_param MTM_STALE_ESCALATION_DAYS (default 7)
+
+        Permission: mtm.read
+        Roles: ROLE-AKUN-CTL, ROLE-RISK, ROLE-AUDIT, ROLE-IT-ADMIN
+        Rate limit: 60 req/min per user
+      tags: [mtm-alerts]
+      parameters:
+        - $ref: "./_common.yaml#/components/parameters/cursor"
+        - $ref: "./_common.yaml#/components/parameters/limit"
+        - name: "filter[tanggal_mtm]"
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Filter tanggal MTM. Contoh: gte:2026-06-15"
+          example: "gte:2026-06-15"
+        - name: "filter[klasifikasi_psak71]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [FVOCI_DEBT, FVTPL, FVOCI_ELECTION, POCI]
+          description: "Filter berdasarkan klasifikasi."
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List STALE_PRICE alerts saat ini
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MtmStalePriceAlert"
+                  pagination:
+                    $ref: "./_common.yaml#/components/schemas/PaginationResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  - id: "f7a8b9c0-d1e2-3456-f234-890123456789"
+                    instrumenId: "e5f6a7b8-c9d0-1234-ef01-345678901234"
+                    instrumenKode: "SHM-0099"
+                    klasifikasiSnapshot: "FVOCI_ELECTION"
+                    tanggalMtm: "2026-06-18"
+                    hargaTanggal: "2026-06-12"
+                    hargaAgeDays: 6
+                    status: "STALE_PRICE"
+                    stalePriceReason: "HARGA_TIDAK_TERSEDIA"
+                    eskalasiFlag: true
+                    eskalasiNote: "Harga belum update 6 hari. Eskalasi ke ROLE-RISK per threshold 5 hari."
+                    lockedFlag: false
+                pagination:
+                  nextCursor: null
+                  hasMore: false
+                  totalEstimate: 1
+                  limit: 50
+                meta:
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+# ===========================================================================
+# Components
+# ===========================================================================
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT RSA-2048 signed oleh Keycloak. Access token TTL 15 menit (DEC-025).
+
+  schemas:
+
+    # ---- MTM List Item (compact untuk DataTable) --------------------------
+    MtmListItem:
+      type: object
+      required:
+        - id
+        - instrumenId
+        - instrumenKode
+        - tanggalMtm
+        - hargaSumber
+        - hargaPasarIdr
+        - hargaBukuIdr
+        - deltaIdr
+        - deltaPct
+        - hargaAgeDays
+        - stalePriceFlag
+        - deviationFlag
+        - status
+        - klasifikasiSnapshot
+        - lockedFlag
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        instrumenId:
+          type: string
+          format: uuid
+        instrumenKode:
+          type: string
+          example: "OBL-0042"
+        instrumenNama:
+          type: string
+          nullable: true
+          example: "Obligasi FR0089 2028"
+        tanggalMtm:
+          type: string
+          format: date
+          example: "2026-06-18"
+        hargaSumber:
+          type: string
+          enum: [IBPA, BEI, KSEI, MANUAL, IBPA_MANUAL, BEI_MANUAL]
+        hargaPasarIdr:
+          type: number
+          description: "Nilai IDR. NUMERIC(20,4) di DB. DEC-016."
+          example: 16006250.0000
+        hargaBukuIdr:
+          type: number
+          example: 15840000.0000
+        deltaIdr:
+          type: number
+          description: "harga_pasar_idr − harga_buku_idr. NUMERIC(20,4)."
+          example: 166250.0000
+        deltaPct:
+          type: number
+          description: "(delta_idr / harga_buku_idr) × 100. NUMERIC(7,4)."
+          example: 1.0496
+        hargaAgeDays:
+          type: integer
+          description: "tanggal_mtm − harga_tanggal (hari)."
+          example: 0
+        stalePriceFlag:
+          type: boolean
+          example: false
+        deviationFlag:
+          type: boolean
+          example: false
+        status:
+          $ref: "#/components/schemas/MtmStatus"
+        klasifikasiSnapshot:
+          type: string
+          description: "Snapshot klasifikasi_psak71 instrumen saat MTM dihitung."
+          enum: [FVOCI_DEBT, FVTPL, FVOCI_ELECTION, POCI]
+        jurnalEventCode:
+          type: string
+          nullable: true
+          description: "Event code jurnal yang digunakan (single, untuk FVOCI_DEBT FCY ada dua — lihat MtmDetail.jurnalEventCodes)."
+          example: "MTM_FVOCI"
+        jurnalEntryId:
+          type: string
+          format: uuid
+          nullable: true
+        uploadBatchId:
+          type: string
+          format: uuid
+          nullable: true
+        uploaderId:
+          type: string
+          format: uuid
+          nullable: true
+        overrideApproverId:
+          type: string
+          format: uuid
+          nullable: true
+        overrideAt:
+          type: string
+          format: date-time
+          nullable: true
+        lockedFlag:
+          type: boolean
+          description: "TRUE setelah periode hard-close (P5-M4 hook)."
+          example: false
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-06-18T18:00:10+07:00"
+
+    # ---- MTM Detail (full row) --------------------------------------------
+    MtmDetail:
+      allOf:
+        - $ref: "#/components/schemas/MtmListItem"
+        - type: object
+          properties:
+            periodeBulananId:
+              type: string
+              format: uuid
+            hargaTanggal:
+              type: string
+              format: date
+              description: "Tanggal harga yang dipakai (bisa berbeda dari tanggal_mtm jika stale)."
+              example: "2026-06-18"
+            hargaPasarFcy:
+              type: number
+              nullable: true
+              description: "Harga pasar dalam mata uang asal. NUMERIC(20,8). NULL jika IDR instrumen."
+              example: 98.50000000
+            kursId:
+              type: string
+              format: uuid
+              nullable: true
+            kursTengah:
+              type: number
+              nullable: true
+              description: "Snapshot kurs saat MTM. NUMERIC(20,8). NULL jika IDR instrumen."
+              example: 16250.00000000
+            treatmentSnapshot:
+              type: string
+              nullable: true
+              description: "FX treatment routing snapshot dari P5-M5 GET /treatment."
+              example: "OCI_FOREIGN_EXCHANGE_RESERVE"
+            jurnalEventCodes:
+              type: array
+              nullable: true
+              description: "Array event codes (FVOCI_DEBT FCY: dua kode [MTM_FVOCI, MTM_FX_OCI_RESERVE])."
+              items:
+                type: string
+                enum: [MTM_FVOCI, MTM_FVTPL, MTM_FVOCI_ELECTION, MTM_FX_OCI_RESERVE, MTM_FVTPL_POCI]
+              example: ["MTM_FVOCI", "MTM_FX_OCI_RESERVE"]
+            overrideComment:
+              type: string
+              nullable: true
+              description: "Komentar override-approve atau override-reject. Min 30 char jika REJECTED."
+            cronJobId:
+              type: string
+              nullable: true
+              description: "Asynq job ID dari MTM cron run yang generate baris ini."
+              example: "job_MTM_CRON_01HXYZ"
+            createdBy:
+              type: string
+              format: uuid
+            updatedAt:
+              type: string
+              format: date-time
+            updatedBy:
+              type: string
+              format: uuid
+            rowVersion:
+              type: integer
+              example: 1
+
+    # ---- MTM Status enum ---------------------------------------------------
+    MtmStatus:
+      type: string
+      enum:
+        - AUTO_POSTED
+        - PENDING_REVIEW
+        - APPROVED
+        - REJECTED
+        - STALE_PRICE
+      description: |
+        Status baris trx.mtm.
+        AUTO_POSTED: cron auto-post, jurnal sudah diposting.
+        PENDING_REVIEW: deviation > threshold OR manual upload OR stale override request.
+        APPROVED: override-approve berhasil, jurnal diposting.
+        REJECTED: override-reject, jurnal tidak diposting (terminal).
+        STALE_PRICE: harga_age_days > MTM_PRICE_STALE_DAYS, belum diposting (not terminal).
+
+    # ---- Upload batch response (POST /trx/mtm/upload/batch) ---------------
+    MtmUploadBatchResponse:
+      type: object
+      required:
+        - uploadBatchId
+        - rowsParsed
+        - rowsValid
+        - rowsInvalid
+        - status
+        - nextStep
+      properties:
+        uploadBatchId:
+          type: string
+          format: uuid
+        rowsParsed:
+          type: integer
+        rowsValid:
+          type: integer
+        rowsInvalid:
+          type: integer
+        status:
+          type: string
+          enum: [PENDING_REVIEW]
+          description: "Semua baris valid masuk PENDING_REVIEW."
+        mtmIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: "UUID trx.mtm baris yang berhasil diinsert."
+        rowsCreated:
+          type: array
+          items:
+            type: object
+            properties:
+              instrumenKode:
+                type: string
+              tanggalMtm:
+                type: string
+                format: date
+              hargaPasarFcy:
+                type: number
+                nullable: true
+              hargaPasarIdr:
+                type: number
+              hargaSumber:
+                type: string
+              deviationFlag:
+                type: boolean
+              deltaPct:
+                type: number
+              stalePriceFlag:
+                type: boolean
+        stalePriceWarnings:
+          type: array
+          items:
+            type: object
+            properties:
+              instrumenKode:
+                type: string
+              hargaAgeDays:
+                type: integer
+              reason:
+                type: string
+        deviationWarnings:
+          type: array
+          items:
+            type: object
+            properties:
+              instrumenKode:
+                type: string
+              deltaPct:
+                type: number
+              thresholdPct:
+                type: number
+              message:
+                type: string
+        nextStep:
+          type: string
+          example: "Menunggu approval ROLE-AKUN-CTL. Notifikasi telah dikirim ke Finance Controller."
+
+    # ---- Upload batch detail (GET /trx/mtm/upload/batch/{id}) -------------
+    MtmUploadBatchDetail:
+      type: object
+      required:
+        - uploadBatchId
+        - uploaderId
+        - rowsParsed
+        - rowsValid
+        - rowsInvalid
+        - status
+        - createdAt
+        - rows
+      properties:
+        uploadBatchId:
+          type: string
+          format: uuid
+        uploaderId:
+          type: string
+          format: uuid
+        uploaderName:
+          type: string
+          nullable: true
+        catatanUpload:
+          type: string
+          nullable: true
+        rowsParsed:
+          type: integer
+        rowsValid:
+          type: integer
+        rowsInvalid:
+          type: integer
+        status:
+          type: string
+          enum: [PENDING_REVIEW, APPROVED, REJECTED]
+        createdAt:
+          type: string
+          format: date-time
+        rows:
+          type: array
+          items:
+            type: object
+            required: [lineNumber, instrumenKode, tanggalMtm, rowStatus]
+            properties:
+              lineNumber:
+                type: integer
+              mtmId:
+                type: string
+                format: uuid
+                nullable: true
+              instrumenKode:
+                type: string
+              instrumenId:
+                type: string
+                format: uuid
+                nullable: true
+              tanggalMtm:
+                type: string
+                format: date
+              hargaPasarFcy:
+                type: number
+                nullable: true
+              hargaPasarIdr:
+                type: number
+                nullable: true
+              deltaPct:
+                type: number
+                nullable: true
+              deviationFlag:
+                type: boolean
+              stalePriceFlag:
+                type: boolean
+              rowStatus:
+                type: string
+                description: "Status baris: PENDING_REVIEW, APPROVED, REJECTED, atau VALIDATION_FAILED."
+              rowErrorMsg:
+                type: string
+                nullable: true
+
+    # ---- Override approve body --------------------------------------------
+    MtmOverrideApproveBody:
+      type: object
+      required: [comment, signatureMethod]
+      properties:
+        comment:
+          type: string
+          minLength: 10
+          maxLength: 2000
+          description: "Komentar wajib. Min 30 char jika baris memiliki deviation_flag=TRUE."
+          example: "Harga terverifikasi via Bloomberg terminal. Delta 7.3% wajar karena rilis FOMC. Disetujui."
+        signatureMethod:
+          type: string
+          enum: [JWT_STEP_UP, JWT_STANDARD]
+          default: JWT_STEP_UP
+
+    # ---- Override approve response ----------------------------------------
+    MtmOverrideApproveResponse:
+      type: object
+      required: [mtmId, instrumenKode, status, approvedBy, approvedAt]
+      properties:
+        mtmId:
+          type: string
+          format: uuid
+        instrumenKode:
+          type: string
+        status:
+          type: string
+          enum: [APPROVED]
+        jurnalEntryId:
+          type: string
+          format: uuid
+          nullable: true
+        jurnalEventCodes:
+          type: array
+          items:
+            type: string
+            enum: [MTM_FVOCI, MTM_FVTPL, MTM_FVOCI_ELECTION, MTM_FX_OCI_RESERVE, MTM_FVTPL_POCI]
+          nullable: true
+        approvedBy:
+          type: string
+          format: uuid
+        approvedAt:
+          type: string
+          format: date-time
+        message:
+          type: string
+          example: "Override MTM OBL-0042 2026-06-18 disetujui. Jurnal MTM_FVOCI berhasil diposting."
+
+    # ---- Override reject body --------------------------------------------
+    MtmOverrideRejectBody:
+      type: object
+      required: [comment, signatureMethod]
+      properties:
+        comment:
+          type: string
+          minLength: 30
+          maxLength: 2000
+          description: "Komentar wajib MINIMAL 30 karakter untuk reject (DEC-017)."
+          example: "Harga 90.00 tidak sesuai IBPA hari ini (seharusnya 98.50). Harap re-upload dengan referensi sumber yang benar."
+        signatureMethod:
+          type: string
+          enum: [JWT_STEP_UP, JWT_STANDARD]
+          default: JWT_STEP_UP
+
+    # ---- Override reject response ----------------------------------------
+    MtmOverrideRejectResponse:
+      type: object
+      required: [mtmId, instrumenKode, status, rejectedBy, rejectedAt, comment]
+      properties:
+        mtmId:
+          type: string
+          format: uuid
+        instrumenKode:
+          type: string
+        status:
+          type: string
+          enum: [REJECTED]
+        rejectedBy:
+          type: string
+          format: uuid
+        rejectedAt:
+          type: string
+          format: date-time
+        comment:
+          type: string
+        message:
+          type: string
+          example: "MTM OBL-0042 2026-06-18 ditolak. ROLE-AKUN telah dinotifikasi untuk re-upload."
+
+    # ---- MTM Cron trigger job response -----------------------------------
+    MtmCronJobResponse:
+      type: object
+      required: [jobId, type, statusUrl, streamUrl]
+      properties:
+        jobId:
+          type: string
+          example: "job_MTM_CRON_01HXYZ"
+        type:
+          type: string
+          enum: [MTM_DAILY_RUN]
+        tanggalTarget:
+          type: string
+          format: date
+          example: "2026-06-18"
+        statusUrl:
+          type: string
+          example: "/api/v1/jobs/job_MTM_CRON_01HXYZ"
+        streamUrl:
+          type: string
+          example: "/api/v1/jobs/job_MTM_CRON_01HXYZ/stream"
+        estimatedInstrumen:
+          type: integer
+          nullable: true
+          description: "Estimasi jumlah instrumen yang akan diproses."
+          example: 1000
+        message:
+          type: string
+          example: "MTM cron dijadwalkan untuk 2026-06-18. Monitor progres via JobProgressPanel."
+
+    # ---- Stale price alert item ------------------------------------------
+    MtmStalePriceAlert:
+      type: object
+      required:
+        - id
+        - instrumenId
+        - instrumenKode
+        - tanggalMtm
+        - hargaTanggal
+        - hargaAgeDays
+        - status
+        - stalePriceReason
+        - eskalasiFlag
+      properties:
+        id:
+          type: string
+          format: uuid
+        instrumenId:
+          type: string
+          format: uuid
+        instrumenKode:
+          type: string
+        klasifikasiSnapshot:
+          type: string
+          enum: [FVOCI_DEBT, FVTPL, FVOCI_ELECTION, POCI]
+          nullable: true
+        tanggalMtm:
+          type: string
+          format: date
+        hargaTanggal:
+          type: string
+          format: date
+        hargaAgeDays:
+          type: integer
+        status:
+          $ref: "#/components/schemas/MtmStatus"
+        stalePriceReason:
+          type: string
+          enum:
+            - HARGA_TIDAK_TERSEDIA
+            - KURS_FCY_TIDAK_TERSEDIA
+          description: |
+            Alasan stale price:
+            HARGA_TIDAK_TERSEDIA — feed pricing tidak tersedia untuk instrumen ini.
+            KURS_FCY_TIDAK_TERSEDIA — feed pricing ada tapi kurs FCY belum APPROVED.
+        eskalasiFlag:
+          type: boolean
+          description: "TRUE jika harga_age_days melebihi eskalasi threshold (default 7). Notif dikirim ke ROLE-RISK."
+        eskalasiNote:
+          type: string
+          nullable: true
+          example: "Harga belum update 6 hari. Eskalasi ke ROLE-RISK per threshold 5 hari."
+        lockedFlag:
+          type: boolean
+
+    # ---- Async export job response ----------------------------------------
+    MtmAsyncExportJobResponse:
+      type: object
+      required: [jobId, type, statusUrl, streamUrl]
+      properties:
+        jobId:
+          type: string
+          example: "job_MTM_EXPORT_01HXYZ"
+        type:
+          type: string
+          enum: [MTM_EXPORT]
+        statusUrl:
+          type: string
+          example: "/api/v1/jobs/job_MTM_EXPORT_01HXYZ"
+        streamUrl:
+          type: string
+          example: "/api/v1/jobs/job_MTM_EXPORT_01HXYZ/stream"
+        message:
+          type: string
+          example: "Export dataset besar dijadwalkan. File tersedia via download link setelah selesai."

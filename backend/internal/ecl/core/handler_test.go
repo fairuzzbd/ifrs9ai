@@ -176,20 +176,20 @@ func TestHandler_ComputeSingle_POCI_200_NullECL(t *testing.T) {
 	} else if eclVal == nil {
 		t.Errorf("POCI: eclWeightedIdr must be non-nil (Phase 4.5: baseline ECL, delta deferred to Phase 5)")
 	}
-	// Both POCI warning codes must be present.
+	// P5-M10: WarnPOCIRequiresFullCAEIR must be present; WarnPOCIECLRepresentsInitialBaseline
+	// is no longer emitted (superseded by pocidelta package — must NOT be present).
 	warnings, _ := data["warnings"].([]interface{})
-	wantCodes := []string{WarnPOCIRequiresFullCAEIR, WarnPOCIECLRepresentsInitialBaseline}
-	for _, want := range wantCodes {
-		foundWarn := false
-		for _, w := range warnings {
-			if w == want {
-				foundWarn = true
-				break
-			}
+	foundCAEIR := false
+	for _, w := range warnings {
+		if w == WarnPOCIRequiresFullCAEIR {
+			foundCAEIR = true
 		}
-		if !foundWarn {
-			t.Errorf("POCI handler: expected warning %s in response, got %v", want, data["warnings"])
+		if w == WarnPOCIECLRepresentsInitialBaseline {
+			t.Errorf("POCI handler: WarnPOCIECLRepresentsInitialBaseline must NOT be emitted in P5-M10 (superseded by pocidelta). Got warnings: %v", warnings)
 		}
+	}
+	if !foundCAEIR {
+		t.Errorf("POCI handler: expected warning %s in response, got %v", WarnPOCIRequiresFullCAEIR, warnings)
 	}
 }
 

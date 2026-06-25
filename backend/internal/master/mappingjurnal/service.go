@@ -94,7 +94,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*HeaderWithDet
 		Catatan:              req.Catatan,
 		WorkflowStatus:       WorkflowStatusDraft,
 		CreatedAt:            now,
-		CreatedBy:            &actorID,
+		CreatedBy:            actorID,
 		RowVersion:           1,
 		TenantID:             tenantID(claims),
 	}
@@ -584,7 +584,7 @@ func (s *Service) buildDetails(reqs []DetailRequest, headerID uuid.UUID, created
 			AktifFlag:            aktifFlag,
 			Catatan:              dr.Catatan,
 			CreatedAt:            now,
-			CreatedBy:            &createdBy,
+			CreatedBy:            createdBy,
 			RowVersion:           1,
 			TenantID:             tenant,
 		}

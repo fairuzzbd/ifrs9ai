@@ -64,6 +64,15 @@ import (
 
 	"blips-ifrs9.tugu-re.com/internal/app-b/penempatan"
 	jurnal "blips-ifrs9.tugu-re.com/internal/app-d/jurnal"
+	"blips-ifrs9.tugu-re.com/internal/jrnl/gldelivery"
+	"blips-ifrs9.tugu-re.com/internal/periode/closeflow"
+	"blips-ifrs9.tugu-re.com/internal/trx/mtm"
+
+	// P5-M9: Jatuh Tempo + Akrual EIR + Dividen
+	"blips-ifrs9.tugu-re.com/internal/trx/akrualmaturity"
+
+	// P5-M10: POCI Delta ECL
+	"blips-ifrs9.tugu-re.com/internal/ecl/pocidelta"
 )
 
 // version adalah versi service yang dilaporkan probe liveness.
@@ -413,6 +422,9 @@ func main() {
 	kursHandler := kurs.NewHandler(kursSvc, wfHandler)
 	kurs.RegisterRoutes(v1, kursHandler)
 
+	// P5-M5: JISDOR fetch worker. Registered on Asynq mux in the Redis block below.
+	fxJisdorWorker := kurs.NewFxJisdorWorker(kursSvc, logger)
+
 	// -----------------------------------------------------------------------
 	// Master Data — LGD Basel (APP-C-MSTR-ECL-001, 6-eyes + step-up MFA)
 	// -----------------------------------------------------------------------
@@ -471,6 +483,46 @@ func main() {
 	periodeBukuSvc := periodebuku.NewService(periodeBukuRepo, auditWriter, logger)
 	periodeBukuHandler := periodebuku.NewHandler(periodeBukuSvc, wfHandler)
 	periodebuku.RegisterRoutes(v1, periodeBukuHandler)
+
+	// -----------------------------------------------------------------------
+	// P5-M4: Periode Buku Close Workflow (APP-D-CLOSE-001..007)
+	// Routes (all under /api/v1/periode-buku/:id/):
+	//   POST   /soft-close-request          — ROLE-AKUN-CTL submit soft-close (M4-001)
+	//   POST   /soft-close-approve          — ROLE-CFO approve soft-close (M4-002)
+	//   POST   /hard-close-request          — ROLE-CFO request hard-close (M4-003)
+	//   POST   /hard-close-approve          — ROLE-CFO approve (step-up MFA) (M4-004)
+	//   POST   /hard-close-reject           — ROLE-CFO reject hard-close (M4-005)
+	//   POST   /reopen-request              — ROLE-CFO request reopen (M4-006)
+	//   POST   /reopen-approve              — ROLE-CFO approve reopen (M4-006)
+	//   GET    /checklist                   — closing checklist status (M4-007)
+	//   GET    /reports/status-periode      — list all periods status (M4-007)
+	//
+	// State machine: OPEN → SOFT_CLOSED → HARD_CLOSE_PENDING → CLOSED
+	// Reopen paths: SOFT_CLOSED → OPEN (grace window), CLOSED → SOFT_CLOSED (grace window + step-up).
+	// DEC-017 SoD: approver ≠ requester. DEC-027 step-up MFA for hard-close-approve + CLOSED reopen.
+	// DEC-018 audit in-tx. DEC-021 Idempotency-Key wajib.
+	// PeriodeLockMiddleware: blocks all mutations on SOFT_CLOSED/HARD_CLOSE_PENDING/CLOSED routes.
+	// Asynq: ApproveHardClose enqueues "reporting:mv_refresh" task (non-fatal if Redis unavailable).
+	// -----------------------------------------------------------------------
+	var closeflowEnqueuer closeflow.AsynqEnqueuer
+	if cfg.RedisURL != "" {
+		closeflowEnqueuer = asynq.NewClient(asynq.RedisClientOpt{Addr: cfg.RedisURL})
+	}
+	closeflowRepo := closeflow.NewRepo(db)
+	closeflowChecklist := closeflow.NewChecklistService(db)
+	closeflowSvc := closeflow.NewService(
+		closeflowRepo,
+		closeflowChecklist,
+		auditWriter,
+		closeflowEnqueuer, // nil when Redis not set → MV refresh skipped (non-fatal)
+		closeflow.DefaultConfig(),
+		logger,
+	)
+	closeflowHandler := closeflow.NewHandler(closeflowSvc)
+	closeflowLockMW := closeflow.NewPeriodeLockMiddleware(closeflowRepo, closeflow.DefaultConfig())
+	// F-02: pass v1 (not router) so closeflow routes inherit Idempotency + Auth middleware.
+	closeflow.RegisterRoutes(v1, closeflowHandler, closeflowLockMW)
+	closeflow.RegisterLockMiddlewareRoutes(v1, closeflowLockMW)
 
 	// -----------------------------------------------------------------------
 	// Master Data — Portofolio (APP-A-MSTR-010)
@@ -859,6 +911,160 @@ func main() {
 	jurnalWorker := jurnal.NewWorker(jurnalPostingSvc, jurnalDLQRepo, logger)
 	_ = jurnalWorker // registered in Redis block below
 
+	// -----------------------------------------------------------------------
+	// APP-B P5-M6 — MTM (Mark-to-Market) Daily Job + Manual Override
+	// Endpoints (all under /api/v1/trx/mtm/):
+	//   GET    /                          — list (cursor, sort, filter, export) (fx_rate.read)
+	//   POST   /upload/batch              — manual upload CSV (fx_rate.create)
+	//   GET    /upload/batch/:batch_id    — batch status (fx_rate.read)
+	//   POST   /cron/trigger              — manual cron trigger (fx_rate.create)
+	//   GET    /alerts/stale-price        — stale-price alert list (fx_rate.read)
+	//   GET    /:id                       — MTM detail (fx_rate.read)
+	//   POST   /:id/override-approve      — ROLE-AKUN-CTL approve override (fx_rate.approve)
+	//   POST   /:id/override-reject       — ROLE-AKUN-CTL reject override (fx_rate.approve)
+	//
+	// Domain: AC instruments skipped (ErrMTMInstrumenACSkip). SoD: override_approver ≠ uploader.
+	// locked_flag=TRUE → HTTP 423 MTM_PERIODE_LOCKED (set by closeflow hard-close hook).
+	// Cron: "0 11 * * 1-5" (18:00 WIB = 11:00 UTC, Mon-Fri).
+	// JurnalPoster: NoopJurnalPoster placeholder until P5-M2 interface stabilises.
+	// AsynqEnqueuer: NoopEnqueuer in dev (no Redis); real asynq.Client wired below when REDIS_URL set.
+	// -----------------------------------------------------------------------
+	mtmRepo := mtm.NewDBRepository(db)
+	mtmJurnalPoster := mtm.NewRealJurnalPoster(logger)
+	// m5 fix: production guard — fatal if NoopJurnalPoster used in production
+	if mtm.IsNoopProduction(mtmJurnalPoster) {
+		log.Fatal("FATAL: APP_ENV=production but MTM JurnalPoster is NoopJurnalPoster. " +
+			"Wire internal/app-d/jurnal.Service before deploying to production.")
+	}
+	mtmSvc := mtm.NewService(mtmRepo, mtmJurnalPoster, auditWriter, logger)
+	mtmWorker := mtm.NewHandler(mtmSvc, logger)
+	_ = mtmWorker // registered in Redis block below
+
+	// HTTP handler: enqueuer set to NoopEnqueuer in dev; overridden in Redis block below.
+	var mtmEnqueuer mtm.AsynqEnqueuer = mtm.NoopEnqueuer{}
+	mtmHandler := mtm.NewHTTPHandler(mtmSvc, mtmEnqueuer)
+	// B4 fix: pass rdb to RegisterRoutes so SensitiveRateLimit can be applied on cron/trigger.
+	mtm.RegisterRoutes(v1, mtmHandler, rdb)
+
+	// -----------------------------------------------------------------------
+	// P5-M3: GL Host REST Delivery — DeliveryService, DLQService, ReconciliationService.
+	// Uses StubAdapter by default (dev mode); RESTAdapter when GL_HOST_URL is set.
+	// All services panic on nil auditWriter (DEC-018).
+	// -----------------------------------------------------------------------
+	glJurnalRepo := gldelivery.NewJurnalGLRepo(db)
+	glDLQRepo := gldelivery.NewDLQRepo(db)
+	glReportRepo := gldelivery.NewReconReportRepo(db)
+	glMismatchRepo := gldelivery.NewReconMismatchRepo(db)
+
+	glCfg := gldelivery.DefaultConfig()
+	var glAdapter gldelivery.GLHostAdapter
+	if glHostURL := os.Getenv("GL_HOST_URL"); glHostURL != "" {
+		restAdapter, adapterErr := gldelivery.NewRESTAdapter(gldelivery.RESTAdapterConfig{
+			BaseURL:        glHostURL,
+			AuthType:       os.Getenv("GL_HOST_AUTH_TYPE"),
+			APIKey:         os.Getenv("GL_HOST_API_KEY"),
+			TimeoutSeconds: 30,
+			PIIFields:      glCfg.PIIFields,
+		})
+		if adapterErr != nil {
+			logger.Warn("P5-M3: GL Host RESTAdapter init failed — using StubAdapter", "error", adapterErr)
+			glAdapter = gldelivery.NewStubAdapter()
+		} else {
+			glAdapter = restAdapter
+			logger.Info("P5-M3: GL Host RESTAdapter active", "url", glHostURL)
+		}
+	} else {
+		glAdapter = gldelivery.NewStubAdapter()
+		logger.Warn("P5-M3: GL_HOST_URL not set — GL delivery using StubAdapter (dev mode)")
+	}
+
+	glDeliverySvc := gldelivery.NewDeliveryService(glJurnalRepo, glDLQRepo, glAdapter, auditWriter, nil /* enqueuer wired below */, glCfg, logger)
+	glDLQSvc := gldelivery.NewDLQService(glDLQRepo, glJurnalRepo, glDeliverySvc, auditWriter, nil, logger)
+	glReconSvc := gldelivery.NewReconciliationService(glJurnalRepo, glReportRepo, glMismatchRepo, glAdapter, auditWriter, nil, glCfg, logger)
+
+	glHandler := gldelivery.NewHandler(glDeliverySvc, glDLQSvc, glReconSvc)
+	gldelivery.RegisterRoutes(v1, glHandler, jwtVerifier, db)
+
+	glWorker := gldelivery.NewGLDeliveryWorker(glDeliverySvc, glReconSvc, glCfg, logger)
+	_ = glWorker // registered in Redis block below
+
+	// -----------------------------------------------------------------------
+	// APP-B P5-M9 — Jatuh Tempo + Akrual EIR + Dividen
+	// Routes:
+	//   GET  /api/v1/transaksi/akrual                       — list akrual (akrual.read)
+	//   GET  /api/v1/transaksi/akrual/dashboard             — MTD/YTD dashboard (akrual.read)
+	//   POST /api/v1/transaksi/akrual/cron-trigger          — manual cron trigger (sys.cron.trigger)
+	//   GET  /api/v1/transaksi/akrual/:id                   — akrual detail (akrual.read)
+	//   POST /api/v1/transaksi/akrual/:id/override-stale    — override stale ECL (akrual.override_stale)
+	//   GET  /api/v1/transaksi/jatuh-tempo                  — list jatuh tempo (maturity.read)
+	//   POST /api/v1/transaksi/jatuh-tempo/cron-trigger     — manual cron trigger (sys.cron.trigger)
+	//
+	// Cron schedule (WIB, registered in Asynq block below):
+	//   MATURITY_PROCESS_JOB : 09:00 WIB = 02:00 UTC → "0 2 * * *"
+	//   DAILY_ACCRUAL_JOB    : 09:15 WIB = 02:15 UTC → "15 2 * * *"
+	//   AMORTISASI_PD_JOB    : 10:00 WIB = 03:00 UTC → "0 3 * * *"
+	//
+	// Stage 3: ECL from latest sealed ecl.ecl_calc_run (M8 B1 pattern).
+	// POCI: credit-adjusted EIR from ecl.amortisasi_schedule.
+	// FCY: IDR conversion via sys.fx_rate APPROVED (tanggal_akrual).
+	// Stale guard: AKRUAL_STAGING_STALE_DAYS (default 30) config param.
+	// SoD dividen: approver_id ≠ maker_id (DEC-017).
+	// Idempotency: partial unique index (instrumen_id, tanggal_akrual, jenis).
+	// Decisions: DEC-010, DEC-013, DEC-016, DEC-017, DEC-018, DEC-021, DEC-022.
+	//
+	// NOTE: P5-M7 (Renewal) and P5-M8 (Penjualan) wiring pending — their packages
+	// compile independently but RegisterRoutes not yet called from main.go.
+	// -----------------------------------------------------------------------
+	akrualRepo := akrualmaturity.NewRepo(db)
+	akrualPoster := akrualmaturity.NewNoopJurnalPoster(logger)
+	akrualUpdater := akrualmaturity.NewInstrumenStatusUpdaterStub() // Phase 5 wire: production adapter
+	akrualSvc := akrualmaturity.NewService(akrualRepo, akrualPoster, akrualUpdater, auditWriter, logger)
+	// B2 fix: akrualAsynqClient is nil when REDIS_URL is not set; set inside if-block below.
+	var akrualAsynqClient *asynq.Client
+	if cfg.RedisURL != "" {
+		akrualAsynqClient = asynq.NewClient(asynq.RedisClientOpt{Addr: cfg.RedisURL})
+	}
+	akrualHandler := akrualmaturity.NewHTTPHandler(akrualSvc, akrualAsynqClient)
+	akrualWorker := akrualmaturity.NewWorker(akrualSvc, rdb, logger)
+	akrualmaturity.RegisterRoutes(v1, akrualHandler, rdb)
+	_ = akrualWorker // handlers registered on asynqMux below
+
+	// -----------------------------------------------------------------------
+	// P5-M10: POCI Delta ECL (APP-C-POCI-001..006)
+	// Endpoints (all under /api/v1/poci/):
+	//   GET  /poci/baseline                   — list baselines (poci.baseline.read)
+	//   POST /poci/baseline                   — capture baseline (poci.baseline.create)
+	//   GET  /poci/baseline/:instrumen_id     — get baseline (poci.baseline.read)
+	//   GET  /poci/delta-log                  — list delta log (poci.delta.read)
+	//   GET  /poci/delta-history              — delta history by instrumen (poci.delta.read)
+	//   GET  /poci/delta-history/summary      — MTD/YTD summary (poci.delta.read)
+	//   POST /poci/compute-delta-batch        — trigger async delta batch (poci.delta.compute)
+	//
+	// B1 fix: NewServiceWithDB wires real DBTxBeginner so processOnePociInstrumen can open tx.
+	// M1 fix: tenantID from JWT (actorAndTenant), not hardcoded UUID.
+	// Decisions: DEC-010, DEC-016, DEC-017, DEC-018, DEC-021, DEC-022.
+	// -----------------------------------------------------------------------
+	pociRepo := pocidelta.NewRepository(db)
+	pociPoster := pocidelta.NewNoopJurnalPoster(logger) // replace with P5-M2 adapter when ready
+	pociAuditWriter := audit.NewWriter(db)
+
+	// B1: dbAdapter wraps *sql.DB as DBTxBeginner for the pocidelta service.
+	var pociAsynqClient *asynq.Client
+	if cfg.RedisURL != "" {
+		pociAsynqClient = asynq.NewClient(asynq.RedisClientOpt{Addr: cfg.RedisURL})
+	}
+
+	var pociSvc *pocidelta.Service
+	if db != nil {
+		pociSvc = pocidelta.NewServiceWithDB(pociRepo, pocidelta.NewSQLDBAdapter(db), pociPoster, pociAuditWriter, logger)
+	} else {
+		pociSvc = pocidelta.NewService(pociRepo, pociPoster, pociAuditWriter, logger)
+	}
+	pociHandler := pocidelta.NewHTTPHandler(pociSvc, pociAsynqClient)
+	pociWorker := pocidelta.NewWorker(pociSvc, rdb, logger)
+	pocidelta.RegisterRoutes(v1, pociHandler, rdb)
+	_ = pociWorker // RegisterHandlers called on asynqMux below when Redis available
+
 	// B1 fix: Register DriftCronHandler on Asynq mux + scheduler.
 	// Previously the handler was instantiated then discarded (_ = ...), making the
 	// drift cron feature completely dead.  Now we:
@@ -891,6 +1097,21 @@ func main() {
 		// P5-M2: jurnal engine subscribers for penempatan events.
 		jurnalWorker.RegisterHandlers(asynqMux)
 
+		// P5-M3: GL Host delivery + reconciliation tasks.
+		glWorker.RegisterHandlers(asynqMux)
+
+		// P5-M5: JISDOR fetch + upload-process tasks.
+		fxJisdorWorker.RegisterHandlers(asynqMux)
+
+		// P5-M6: MTM daily run task.
+		mtmWorker.RegisterHandlers(asynqMux)
+
+		// P5-M9: Akrual + Maturity + Amortisasi cron tasks.
+		akrualWorker.RegisterHandlers(asynqMux)
+
+		// P5-M10: POCI delta batch computation.
+		pociWorker.RegisterHandlers(asynqMux)
+
 		// Asynq Server — pulls tasks from Redis queue and dispatches to mux.
 		asynqServer := asynq.NewServer(asynqRedisOpt, asynq.Config{
 			Concurrency: 5,
@@ -914,6 +1135,63 @@ func main() {
 		if _, err := scheduler.Register("0 19 * * *", penempatan.NewMaturityCheckTask("TUGURE")); err != nil {
 			log.Fatalf("register penempatan maturity cron: %v", err)
 		}
+		// P5-M3: GL reconciliation daily cron — 01:00 UTC (08:00 WIB).
+		glReconTask, glReconTaskErr := gldelivery.NewReconcileDailyTask(time.Now().UTC(), "TUGURE")
+		if glReconTaskErr != nil {
+			log.Fatalf("build gl recon task: %v", glReconTaskErr)
+		}
+		if _, err := scheduler.Register("0 1 * * *", glReconTask); err != nil {
+			log.Fatalf("register gl recon cron: %v", err)
+		}
+
+		// P5-M5: JISDOR daily fetch cron — 03:30 UTC (10:30 WIB), Mon-Fri.
+		// Schedule: "30 3 * * 1-5" (sys.config FX_JISDOR_CRON_SCHEDULE).
+		// Payload date is injected at runtime by the cron task builder (today's date in WIB).
+		jisdorTask, jisdorTaskErr := kurs.NewJisdorFetchTask(time.Now().UTC().Format("2006-01-02"), "TUGURE")
+		if jisdorTaskErr != nil {
+			log.Fatalf("build jisdor fetch task: %v", jisdorTaskErr)
+		}
+		if _, err := scheduler.Register("30 3 * * 1-5", jisdorTask); err != nil {
+			log.Fatalf("register jisdor fetch cron: %v", err)
+		}
+
+		// P5-M6: MTM daily run cron — 11:00 UTC (18:00 WIB), Mon-Fri.
+		// Payload date injected at runtime (today's date in UTC, aligned with WIB business day).
+		mtmTask, mtmTaskErr := mtm.NewDailyRunTask(time.Now().UTC().Format("2006-01-02"), "TUGURE")
+		if mtmTaskErr != nil {
+			log.Fatalf("build mtm daily run task: %v", mtmTaskErr)
+		}
+		if _, err := scheduler.Register("0 11 * * 1-5", mtmTask); err != nil {
+			log.Fatalf("register mtm daily run cron: %v", err)
+		}
+
+		// P5-M9: Akrual + Maturity + Amortisasi daily crons.
+		// MATURITY_PROCESS_JOB  → 09:00 WIB = 02:00 UTC
+		// DAILY_ACCRUAL_JOB     → 09:15 WIB = 02:15 UTC
+		// AMORTISASI_PD_JOB     → 10:00 WIB = 03:00 UTC
+		today := time.Now().UTC().Format("2006-01-02")
+		maturityTask, maturityTaskErr := akrualmaturity.NewMaturityTask(time.Now().UTC(), "cron-"+today+"-maturity")
+		if maturityTaskErr != nil {
+			log.Fatalf("build maturity task: %v", maturityTaskErr)
+		}
+		if _, err := scheduler.Register(akrualmaturity.CronMaturity, maturityTask); err != nil {
+			log.Fatalf("register maturity cron: %v", err)
+		}
+		akrualCronTask, akrualCronTaskErr := akrualmaturity.NewAkrualTask(time.Now().UTC(), "cron-"+today+"-akrual")
+		if akrualCronTaskErr != nil {
+			log.Fatalf("build akrual task: %v", akrualCronTaskErr)
+		}
+		if _, err := scheduler.Register(akrualmaturity.CronAkrual, akrualCronTask); err != nil {
+			log.Fatalf("register akrual cron: %v", err)
+		}
+		amortisasiCronTask, amortisasiCronTaskErr := akrualmaturity.NewAmortisasiTask(time.Now().UTC(), "cron-"+today+"-amortisasi")
+		if amortisasiCronTaskErr != nil {
+			log.Fatalf("build amortisasi task: %v", amortisasiCronTaskErr)
+		}
+		if _, err := scheduler.Register(akrualmaturity.CronAmortisasi, amortisasiCronTask); err != nil {
+			log.Fatalf("register amortisasi cron: %v", err)
+		}
+
 		go func() {
 			if err := scheduler.Run(); err != nil {
 				log.Fatalf("asynq scheduler: %v", err)
@@ -921,6 +1199,12 @@ func main() {
 		}()
 		logger.Info("asynq drift cron registered", "schedule", "0 19 * * * UTC", "task", eir.TaskDriftCron)
 		logger.Info("asynq penempatan maturity cron registered", "schedule", "0 19 * * * UTC", "task", penempatan.MaturityCheckTaskType)
+		logger.Info("asynq GL recon cron registered", "schedule", "0 1 * * * UTC", "task", gldelivery.TaskGLReconcileDaily)
+		logger.Info("asynq JISDOR fetch cron registered", "schedule", "30 3 * * 1-5 UTC (10:30 WIB)", "task", kurs.TaskFxJisdorFetch)
+		logger.Info("asynq MTM daily run cron registered", "schedule", "0 11 * * 1-5 UTC (18:00 WIB)", "task", mtm.TaskMtmDailyRun)
+		logger.Info("asynq maturity process cron registered", "schedule", akrualmaturity.CronMaturity+" UTC (09:00 WIB)", "task", akrualmaturity.TaskMaturityProcess)
+		logger.Info("asynq daily accrual cron registered", "schedule", akrualmaturity.CronAkrual+" UTC (09:15 WIB)", "task", akrualmaturity.TaskDailyAccrual)
+		logger.Info("asynq amortisasi cron registered", "schedule", akrualmaturity.CronAmortisasi+" UTC (10:00 WIB)", "task", akrualmaturity.TaskAmortisasiPD)
 	} else {
 		logger.Warn("REDIS_URL not set — Asynq drift cron NOT registered (dev mode)")
 	}

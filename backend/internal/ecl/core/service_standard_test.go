@@ -664,19 +664,19 @@ func TestECLCompute_POCI_ComputesViaStandardWithBaseline(t *testing.T) {
 		t.Error("ECLWeightedIDR must be > 0 for POCI with non-zero PD (mock returns 0.02)")
 	}
 
-	// Both POCI warning codes must be present (DEC-POCI-001, DEC-POCI-002).
-	wantWarnings := []string{WarnPOCIRequiresFullCAEIR, WarnPOCIECLRepresentsInitialBaseline}
-	for _, want := range wantWarnings {
-		found := false
-		for _, w := range result.Warnings {
-			if w == want {
-				found = true
-				break
-			}
+	// P5-M10: WarnPOCIRequiresFullCAEIR must be present.
+	// WarnPOCIECLRepresentsInitialBaseline must NOT be present (removed in P5-M10).
+	foundCAEIR := false
+	for _, w := range result.Warnings {
+		if w == WarnPOCIRequiresFullCAEIR {
+			foundCAEIR = true
 		}
-		if !found {
-			t.Errorf("POCI: expected warning %s, got %v", want, result.Warnings)
+		if w == WarnPOCIECLRepresentsInitialBaseline {
+			t.Errorf("POCI: WarnPOCIECLRepresentsInitialBaseline must NOT be emitted in P5-M10. Got warnings: %v", result.Warnings)
 		}
+	}
+	if !foundCAEIR {
+		t.Errorf("POCI: expected warning %s, got %v", WarnPOCIRequiresFullCAEIR, result.Warnings)
 	}
 
 	t.Logf("POCI ECL baseline: %s, routing: %s, warnings: %v",
