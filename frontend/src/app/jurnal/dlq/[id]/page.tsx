@@ -14,10 +14,12 @@ import {
 } from "@/components/ui/card";
 import { DLQActionPanel } from "@/components/blips/jurnal/DLQActionPanel";
 import { JSONBTreeView } from "@/components/blips/JSONBTreeView";
+import { MFAStepUpModal } from "@/components/blips/MFAStepUpModal";
 import { dlqApi } from "@/lib/api/jurnal.api";
 import type { DlqStatus } from "@/lib/schemas/jurnal.schema";
 import { isApiError } from "@/lib/api";
 import { notify } from "@/lib/notify";
+import { usePermissions } from "@/lib/stores/auth.store";
 
 const STATUS_LABELS: Record<DlqStatus, string> = {
   FAILED: "Gagal",
@@ -33,16 +35,12 @@ const STATUS_VARIANT: Record<DlqStatus, string> = {
   ABANDONED: "outline",
 };
 
-// Shim — replace with real session/permission hook
-function useCurrentUserPermissions() {
-  return ["jurnal_dlq.replay", "jurnal_dlq.discard"];
-}
-
 export default function DLQDetailPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const qc = useQueryClient();
-  const permissions = useCurrentUserPermissions();
+  const { can } = usePermissions();
+  const [mfaOpen, setMfaOpen] = React.useState(false);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["dlq-entry", id],
@@ -51,21 +49,21 @@ export default function DLQDetailPage() {
 
   const entry = data?.data;
 
-  const invalidate = () => qc.invalidateQueries({ queryKey: ["dlq-entry", id] });
+  const invalidate = () => void qc.invalidateQueries({ queryKey: ["dlq-entry", id] });
 
   const replayMutation = useMutation({
-    mutationFn: () => dlqApi.replay(id),
+    mutationFn: (_stepUpToken: string) => dlqApi.replay(id),
     onSuccess: (res) => {
       notify.success(
-        `DLQ replay dimulai. Job ID: ${res.data.jobId}`,
+        `DLQ-${id} berhasil di-replay ke GL Host. Status: DELIVERED.`,
         {
           action: {
-            label: "Lihat status",
+            label: "Lihat status job",
             onClick: () => router.push(`/jobs/${res.data.jobId}`),
           },
         },
       );
-      void invalidate();
+      invalidate();
     },
     onError: (err) => {
       if (isApiError(err)) notify.error(err);
@@ -75,8 +73,8 @@ export default function DLQDetailPage() {
   const discardMutation = useMutation({
     mutationFn: (reason: string) => dlqApi.discard(id, { discardReason: reason }),
     onSuccess: () => {
-      notify.destructive("Entri DLQ berhasil diabaikan (ABANDONED).");
-      void invalidate();
+      notify.success("Entri DLQ berhasil diabaikan (ABANDONED).");
+      invalidate();
     },
     onError: (err) => {
       if (isApiError(err)) notify.error(err);
@@ -100,8 +98,8 @@ export default function DLQDetailPage() {
     );
   }
 
-  const canReplay = permissions.includes("jurnal_dlq.replay");
-  const canDiscard = permissions.includes("jurnal_dlq.discard");
+  const canReplay = can("jurnal.dlq.replay");
+  const canDiscard = can("jurnal.dlq.read");
 
   return (
     <div className="mx-auto max-w-4xl px-6 py-6 space-y-6">
@@ -110,7 +108,7 @@ export default function DLQDetailPage() {
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => router.push("/jrnl/dlq")}
+          onClick={() => router.push("/jurnal/dlq")}
           aria-label="Kembali ke daftar DLQ"
         >
           <ArrowLeft className="h-4 w-4 mr-1" aria-hidden="true" />
@@ -139,7 +137,7 @@ export default function DLQDetailPage() {
           </p>
         </div>
         <div className="text-right text-xs text-muted-foreground">
-          <p>Percobaan: {entry.attemptCount}×</p>
+          <p>Percobaan: {entry.attemptCount}&times;</p>
           <p>Terakhir: {new Date(entry.lastAttemptAt).toLocaleDateString("id-ID")}</p>
         </div>
       </div>
@@ -167,9 +165,7 @@ export default function DLQDetailPage() {
                   <Button
                     variant="link"
                     className="h-auto p-0 text-sm font-mono"
-                    onClick={() =>
-                      router.push(`/jrnl/journal-entries/${entry.replayedJurnalId}`)
-                    }
+                    onClick={() => router.push(`/jurnal/header/${entry.replayedJurnalId}`)}
                   >
                     {entry.replayedJurnalId}
                   </Button>
@@ -221,7 +217,8 @@ export default function DLQDetailPage() {
                 canReplay={canReplay}
                 canDiscard={canDiscard}
                 onReplay={async () => {
-                  await replayMutation.mutateAsync();
+                  // DEC-027: step-up MFA required for DLQ replay
+                  setMfaOpen(true);
                 }}
                 onDiscard={async (reason) => {
                   await discardMutation.mutateAsync(reason);
@@ -231,6 +228,19 @@ export default function DLQDetailPage() {
           </Card>
         </div>
       </div>
+
+      {/* MFA step-up modal for DLQ replay (DEC-027) */}
+      <MFAStepUpModal
+        open={mfaOpen}
+        onOpenChange={setMfaOpen}
+        title="Verifikasi MFA untuk Replay DLQ ke GL"
+        description="Replay DLQ adalah aksi sensitif (DEC-027). Verifikasi MFA step-up diperlukan."
+        onVerified={(stepUpToken) => {
+          setMfaOpen(false);
+          replayMutation.mutate(stepUpToken);
+        }}
+        onCancel={() => setMfaOpen(false)}
+      />
     </div>
   );
 }

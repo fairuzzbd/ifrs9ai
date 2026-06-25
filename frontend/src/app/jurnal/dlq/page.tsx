@@ -198,12 +198,12 @@ export default function DLQConsolePage() {
                 <TableRow
                   key={row.id}
                   className="cursor-pointer hover:bg-muted/50"
-                  onClick={() => router.push(`/jrnl/dlq/${row.id}`)}
+                  onClick={() => router.push(`/jurnal/dlq/${row.id}`)}
                   role="link"
                   tabIndex={0}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
-                      router.push(`/jrnl/dlq/${row.id}`);
+                      router.push(`/jurnal/dlq/${row.id}`);
                     }
                   }}
                 >
