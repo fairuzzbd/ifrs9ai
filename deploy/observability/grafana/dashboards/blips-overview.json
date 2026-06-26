@@ -1,0 +1,172 @@
+{
+  "__inputs": [],
+  "__requires": [
+    {"type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0"},
+    {"type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0"}
+  ],
+  "annotations": {"list": []},
+  "description": "BLIPS IFRS9 — Overview: golden signals, DB, queue saturation",
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "API RPS (5m avg)",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total{job=\"blips-api\"}[5m]))",
+          "legendFormat": "RPS",
+          "refId": "A"
+        }
+      ],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background"},
+      "fieldConfig": {"defaults": {"unit": "reqps", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 500}, {"color": "red", "value": 1000}]}}}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Error Rate (5m)",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total{job=\"blips-api\",status=~\"5..\"}[5m])) / sum(rate(http_requests_total{job=\"blips-api\"}[5m]))",
+          "legendFormat": "Error Rate",
+          "refId": "A"
+        }
+      ],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background"},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.001}, {"color": "red", "value": 0.01}]}}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "P95 Latency (5m)",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"blips-api\"}[5m])) by (le))",
+          "legendFormat": "P95",
+          "refId": "A"
+        }
+      ],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background"},
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.2}, {"color": "red", "value": 0.5}]}}}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Asynq Queue Depth",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [
+        {
+          "expr": "sum(asynq_queue_size)",
+          "legendFormat": "Queue Depth",
+          "refId": "A"
+        }
+      ],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background"},
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1000}, {"color": "red", "value": 10000}]}}}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "API Request Rate by Status Code",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(http_requests_total{job=\"blips-api\"}[5m]))",
+          "legendFormat": "HTTP {{status}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "API Latency Percentiles",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket{job=\"blips-api\"}[5m])) by (le))",
+          "legendFormat": "P50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"blips-api\"}[5m])) by (le))",
+          "legendFormat": "P95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{job=\"blips-api\"}[5m])) by (le))",
+          "legendFormat": "P99",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}},
+      "options": {
+        "legend": {"calcs": ["lastNotNull", "mean"], "displayMode": "table", "placement": "bottom"}
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "PostgreSQL Connections",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [
+        {
+          "expr": "pg_stat_activity_count{datname=\"blips_db\"}",
+          "legendFormat": "Active Connections",
+          "refId": "A"
+        },
+        {
+          "expr": "pg_settings_max_connections{} * 0.8",
+          "legendFormat": "80% Pool Threshold",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Redis Memory Usage",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [
+        {
+          "expr": "redis_memory_used_bytes",
+          "legendFormat": "Used",
+          "refId": "A"
+        },
+        {
+          "expr": "redis_config_maxmemory",
+          "legendFormat": "Max",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "bytes"}}
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["blips", "overview"],
+  "time": {"from": "now-3h", "to": "now"},
+  "timepicker": {},
+  "timezone": "Asia/Jakarta",
+  "title": "BLIPS Overview",
+  "uid": "blips-overview",
+  "version": 1
+}

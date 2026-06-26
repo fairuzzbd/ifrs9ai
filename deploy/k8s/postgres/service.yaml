@@ -1,0 +1,40 @@
+---
+# Headless service untuk StatefulSet DNS (postgres-0.postgres.blips.svc.cluster.local)
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: blips
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+spec:
+  selector:
+    app.kubernetes.io/name: postgres
+    role: primary
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+    - name: metrics
+      port: 9187
+      targetPort: 9187
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-replica
+  namespace: blips
+  labels:
+    app.kubernetes.io/name: postgres-replica
+    app.kubernetes.io/component: database
+spec:
+  selector:
+    app.kubernetes.io/name: postgres-replica
+    role: replica
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+  type: ClusterIP

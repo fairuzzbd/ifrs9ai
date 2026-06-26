@@ -1,0 +1,128 @@
+---
+# MinIO 4-node distributed erasure coding (DEC-004)
+# Prod: 4 pods, 1 disk each → erasure set 4 drives, n/2 parity.
+# Minimum 2 nodes available untuk read, 3 untuk write.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: minio
+  namespace: blips
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/part-of: blips-ifrs9
+spec:
+  serviceName: minio
+  replicas: 4
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minio
+        app.kubernetes.io/component: storage
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9000"
+        prometheus.io/path: "/minio/v2/metrics/cluster"
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: minio
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: minio
+          image: minio/minio:RELEASE.2025-01-20T14-49-07Z
+          imagePullPolicy: IfNotPresent
+          command:
+            - minio
+            - server
+            - "http://minio-{0...3}.minio.blips.svc.cluster.local/data"
+            - --console-address
+            - ":9001"
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: blips-secret
+                  key: MINIO_ROOT_USER
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: blips-secret
+                  key: MINIO_ROOT_PASSWORD
+            - name: MINIO_SITE_NAME
+              value: "blips-prod"
+            - name: MINIO_PROMETHEUS_AUTH_TYPE
+              value: "public"
+          ports:
+            - name: api
+              containerPort: 9000
+            - name: console
+              containerPort: 9001
+          volumeMounts:
+            - name: miniodata
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+      securityContext:
+        fsGroup: 1000
+        runAsUser: 1000
+        runAsNonRoot: true
+  volumeClaimTemplates:
+    - metadata:
+        name: miniodata
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 2Ti
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: blips
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/component: storage
+spec:
+  selector:
+    app.kubernetes.io/name: minio
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9001
+      targetPort: 9001
+  clusterIP: None
+  type: ClusterIP

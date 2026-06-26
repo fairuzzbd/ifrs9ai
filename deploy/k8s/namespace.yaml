@@ -1,0 +1,12 @@
+---
+# BLIPS IFRS9 — Kubernetes namespace
+# Production on-premise Jakarta DC (DEC-008)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: blips
+  labels:
+    app.kubernetes.io/name: blips-ifrs9
+    app.kubernetes.io/managed-by: kubectl
+    environment: production
+    tenant: tugure

@@ -1,0 +1,33 @@
+---
+# Grafana datasource provisioning — BLIPS IFRS9
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: blips-prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      exemplarTraceIdDestinations:
+        - name: traceId
+          datasourceUid: blips-tempo
+    version: 1
+    editable: false
+
+  - name: Loki
+    type: loki
+    uid: blips-loki
+    access: proxy
+    url: http://loki:3100
+    jsonData:
+      maxLines: 1000
+      derivedFields:
+        - datasourceUid: blips-prometheus
+          matcherRegex: '"traceId":"([^"]+)"'
+          name: TraceId
+          url: '${__value.raw}'
+    version: 1
+    editable: false

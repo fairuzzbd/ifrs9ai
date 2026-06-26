@@ -1,0 +1,20 @@
+# ---------------------------------------------------------------------------
+# Traefik TLS static config — UAT + Prod
+# TLS 1.3 minimum per DEC-029.
+# Sertifikat: file-based (on-prem, bukan ACME).
+# Mount ke /etc/traefik/tls.yml di dalam container.
+# ---------------------------------------------------------------------------
+tls:
+  options:
+    tls13only:
+      minVersion: VersionTLS13
+      sniStrict: true
+    default:
+      minVersion: VersionTLS12
+      cipherSuites:
+        - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+        - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+  certificates:
+    - certFile: /certs/blips.crt
+      keyFile: /certs/blips.key

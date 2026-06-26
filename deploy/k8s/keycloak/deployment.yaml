@@ -1,0 +1,125 @@
+---
+# Keycloak 26 — SSO Hub (DEC-006)
+# Prod: start mode (bukan start-dev), dengan PostgreSQL sebagai DB backend Keycloak.
+# TODO Phase 2: pisahkan DB Keycloak ke instance PostgreSQL terpisah.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: blips
+  labels:
+    app.kubernetes.io/name: keycloak
+    app.kubernetes.io/component: auth
+    app.kubernetes.io/part-of: blips-ifrs9
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: keycloak
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: keycloak
+        app.kubernetes.io/component: auth
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: keycloak
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:26.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - start
+            - --import-realm
+          env:
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              value: "admin"
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: blips-secret
+                  key: KC_BOOTSTRAP_ADMIN_PASSWORD
+            - name: KC_HTTP_ENABLED
+              value: "false"
+            - name: KC_HTTPS_PORT
+              value: "8443"
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+            - name: KC_METRICS_ENABLED
+              value: "true"
+            - name: KC_LOG_LEVEL
+              value: "warn"
+            - name: KC_PROXY
+              value: "reencrypt"
+            - name: KC_HOSTNAME
+              value: "auth.blips.tugu-re.com"
+            - name: KC_DB
+              value: "postgres"
+            - name: KC_DB_URL
+              value: "jdbc:postgresql://postgres:5432/blips_db"
+            - name: KC_DB_USERNAME
+              value: "blips_admin"
+            - name: KC_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: blips-secret
+                  key: POSTGRES_PASSWORD
+          ports:
+            - name: https
+              containerPort: 8443
+            - name: management
+              containerPort: 9000
+          livenessProbe:
+            httpGet:
+              path: /health/ready
+              port: management
+              scheme: HTTP
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: management
+              scheme: HTTP
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: blips
+  labels:
+    app.kubernetes.io/name: keycloak
+    app.kubernetes.io/component: auth
+spec:
+  selector:
+    app.kubernetes.io/name: keycloak
+  ports:
+    - name: https
+      port: 8443
+      targetPort: 8443
+  type: ClusterIP

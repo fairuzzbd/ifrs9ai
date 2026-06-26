@@ -1,0 +1,131 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blips-api
+  namespace: blips
+  labels:
+    app.kubernetes.io/name: blips-api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: blips-ifrs9
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: blips-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: blips-api
+        app.kubernetes.io/component: api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Pod anti-affinity: spread replicas across nodes
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: blips-api
+                topologyKey: kubernetes.io/hostname
+      # Init container: tunggu postgres + redis ready
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - "until nc -z postgres 5432; do echo 'waiting for postgres'; sleep 2; done"
+        - name: wait-for-redis
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - "until nc -z redis 6379; do echo 'waiting for redis'; sleep 2; done"
+      containers:
+        - name: api
+          image: registry.tugu-re.local/blips/backend:REPLACE_WITH_SHA_TAG
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: blips-config
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: blips-secret
+                  key: POSTGRES_PASSWORD
+                  # Konstruksi full URL via env di app atau pakai field substitution
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: blips-secret
+                  key: POSTGRES_PASSWORD
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: blips-secret
+                  key: REDIS_PASSWORD
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: blips-secret
+                  key: MINIO_ROOT_USER
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: blips-secret
+                  key: MINIO_ROOT_PASSWORD
+            - name: JWT_PUBLIC_KEY_PEM
+              valueFrom:
+                secretKeyRef:
+                  name: blips-secret
+                  key: JWT_PUBLIC_KEY_PEM
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+      securityContext:
+        fsGroup: 1000
+      restartPolicy: Always

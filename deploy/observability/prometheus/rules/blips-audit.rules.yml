@@ -1,0 +1,93 @@
+---
+# BLIPS Audit + Security alert rules
+# Compliance-critical: audit log write failures → page (SLA zero-tolerance)
+groups:
+  - name: blips-audit-compliance
+    interval: 15s
+    rules:
+      # Audit log write failure > 0 → page immediately (compliance-critical)
+      - alert: BlipsAuditLogWriteFailure
+        expr: |
+          increase(blips_audit_log_write_failures_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          service: blips-api
+          compliance: true
+        annotations:
+          summary: "COMPLIANCE ALERT: Audit log write failure detected"
+          description: "{{ $value }} audit log write failure(s) in last 5 minutes. Hash chain may be broken. Regulatory impact."
+          runbook: "docs/runbooks/p5-audit-hash-verify.md"
+
+      # Audit hash chain drift (verification job reports mismatch)
+      - alert: BlipsAuditHashChainBroken
+        expr: |
+          blips_audit_hash_chain_verification_failures_total > 0
+        for: 0m
+        labels:
+          severity: critical
+          service: blips-api
+          compliance: true
+          forensic: true
+        annotations:
+          summary: "CRITICAL: Audit hash chain integrity failure"
+          description: "Hash chain verification failed at {{ $value }} point(s). Forensic investigation required. DO NOT truncate audit_log."
+          runbook: "docs/runbooks/p5-audit-hash-verify.md#chain-broken"
+
+      # SoD violation attempts via API (should be zero in normal operation)
+      - alert: BlipsSoDViolationAttempt
+        expr: |
+          increase(blips_sod_violation_rejected_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          service: blips-api
+          security: true
+        annotations:
+          summary: "Segregation of Duties violation attempt detected"
+          description: "{{ $value }} SoD violation attempt(s) in last 15 minutes. Could indicate misconfigured client or privilege escalation attempt."
+          runbook: "docs/runbooks/p5-incident-response.md#sod-violation"
+
+      # MFA bypass attempts (mfa_verified=false on MFA-required endpoint)
+      - alert: BlipsMFABypassAttempt
+        expr: |
+          increase(blips_mfa_bypass_rejected_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          service: blips-api
+          security: true
+        annotations:
+          summary: "MFA bypass attempt on protected endpoint"
+          description: "{{ $value }} MFA bypass rejection(s) detected. Escalate to security-engineer."
+          runbook: "docs/runbooks/p5-incident-response.md#mfa-bypass"
+
+      # JWT validation failures spike (brute force or token replay)
+      - alert: BlipsJWTValidationFailureSpike
+        expr: |
+          rate(blips_jwt_validation_failures_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          service: blips-api
+          security: true
+        annotations:
+          summary: "JWT validation failure rate spike"
+          description: "Rate: {{ $value | humanize }}/s. Possible token replay or brute force."
+          runbook: "docs/runbooks/p5-incident-response.md#jwt-spike"
+
+  - name: blips-audit-retention
+    interval: 60s
+    rules:
+      # Audit log partition older than 10 years not archived (retention compliance)
+      - alert: BlipsAuditRetentionRisk
+        expr: |
+          (time() - blips_audit_log_oldest_entry_timestamp) > (10 * 365 * 24 * 3600)
+        for: 24h
+        labels:
+          severity: warning
+          compliance: true
+        annotations:
+          summary: "Audit log entry older than 10 years not yet archived"
+          description: "Oldest unarchived entry age: {{ $value | humanizeDuration }}. DEC-018 requires 10+10 year retention."
+          runbook: "docs/runbooks/p5-backup-restore.md#audit-archive"

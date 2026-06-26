@@ -1,0 +1,228 @@
+---
+# PostgreSQL 18 primary
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: blips
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: blips-ifrs9
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+      role: primary
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/component: database
+        role: primary
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9187"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:18.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - "postgres"
+            - "-c"
+            - "wal_level=replica"
+            - "-c"
+            - "max_wal_senders=5"
+            - "-c"
+            - "wal_keep_size=1024"
+            - "-c"
+            - "hot_standby=on"
+            - "-c"
+            - "shared_preload_libraries=pg_stat_statements"
+            - "-c"
+            - "log_min_duration_statement=1000"
+            - "-c"
+            - "log_statement=ddl"
+          env:
+            - name: POSTGRES_DB
+              value: "blips_db"
+            - name: POSTGRES_USER
+              value: "blips_admin"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: blips-secret
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - blips_admin
+                - -d
+                - blips_db
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - blips_admin
+                - -d
+                - blips_db
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "2Gi"
+            limits:
+              cpu: "4000m"
+              memory: "8Gi"
+        # Sidecar: postgres_exporter untuk Prometheus scrape
+        - name: postgres-exporter
+          image: prometheuscommunity/postgres-exporter:v0.15.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DATA_SOURCE_NAME
+              value: "postgresql://blips_admin:$(POSTGRES_PASSWORD)@localhost:5432/blips_db?sslmode=disable"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: blips-secret
+                  key: POSTGRES_PASSWORD
+          ports:
+            - name: metrics
+              containerPort: 9187
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 500Gi
+---
+# PostgreSQL 18 read replica
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-replica
+  namespace: blips
+  labels:
+    app.kubernetes.io/name: postgres-replica
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: blips-ifrs9
+spec:
+  serviceName: postgres-replica
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres-replica
+      role: replica
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres-replica
+        app.kubernetes.io/component: database
+        role: replica
+    spec:
+      initContainers:
+        - name: pg-basebackup
+          image: postgres:18.0
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: blips-secret
+                  key: POSTGRES_PASSWORD
+          command:
+            - bash
+            - -c
+            - |
+              if [ ! -f /var/lib/postgresql/data/pgdata/PG_VERSION ]; then
+                pg_basebackup -h postgres -U blips_admin \
+                  -D /var/lib/postgresql/data/pgdata -P -R --wal-method=stream
+              fi
+          volumeMounts:
+            - name: pgdata-replica
+              mountPath: /var/lib/postgresql/data
+      containers:
+        - name: postgres-replica
+          image: postgres:18.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - "postgres"
+            - "-c"
+            - "hot_standby=on"
+            - "-c"
+            - "wal_level=replica"
+          env:
+            - name: POSTGRES_USER
+              value: "blips_admin"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: blips-secret
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          volumeMounts:
+            - name: pgdata-replica
+              mountPath: /var/lib/postgresql/data
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - blips_admin
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata-replica
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 500Gi

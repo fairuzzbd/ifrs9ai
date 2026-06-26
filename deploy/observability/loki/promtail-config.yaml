@@ -1,0 +1,106 @@
+# ---------------------------------------------------------------------------
+# Promtail config — log shipper ke Loki
+# Labels: service, env, traceId, tenantId (sesuai BLIPS observability standard)
+# ---------------------------------------------------------------------------
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+    tenant_id: tugure
+
+scrape_configs:
+  # ---------------------------------------------------------------------------
+  # BLIPS API — structured JSON logs (slog/pino format)
+  # Log path: /var/log/blips/api/*.log (atau dari Docker/K8s stdout)
+  # ---------------------------------------------------------------------------
+  - job_name: blips-api
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          service: blips-api
+          env: production
+          tenant: tugure
+          __path__: /var/log/blips/api/*.log
+    pipeline_stages:
+      - json:
+          expressions:
+            level: level
+            msg: msg
+            traceId: traceId
+            tenantId: tenantId
+            userId: userId
+            action: action
+      - labels:
+          level:
+          traceId:
+          tenantId:
+      - timestamp:
+          source: time
+          format: RFC3339Nano
+
+  # ---------------------------------------------------------------------------
+  # BLIPS Worker — structured JSON logs
+  # ---------------------------------------------------------------------------
+  - job_name: blips-worker
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          service: blips-worker
+          env: production
+          tenant: tugure
+          __path__: /var/log/blips/worker/*.log
+    pipeline_stages:
+      - json:
+          expressions:
+            level: level
+            msg: msg
+            traceId: traceId
+            queue: queue
+            jobType: jobType
+      - labels:
+          level:
+          queue:
+          jobType:
+
+  # ---------------------------------------------------------------------------
+  # Kubernetes pod logs (K8s deployment)
+  # ---------------------------------------------------------------------------
+  - job_name: kubernetes-pods
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [blips]
+    pipeline_stages:
+      - json:
+          expressions:
+            level: level
+            msg: msg
+            traceId: traceId
+            tenantId: tenantId
+            service_name: service
+      - labels:
+          level:
+          traceId:
+          tenantId:
+      - timestamp:
+          source: time
+          format: RFC3339Nano
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+        target_label: service
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_container_name]
+        target_label: container
+      - action: keep
+        source_labels: [__meta_kubernetes_namespace]
+        regex: blips

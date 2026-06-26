@@ -1,0 +1,80 @@
+{
+  "__inputs": [],
+  "__requires": [
+    {"type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0"},
+    {"type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0"}
+  ],
+  "annotations": {"list": []},
+  "description": "BLIPS API latency breakdown per route — P50/P95/P99",
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "id": 1,
+      "type": "heatmap",
+      "title": "Request Duration Heatmap",
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [
+        {
+          "expr": "sum(rate(http_request_duration_seconds_bucket{job=\"blips-api\"}[5m])) by (le)",
+          "legendFormat": "{{le}}",
+          "refId": "A",
+          "format": "heatmap"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "P95 Latency per Route (top 10 slowest)",
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 10},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [
+        {
+          "expr": "topk(10, histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"blips-api\"}[5m])) by (le, route)))",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}},
+      "options": {"legend": {"calcs": ["lastNotNull", "mean", "max"], "displayMode": "table", "placement": "right"}}
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Route Latency Summary (last 5m)",
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 20},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket{job=\"blips-api\"}[5m])) by (le, route))",
+          "legendFormat": "P50 {{route}}",
+          "refId": "A",
+          "instant": true
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"blips-api\"}[5m])) by (le, route))",
+          "legendFormat": "P95 {{route}}",
+          "refId": "B",
+          "instant": true
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{job=\"blips-api\"}[5m])) by (le, route))",
+          "legendFormat": "P99 {{route}}",
+          "refId": "C",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["blips", "api", "latency"],
+  "time": {"from": "now-1h", "to": "now"},
+  "timezone": "Asia/Jakarta",
+  "title": "BLIPS API Latency",
+  "uid": "blips-api-latency",
+  "version": 1
+}

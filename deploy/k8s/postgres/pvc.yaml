@@ -1,0 +1,20 @@
+---
+# PVC pre-created (dipakai jika tidak menggunakan volumeClaimTemplates di StatefulSet)
+# Untuk production on-prem, gunakan storageClass local-path atau ceph-rbd.
+# Jika menggunakan volumeClaimTemplates di statefulset.yaml, file ini tidak perlu di-apply.
+# Dokumentasi: deploy/k8s/README.md §Storage.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: blips-pgdata
+  namespace: blips
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 500Gi
