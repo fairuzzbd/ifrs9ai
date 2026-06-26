@@ -1,0 +1,90 @@
+# ---------------------------------------------------------------------------
+# Loki config — BLIPS IFRS9 Production
+# Backend: MinIO (S3-compatible, on-prem) per DEC-004
+# Retention: 30 hari hot storage. Archive ke cold MinIO tier per
+#   docs/runbooks/p5-backup-restore.md §Loki-archive.
+# ---------------------------------------------------------------------------
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9095
+  log_level: warn
+
+common:
+  path_prefix: /loki
+  storage:
+    s3:
+      endpoint: minio:9000
+      bucketnames: blips-loki
+      access_key_id: ${MINIO_ROOT_USER}
+      secret_access_key: ${MINIO_ROOT_PASSWORD}
+      insecure: true
+      s3forcepathstyle: true
+  replication_factor: 1
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: "2025-01-01"
+      store: tsdb
+      object_store: s3
+      schema: v13
+      index:
+        prefix: loki_index_
+        period: 24h
+
+limits_config:
+  # 30 hari retention (720h) sesuai operational requirement.
+  # Audit log disimpan terpisah di PostgreSQL (10+10 thn per DEC-018).
+  retention_period: 720h
+  ingestion_rate_mb: 32
+  ingestion_burst_size_mb: 64
+  max_streams_per_user: 10000
+  max_entries_limit_per_query: 50000
+  max_query_series: 500
+
+compactor:
+  working_directory: /loki/compactor
+  compaction_interval: 10m
+  retention_enabled: true
+  retention_delete_delay: 2h
+  retention_delete_worker_count: 150
+  delete_request_store: s3
+
+ingester:
+  chunk_idle_period: 30m
+  chunk_block_size: 262144
+  chunk_retain_period: 1m
+  max_chunk_age: 2h
+  wal:
+    enabled: true
+    dir: /loki/wal
+
+query_range:
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+        max_size_mb: 100
+
+frontend:
+  max_outstanding_per_tenant: 2048
+
+querier:
+  max_concurrent: 20
+
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /loki/rules
+  rule_path: /loki/rules-temp
+  alertmanager_url: http://alertmanager:9093
+  ring:
+    kvstore:
+      store: inmemory
+  enable_api: true

@@ -1,0 +1,112 @@
+{
+  "__inputs": [],
+  "__requires": [
+    {"type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0"},
+    {"type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0"},
+    {"type": "datasource", "id": "loki", "name": "Loki", "version": "1.0.0"}
+  ],
+  "annotations": {"list": []},
+  "description": "BLIPS Periode Buku close workflow — soft close, hard close, jurnal posting, MV refresh",
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Open Periods",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [{"expr": "blips_periode_status{status=\"open\"}", "legendFormat": "", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Soft-Closed Periods",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [{"expr": "blips_periode_status{status=\"soft_closed\"}", "legendFormat": "", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Pending Journal Postings",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [{"expr": "blips_jurnal_pending_posting_count", "legendFormat": "", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 100}, {"color": "red", "value": 500}]}}}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Last MV Refresh Age",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [{"expr": "time() - blips_mv_last_refresh_timestamp", "legendFormat": "", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 3600}, {"color": "red", "value": 7200}]}}}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Journal Posting Rate",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [
+        {
+          "expr": "rate(blips_jurnal_posted_total[5m])",
+          "legendFormat": "Posted/s",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(blips_jurnal_posting_failures_total[5m])",
+          "legendFormat": "Failures/s",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Period Close Event Timeline",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [
+        {
+          "expr": "increase(blips_periode_soft_close_total[24h])",
+          "legendFormat": "Soft Close Events",
+          "refId": "A"
+        },
+        {
+          "expr": "increase(blips_periode_hard_close_total[24h])",
+          "legendFormat": "Hard Close Events",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 7,
+      "type": "logs",
+      "title": "Periode Close Audit Log",
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 12},
+      "datasource": {"type": "loki", "uid": "blips-loki"},
+      "targets": [
+        {
+          "expr": "{service=\"blips-api\"} | json | action=~\"PERIODE.*\"",
+          "refId": "A"
+        }
+      ],
+      "options": {"dedupStrategy": "none", "enableLogDetails": true, "prettifyLogMessage": true, "showTime": true}
+    }
+  ],
+  "refresh": "60s",
+  "schemaVersion": 39,
+  "tags": ["blips", "periode", "close"],
+  "time": {"from": "now-7d", "to": "now"},
+  "timezone": "Asia/Jakarta",
+  "title": "BLIPS Periode Close",
+  "uid": "blips-periode-close",
+  "version": 1
+}

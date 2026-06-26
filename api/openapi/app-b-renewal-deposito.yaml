@@ -1,0 +1,1022 @@
+openapi: "3.0.3"
+info:
+  title: BLIPS IFRS9 — APP-B Renewal Deposito (P5-M7)
+  version: "1.0.0"
+  description: |
+    Modul APP-B — Renewal Deposito (Phase 5, Module 7).
+
+    Cakupan:
+      - Create renewal request + preview kalkulasi (S1)
+      - List renewal dengan sort/filter/export (S1)
+      - Detail single renewal (S1)
+      - Approve renewal — ROLE-APPR-TR, SoD 4-eyes (S2)
+      - Reject renewal — ROLE-APPR-TR, comment ≥ 30 char (S2)
+      - Preview recompute — read-only (S1, S4)
+
+    AC coverage:
+      S1-AC1 (create POKOK_PLUS_BUNGA), S1-AC2 (tenor out of range),
+      S1-AC3 (rate out of range), S1-AC4 (instrumen not eligible),
+      S2-AC1 (approve → POSTED all side-effects in-tx), S2-AC2 (bunga_bersih too small),
+      S2-AC3 (SoD violation), S2-AC4 (idempotency replay),
+      S3-AC1..AC4 (instrumen baru inherit + matured lama + rollback),
+      S4-AC1..AC4 (EIR Newton-Raphson + schedule version + PPh cashflow + no-convergence),
+      S5-AC1..AC4 (jurnal 4-leg + POKOK_SAJA + PERIODE_CLOSED + missing event code)
+
+    State machine trx.renewal.status:
+      DRAFT (Maker menyimpan tapi belum submit)
+        → [implicitly on create] → PENDING_APPROVAL
+        → [approve, ROLE-APPR-TR, SoD] → APPROVED → POSTED (atomic side-effects in-tx)
+        → [reject, ROLE-APPR-TR, comment ≥ 30 char] → REJECTED
+
+    EIR re-computation (DEC-013 LOCKED):
+      Newton-Raphson IRR, tolerance 1e-10, max 100 iter, presisi 8 desimal.
+      Cashflow kupon = pokok_baru × (rate_baru/100/12) × (1 − 0.20) [after PPh 20%].
+      Fail: EIR_NO_CONVERGENCE → rollback seluruh transaksi.
+
+    PPh 20% deposito (PP No. 131/2000):
+      PPh_20pct = bunga_kotor × 0.20
+      bunga_bersih = bunga_kotor − PPh_20pct
+
+    Skema:
+      POKOK_SAJA: pokok_baru = pokok_lama; bunga_bersih dikembalikan ke kas
+      POKOK_PLUS_BUNGA: pokok_baru = pokok_lama + bunga_bersih
+
+    Jurnal multi-leg RENEWAL_DEPOSITO (P5-M2 event code):
+      Leg 1: Dr Kewajiban PPh Deposito  Cr Kas/Bank        = PPh_20pct
+      Leg 2: Dr Deposito (lama)         Cr Kas/Bank        = pokok_lama
+      Leg 3: Dr Kas/Bank               Cr Deposito (baru) = pokok_baru
+      Leg 4: Dr Beban Bunga Deposito   Cr Kas/Bank        = bunga_bersih
+
+    Approve side-effects (in single DB tx):
+      INSERT mst.instrumen baru (inherit klasifikasi, SPPI, BM)
+      UPDATE mst.instrumen lama status='MATURED'
+      INSERT ecl.amortisasi_schedule (schedule_version = 1 for new instrumen, effective_from = tanggal_efektif)
+      UPDATE ecl.amortisasi_schedule lama effective_to = tanggal_efektif
+      POST P5-M2 jurnal RENEWAL_DEPOSITO
+      UPDATE trx.renewal status='POSTED'
+
+    Periode lock: PERIODE_CLOSED if mst.periode_buku.status_periode != 'OPEN' at post time.
+    Partial unique: 1 active renewal per instrumen_lama (status IN PENDING_APPROVAL, APPROVED, POSTED).
+
+    Dependensi:
+      - P5-M1 (mst.instrumen ACTIVE, klasifikasi locked, SPPI+BM final)
+      - P5-M2 (jurnal engine, event code RENEWAL_DEPOSITO)
+      - P5-M4 (periode buku OPEN check)
+      - Migration 000043 (trx.renewal)
+
+    Error codes baru (ditambahkan ke _common.yaml):
+      RENEWAL_INSTRUMEN_NOT_ELIGIBLE  422 — instrumen bukan deposito ACTIVE
+      RENEWAL_SKEMA_INVALID           400 — skema bukan POKOK_SAJA / POKOK_PLUS_BUNGA
+      RENEWAL_TENOR_OUT_OF_RANGE      400 — tenor_baru_bulan < 1 atau > 60
+      RENEWAL_RATE_OUT_OF_RANGE       400 — rate_baru_persen < 0 atau > 30
+      RENEWAL_BUNGA_BERSIH_TOO_SMALL  422 — POKOK_PLUS_BUNGA dan bunga_bersih < IDR 100.000
+      RENEWAL_PPH_CALC_MISMATCH       422 — client PPh ≠ server-computed PPh
+
+    Performance SLA:
+      POST /trx/renewal:              ≤ 500 ms (compute + insert)
+      GET  /trx/renewal (list):       ≤ 200 ms (cursor paginated)
+      GET  /trx/renewal/{id}:         ≤ 100 ms
+      POST /trx/renewal/{id}/approve: ≤ 1 s (multi-step in-tx: instrumen + EIR + jurnal + audit)
+      POST /trx/renewal/{id}/reject:  ≤ 300 ms
+      GET  /trx/renewal/{id}/preview: ≤ 200 ms
+
+    BLOCKING compliance gate: S4 (EIR + PPh) + S5 (jurnal) → ifrs9-compliance-reviewer.
+    BLOCKING security gate: S2 (SoD + audit) → security-engineer.
+
+servers:
+  - url: /api/v1
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: renewal-core
+    description: "Create, list, detail renewal request (ROLE-MAKER-TR)"
+  - name: renewal-workflow
+    description: "Approve / reject renewal (ROLE-APPR-TR, 4-eyes SoD)"
+  - name: renewal-preview
+    description: "Preview recompute — read-only (ROLE-MAKER-TR, ROLE-APPR-TR)"
+
+paths:
+
+  # ==========================================================================
+  # POST /trx/renewal — Create renewal request (S1)
+  # ==========================================================================
+
+  /trx/renewal:
+    post:
+      operationId: renewalCreate
+      summary: Create renewal deposito request + preview kalkulasi — ROLE-MAKER-TR
+      description: |
+        AC: S1-AC1, S1-AC2, S1-AC3, S1-AC4
+
+        ROLE-MAKER-TR memilih instrumen deposito ACTIVE mendekati jatuh tempo,
+        mengisi parameter renewal. Server compute preview: bunga_kotor, PPh_20pct,
+        bunga_bersih, pokok_baru, EIR_baru (Newton-Raphson 8 desimal). Status langsung
+        PENDING_APPROVAL (tidak ada DRAFT submit step terpisah).
+
+        Validasi:
+          instrumen_id: mst.instrumen ACTIVE, jenis=DEPOSITO, klasifikasi_locked=TRUE
+          Tidak ada renewal aktif (PENDING_APPROVAL / APPROVED / POSTED) untuk instrumen ini
+          skema: enum POKOK_SAJA | POKOK_PLUS_BUNGA
+          tenor_baru_bulan: 1-60 (inklusif)
+          rate_baru_persen: 0.0-30.0 (inklusif)
+          tanggal_efektif_baru: date format YYYY-MM-DD, periode_buku OPEN
+          bunga_bersih ≥ IDR 100.000 jika POKOK_PLUS_BUNGA (S2-AC2 — server re-check di approve)
+
+        On success:
+          INSERT trx.renewal (status=PENDING_APPROVAL)
+          INSERT aud.audit_log action=RENEWAL.CREATED in-tx
+
+        Permission: transaksi.create
+        Roles: ROLE-MAKER-TR
+        MFA: tidak wajib
+        Idempotency-Key: WAJIB (UUID v4)
+        Rate limit: 60 req/min per user
+      tags: [renewal-core]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "UUID v4 unik per request. DEC-021."
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRenewalBody"
+            example:
+              instrumenId: "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+              skema: "POKOK_PLUS_BUNGA"
+              tenorBaruBulan: 12
+              rateBaruPersen: 5.75
+              tanggalEfektifBaru: "2026-07-01"
+      responses:
+        "201":
+          description: Renewal berhasil dibuat, status PENDING_APPROVAL
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/CreateRenewalResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  renewalId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  status: "PENDING_APPROVAL"
+                  preview:
+                    pokokLama: "1000000000.0000"
+                    bungaKotor: "14246575.3425"
+                    pph20pct: "2849315.0685"
+                    bungaBersih: "11397260.2740"
+                    pokokBaru: "1011397260.2740"
+                    eirBaru: "0.04600000"
+                    tanggalJatuhTempoBaru: "2027-07-01"
+                  nextStep: "Menunggu approval ROLE-APPR-TR. SoD: approver tidak boleh sama dengan maker."
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: Validasi gagal (tenor / rate / skema / tanggal)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                tenor_out_of_range:
+                  summary: S1-AC2 — tenor di luar range
+                  value:
+                    error:
+                      code: RENEWAL_TENOR_OUT_OF_RANGE
+                      message: "tenor_baru_bulan harus antara 1 dan 60. Nilai: 72."
+                      details:
+                        - field: "tenorBaruBulan"
+                          rule: "range:1,60"
+                          message: "Tenor 72 bulan di luar range 1-60."
+                      traceId: "01HXY..."
+                rate_out_of_range:
+                  summary: S1-AC3 — rate di luar range
+                  value:
+                    error:
+                      code: RENEWAL_RATE_OUT_OF_RANGE
+                      message: "rate_baru_persen harus antara 0% dan 30%. Nilai: 35.00%."
+                      details:
+                        - field: "rateBaruPersen"
+                          rule: "range:0,30"
+                          message: "Rate 35.00% di luar range 0-30%."
+                      traceId: "01HXY..."
+                skema_invalid:
+                  summary: Skema tidak valid
+                  value:
+                    error:
+                      code: RENEWAL_SKEMA_INVALID
+                      message: "skema tidak valid. Nilai yang diterima: POKOK_SAJA, POKOK_PLUS_BUNGA."
+                      details:
+                        - field: "skema"
+                          rule: "enum"
+                          message: "Nilai 'ROLLOVER' tidak dikenal."
+                      traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "422":
+          description: Instrumen tidak eligible atau bunga_bersih terlalu kecil
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                instrumen_not_eligible:
+                  summary: S1-AC4 — instrumen bukan deposito ACTIVE
+                  value:
+                    error:
+                      code: RENEWAL_INSTRUMEN_NOT_ELIGIBLE
+                      message: "OBL-0099 bukan instrumen deposito atau tidak berstatus ACTIVE. Renewal hanya untuk deposito ACTIVE."
+                      details:
+                        - field: "instrumenId"
+                          rule: "deposito_active"
+                          message: "jenis_instrumen=OBLIGASI. Renewal hanya untuk jenis_instrumen=DEPOSITO."
+                      traceId: "01HXY..."
+                bunga_bersih_too_small:
+                  summary: POKOK_PLUS_BUNGA dengan bunga terlalu kecil
+                  value:
+                    error:
+                      code: RENEWAL_BUNGA_BERSIH_TOO_SMALL
+                      message: "bunga_bersih IDR 85000 lebih kecil dari minimum IDR 100000 untuk skema POKOK_PLUS_BUNGA."
+                      details:
+                        - field: "skema"
+                          rule: "min_bunga_bersih"
+                          message: "Gunakan skema POKOK_SAJA atau pilih instrumen dengan bunga lebih besar."
+                      traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+    get:
+      operationId: renewalGetList
+      summary: List renewal deposito dengan sort, filter, cursor pagination, export
+      description: |
+        Cursor-paginated list trx.renewal. Default sort: created_at DESC.
+
+        Allowed sort: created_at, tanggal_efektif_baru, status, instrumen_kode, skema.
+        Filter:
+          filter[instrumen_id]       — UUID
+          filter[status]             — enum multi-value
+          filter[skema]              — POKOK_SAJA | POKOK_PLUS_BUNGA
+          filter[tanggal_efektif]    — date range
+          filter[maker_id]           — UUID
+          filter[periode_bulanan_id] — UUID
+        Export: CSV/XLSX. Dataset > 10k → 202 + async job.
+        Audit: RENEWAL.EXPORT in-transaction per export call.
+
+        Permission: transaksi.read
+        Roles: ROLE-MAKER-TR, ROLE-APPR-TR, ROLE-RISK, ROLE-AKUN, ROLE-AUDIT
+        Rate limit: 60 req/min (read); 10 req/min (export)
+      tags: [renewal-core]
+      parameters:
+        - $ref: "./_common.yaml#/components/parameters/cursor"
+        - $ref: "./_common.yaml#/components/parameters/limit"
+        - $ref: "./_common.yaml#/components/parameters/sortParam"
+        - $ref: "./_common.yaml#/components/parameters/searchParam"
+        - name: "filter[instrumen_id]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: "filter[status]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [PENDING_APPROVAL, APPROVED, POSTED, REJECTED]
+        - name: "filter[skema]"
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [POKOK_SAJA, POKOK_PLUS_BUNGA]
+        - name: "filter[tanggal_efektif]"
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Date range: between:2026-07-01,2026-12-31"
+        - name: "filter[maker_id]"
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: export
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [csv, xlsx]
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List renewal dengan pagination
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RenewalListItem"
+                  pagination:
+                    $ref: "./_common.yaml#/components/schemas/PaginationResponse"
+                  appliedSort:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        col: { type: string }
+                        dir: { type: string, enum: [asc, desc] }
+                  appliedFilter:
+                    type: object
+                    additionalProperties: true
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "202":
+          description: Export async — dataset > 10k row
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      jobId: { type: string }
+                      statusUrl: { type: string }
+                      streamUrl: { type: string }
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ==========================================================================
+  # GET /trx/renewal/{id} — Detail
+  # ==========================================================================
+
+  /trx/renewal/{id}:
+    get:
+      operationId: renewalGetDetail
+      summary: Detail single renewal deposito + preview kalkulasi
+      tags: [renewal-core]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Detail renewal
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/RenewalDetail"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ==========================================================================
+  # POST /trx/renewal/{id}/approve — Approve (ROLE-APPR-TR, SoD)
+  # ==========================================================================
+
+  /trx/renewal/{id}/approve:
+    post:
+      operationId: renewalApprove
+      summary: Approve renewal — ROLE-APPR-TR; SoD approver ≠ maker; in-tx side-effects
+      description: |
+        AC: S2-AC1, S2-AC2, S2-AC3, S2-AC4, S3-AC1..AC4, S4-AC1..AC4, S5-AC1..AC4
+
+        Pre-conditions:
+          - trx.renewal.status = PENDING_APPROVAL
+          - approver_id ≠ maker_id (SoD DEC-017)
+          - signatureMethod = JWT_STEP_UP (wajib)
+          - mst.periode_buku.status_periode = OPEN
+
+        Semua side-effect dalam satu DB transaksi:
+          1. Server re-verify kalkulasi (bunga_kotor, PPh_20pct, bunga_bersih, EIR)
+          2. UPDATE trx.renewal status=APPROVED + approver fields
+          3. INSERT mst.instrumen baru (inherit klasifikasi, SPPI, BM dari instrumen lama)
+          4. UPDATE mst.instrumen lama status=MATURED
+          5. INSERT ecl.amortisasi_schedule baru (schedule_version = 1 for new instrumen,
+             effective_from = tanggal_efektif_baru, effective_to = 'infinity')
+             UPDATE ecl.amortisasi_schedule lama effective_to = tanggal_efektif_baru
+          6. POST P5-M2 jurnal RENEWAL_DEPOSITO (4 legs)
+          7. UPDATE trx.renewal status=POSTED, instrumen_baru_id, jurnal_header_id
+          8. INSERT aud.audit_log: RENEWAL.APPROVED + RENEWAL.POSTED + INSTRUMEN.CREATED +
+             INSTRUMEN.MATURED + EIR.RECOMPUTED (in-tx)
+        Rollback seluruh transaksi jika langkah mana pun gagal.
+
+        Permission: transaksi.approve
+        Roles: ROLE-APPR-TR
+        MFA: wajib jika Treasury Manager (DEC-026)
+        Idempotency-Key: WAJIB
+        Rate limit: 10 req/min per user (sensitif)
+      tags: [renewal-workflow]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "UUID dari trx.renewal dalam status PENDING_APPROVAL."
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: "UUID v4 unik per request. DEC-021."
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApproveRenewalBody"
+            example:
+              comment: "Preview diverifikasi. Rate 5.75% sesuai BI Rate + spread 1.75%. Disetujui."
+              signatureMethod: "JWT_STEP_UP"
+      responses:
+        "200":
+          description: Approve berhasil — status POSTED, semua side-effect in-tx
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/ApproveRenewalResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  renewalId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  status: "POSTED"
+                  instrumenBaruId: "c3d4e5f6-a7b8-9012-cdef-123456789012"
+                  jurnalEntryId: "d4e5f6a7-b8c9-0123-def0-234567890123"
+                  approvedBy: "e5f6a7b8-c9d0-1234-ef01-345678901234"
+                  approvedAt: "2026-06-19T09:15:00+07:00"
+                  message: "Renewal DEP-0042 disetujui dan diposting. Instrumen baru DEP-0042B dibuat."
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: Validasi body gagal (comment kosong)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          description: SoD violation atau permission tidak terpenuhi
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                sod_violation:
+                  summary: S2-AC3 — Maker mencoba approve sendiri
+                  value:
+                    error:
+                      code: SOD_VIOLATION
+                      message: "maker tidak dapat menjadi approver untuk renewal yang sama (DEC-017)."
+                      details:
+                        - field: "actor.userId"
+                          rule: "sod_approver_ne_maker"
+                          message: "approver_id == maker_id."
+                      traceId: "01HXY..."
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          description: Status tidak valid, PPh mismatch, atau bunga_bersih terlalu kecil
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              examples:
+                workflow_invalid:
+                  value:
+                    error:
+                      code: WORKFLOW_INVALID_TRANSITION
+                      message: "Approve hanya valid dari status PENDING_APPROVAL. Status saat ini: POSTED."
+                      details: []
+                      traceId: "01HXY..."
+                pph_mismatch:
+                  summary: S4-AC3 — PPh mismatch
+                  value:
+                    error:
+                      code: RENEWAL_PPH_CALC_MISMATCH
+                      message: "PPh 20% tidak sesuai: client=3000000, server=2849315.0685. Gunakan nilai server-computed."
+                      details: []
+                      traceId: "01HXY..."
+                bunga_bersih_too_small:
+                  summary: S2-AC2
+                  value:
+                    error:
+                      code: RENEWAL_BUNGA_BERSIH_TOO_SMALL
+                      message: "bunga_bersih IDR 85000 lebih kecil dari minimum IDR 100000 untuk skema POKOK_PLUS_BUNGA."
+                      details: []
+                      traceId: "01HXY..."
+        "423":
+          description: Periode buku CLOSED
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: PERIODE_CLOSED
+                  message: "Periode PRD-2026-07 sudah hard-closed. Renewal tidak dapat diposting."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ==========================================================================
+  # POST /trx/renewal/{id}/reject — Reject (ROLE-APPR-TR)
+  # ==========================================================================
+
+  /trx/renewal/{id}/reject:
+    post:
+      operationId: renewalReject
+      summary: Reject renewal — ROLE-APPR-TR; comment ≥ 30 char; SoD enforced
+      description: |
+        Pre-conditions:
+          - trx.renewal.status = PENDING_APPROVAL
+          - approver_id ≠ maker_id (SoD)
+          - comment ≥ 30 karakter
+          - signatureMethod = JWT_STEP_UP
+
+        On success (in-tx):
+          UPDATE trx.renewal status=REJECTED
+          INSERT aud.audit_log action=RENEWAL.REJECTED
+
+        Notifikasi ke maker: "Renewal {instrumen_kode} ditolak. Alasan: '{comment}'."
+
+        Permission: transaksi.approve
+        Roles: ROLE-APPR-TR
+        Idempotency-Key: WAJIB
+        Rate limit: 10 req/min per user (sensitif)
+      tags: [renewal-workflow]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RejectRenewalBody"
+            example:
+              comment: "Rate 5.75% melebihi benchmark internal 5.50%. Harap revisi rate atau lampirkan persetujuan ALCO."
+              signatureMethod: "JWT_STEP_UP"
+      responses:
+        "200":
+          description: Reject berhasil — status REJECTED
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/RejectRenewalResponse"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+              example:
+                data:
+                  renewalId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  status: "REJECTED"
+                  rejectedBy: "e5f6a7b8-c9d0-1234-ef01-345678901234"
+                  rejectedAt: "2026-06-19T09:20:00+07:00"
+                  comment: "Rate 5.75% melebihi benchmark internal 5.50%. Harap revisi rate atau lampirkan persetujuan ALCO."
+                meta:
+                  traceId: "01HXY..."
+        "400":
+          description: comment terlalu pendek (< 30 char)
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: VALIDATION_FAILED
+                  message: "comment wajib minimal 30 karakter untuk reject renewal."
+                  details:
+                    - field: "comment"
+                      rule: "min_length:30"
+                      message: "comment hanya 12 karakter."
+                  traceId: "01HXY..."
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "422":
+          description: Status tidak valid untuk reject
+          content:
+            application/json:
+              schema:
+                $ref: "./_common.yaml#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: WORKFLOW_INVALID_TRANSITION
+                  message: "Reject hanya valid dari status PENDING_APPROVAL. Status saat ini: POSTED."
+                  details: []
+                  traceId: "01HXY..."
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+  # ==========================================================================
+  # GET /trx/renewal/{id}/preview — Preview recompute (read-only)
+  # ==========================================================================
+
+  /trx/renewal/{id}/preview:
+    get:
+      operationId: renewalGetPreview
+      summary: Preview recompute — server-side kalkulasi ulang, read-only (S4)
+      description: |
+        Server re-computes bunga_kotor, PPh_20pct, bunga_bersih, pokok_baru, EIR_baru
+        dari data yang tersimpan di trx.renewal. Tidak ada mutation.
+        Berguna untuk ROLE-APPR-TR memverifikasi sebelum approve.
+
+        Permission: transaksi.read
+        Roles: ROLE-MAKER-TR, ROLE-APPR-TR, ROLE-RISK, ROLE-AUDIT
+        Rate limit: 60 req/min per user
+      tags: [renewal-preview]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Preview kalkulasi terkini
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/RenewalPreview"
+                  meta:
+                    $ref: "./_common.yaml#/components/schemas/ResponseMeta"
+        "401":
+          $ref: "./_common.yaml#/components/responses/Unauthorized"
+        "403":
+          $ref: "./_common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./_common.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "./_common.yaml#/components/responses/RateLimited"
+        "500":
+          $ref: "./_common.yaml#/components/responses/InternalError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+
+    CreateRenewalBody:
+      type: object
+      required:
+        - instrumenId
+        - skema
+        - tenorBaruBulan
+        - rateBaruPersen
+        - tanggalEfektifBaru
+      properties:
+        instrumenId:
+          type: string
+          format: uuid
+          description: "UUID mst.instrumen. jenis=DEPOSITO, status=ACTIVE, klasifikasi_locked=TRUE."
+        skema:
+          type: string
+          enum: [POKOK_SAJA, POKOK_PLUS_BUNGA]
+          description: "POKOK_SAJA: pokok_baru = pokok_lama. POKOK_PLUS_BUNGA: pokok_baru = pokok_lama + bunga_bersih."
+        tenorBaruBulan:
+          type: integer
+          minimum: 1
+          maximum: 60
+          description: "Tenor baru dalam bulan (1-60 inklusif). S1-AC2."
+        rateBaruPersen:
+          type: number
+          format: decimal
+          minimum: 0
+          maximum: 30
+          description: "Rate p.a. dalam persen (0-30 inklusif). S1-AC3. DEC-016: NUMERIC(7,4)."
+        tanggalEfektifBaru:
+          type: string
+          format: date
+          description: "Tanggal efektif renewal. Harus dalam periode buku OPEN."
+
+    RenewalPreview:
+      type: object
+      required:
+        - pokokLama
+        - bungaKotor
+        - pph20pct
+        - bungaBersih
+        - pokokBaru
+        - eirBaru
+        - tanggalJatuhTempoBaru
+      properties:
+        pokokLama:
+          type: string
+          description: "NUMERIC(20,4) — pokok instrumen lama."
+        bungaKotor:
+          type: string
+          description: "pokok_lama × (rate_lama/100) × (hari_berjalan/365). NUMERIC(20,4)."
+        pph20pct:
+          type: string
+          description: "bunga_kotor × 0.20 (PP No. 131/2000). NUMERIC(20,4)."
+        bungaBersih:
+          type: string
+          description: "bunga_kotor − PPh_20pct. NUMERIC(20,4)."
+        pokokBaru:
+          type: string
+          description: "pokok_lama (POKOK_SAJA) atau pokok_lama + bunga_bersih (POKOK_PLUS_BUNGA). NUMERIC(20,4)."
+        eirBaru:
+          type: string
+          description: "EIR Newton-Raphson after-tax, presisi 8 desimal. NUMERIC(10,8)."
+        tanggalJatuhTempoBaru:
+          type: string
+          format: date
+          description: "tanggal_efektif_baru + tenor_baru_bulan."
+        scheduleBaruPreview:
+          type: array
+          items:
+            type: object
+            properties:
+              bulan:
+                type: integer
+              bungaKotorBulan:
+                type: string
+              pphBulan:
+                type: string
+              bungaBersihBulan:
+                type: string
+              saldoPokokAkhir:
+                type: string
+
+    CreateRenewalResponse:
+      type: object
+      required: [renewalId, status, preview]
+      properties:
+        renewalId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PENDING_APPROVAL]
+        preview:
+          $ref: "#/components/schemas/RenewalPreview"
+        nextStep:
+          type: string
+
+    ApproveRenewalBody:
+      type: object
+      required: [comment, signatureMethod]
+      properties:
+        comment:
+          type: string
+          description: "Komentar approve. Wajib ada (tidak ada min length untuk approve)."
+        signatureMethod:
+          type: string
+          enum: [JWT_STEP_UP]
+          description: "Wajib JWT_STEP_UP (DEC-027)."
+
+    RejectRenewalBody:
+      type: object
+      required: [comment, signatureMethod]
+      properties:
+        comment:
+          type: string
+          minLength: 30
+          description: "Alasan reject. Wajib ≥ 30 karakter."
+        signatureMethod:
+          type: string
+          enum: [JWT_STEP_UP]
+          description: "Wajib JWT_STEP_UP."
+
+    ApproveRenewalResponse:
+      type: object
+      required: [renewalId, status, approvedBy, approvedAt]
+      properties:
+        renewalId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [POSTED]
+        instrumenBaruId:
+          type: string
+          format: uuid
+          description: "UUID instrumen baru yang dibuat saat approve."
+        jurnalEntryId:
+          type: string
+          format: uuid
+          description: "UUID jurnal entry dari P5-M2."
+        approvedBy:
+          type: string
+          format: uuid
+        approvedAt:
+          type: string
+          format: date-time
+        message:
+          type: string
+
+    RejectRenewalResponse:
+      type: object
+      required: [renewalId, status, rejectedBy, rejectedAt, comment]
+      properties:
+        renewalId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [REJECTED]
+        rejectedBy:
+          type: string
+          format: uuid
+        rejectedAt:
+          type: string
+          format: date-time
+        comment:
+          type: string
+
+    RenewalListItem:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        instrumenLamaId:
+          type: string
+          format: uuid
+        instrumenLamaKode:
+          type: string
+        instrumenBaruId:
+          type: string
+          format: uuid
+          nullable: true
+        skema:
+          type: string
+          enum: [POKOK_SAJA, POKOK_PLUS_BUNGA]
+        tenorBaruBulan:
+          type: integer
+        rateBaruPersen:
+          type: string
+        tanggalEfektifBaru:
+          type: string
+          format: date
+        pokokLama:
+          type: string
+        pokokBaru:
+          type: string
+        bungaBersih:
+          type: string
+        status:
+          type: string
+          enum: [PENDING_APPROVAL, APPROVED, POSTED, REJECTED]
+        makerId:
+          type: string
+          format: uuid
+        approverId:
+          type: string
+          format: uuid
+          nullable: true
+        jurnalEntryId:
+          type: string
+          format: uuid
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    RenewalDetail:
+      allOf:
+        - $ref: "#/components/schemas/RenewalListItem"
+        - type: object
+          properties:
+            bungaKotor:
+              type: string
+            pph20pct:
+              type: string
+            eirBaru:
+              type: string
+            tanggalJatuhTempoBaru:
+              type: string
+              format: date
+            approveReason:
+              type: string
+              nullable: true
+            rejectReason:
+              type: string
+              nullable: true
+            signatureMethod:
+              type: string
+              nullable: true
+            periodeBulananId:
+              type: string
+              format: uuid
+              nullable: true
+            updatedAt:
+              type: string
+              format: date-time
+            rowVersion:
+              type: integer
+            preview:
+              $ref: "#/components/schemas/RenewalPreview"

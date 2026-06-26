@@ -463,8 +463,11 @@ func (h *Handler) ListAmendments(c *gin.Context) {
 	if !hasPermission(c, PermEIRPreview) {
 		return
 	}
-	actorID, role := actorFromContext(c)
-	isAdmin := role == "ROLE-IT-ADMIN" || role == "ROLE-AUDIT"
+	actorID, _ := actorFromContext(c)
+	// H-01 fix: use permission check instead of role string comparison (security-baseline.md).
+	// "audit_log.read" grants ROLE-AUDIT and ROLE-IT-ADMIN expanded visibility over all records.
+	cl := claimsFromGin(c)
+	isAdmin := cl != nil && cl.HasPermission("audit_log.read")
 
 	q, parseErr := listquery.ParseFromRequest(c.Request, AllowedColsAmendment)
 	if parseErr != nil {

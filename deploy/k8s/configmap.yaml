@@ -1,0 +1,43 @@
+---
+# BLIPS IFRS9 — Non-secret application configuration
+# Secrets (passwords, keys) via secret.example.yaml + kubectl create secret
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blips-config
+  namespace: blips
+  labels:
+    app.kubernetes.io/name: blips-ifrs9
+data:
+  # Application
+  BLIPS_TENANT_ID: "TUGURE"
+  ENV: "production"
+  LOG_LEVEL: "info"
+  LOG_FORMAT: "json"
+  SERVER_PORT: "8080"
+  ASYNQ_CONCURRENCY: "20"
+  ASYNQ_WORKER_ENABLED: "false"
+
+  # Database endpoints (non-secret host/port, credentials in Secret)
+  PG_HOST: "postgres"
+  PG_PORT: "5432"
+  PG_REPLICA_HOST: "postgres-replica"
+  PG_DB: "blips_db"
+  PG_USER: "blips_admin"
+
+  # Redis endpoint
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+
+  # MinIO endpoint
+  MINIO_ENDPOINT: "minio:9000"
+  MINIO_USE_SSL: "true"
+  MINIO_BUCKET_DOCS: "blips-docs"
+  MINIO_BUCKET_EXPORTS: "blips-exports"
+
+  # Keycloak / JWT
+  JWT_ISSUER: "https://auth.blips.tugu-re.com/realms/blips"
+
+  # CORS
+  BLIPS_WEB_ORIGIN: "https://blips.tugu-re.com"
+  NEXT_PUBLIC_API_URL: "https://api.blips.tugu-re.com"

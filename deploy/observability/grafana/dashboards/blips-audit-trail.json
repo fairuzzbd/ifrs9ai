@@ -1,0 +1,107 @@
+{
+  "__inputs": [],
+  "__requires": [
+    {"type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0"},
+    {"type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0"},
+    {"type": "datasource", "id": "loki", "name": "Loki", "version": "1.0.0"}
+  ],
+  "annotations": {"list": []},
+  "description": "BLIPS Audit trail — write health, hash chain integrity, SoD violations, MFA events",
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Audit Write Failures (1h)",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [{"expr": "increase(blips_audit_log_write_failures_total[1h])", "legendFormat": "", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Hash Chain Failures",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [{"expr": "blips_audit_hash_chain_verification_failures_total", "legendFormat": "", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "SoD Violations Blocked (24h)",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [{"expr": "increase(blips_sod_violation_rejected_total[24h])", "legendFormat": "", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}]}}}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "MFA Step-up Events (24h)",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [{"expr": "increase(blips_mfa_stepup_events_total[24h])", "legendFormat": "", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Audit Log Write Rate",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [
+        {
+          "expr": "rate(blips_audit_log_writes_total[5m])",
+          "legendFormat": "Writes/s",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(blips_audit_log_write_failures_total[5m])",
+          "legendFormat": "Failures/s",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Audit Events by Action Type",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [
+        {
+          "expr": "topk(10, rate(blips_audit_events_total[5m]) by (action))",
+          "legendFormat": "{{action}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "id": 7,
+      "type": "logs",
+      "title": "Security Events (SoD violations, MFA bypass, JWT failures)",
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 12},
+      "datasource": {"type": "loki", "uid": "blips-loki"},
+      "targets": [
+        {
+          "expr": "{service=\"blips-api\"} | json | level=\"warn\" or level=\"error\" | line_format \"{{.time}} [{{.level}}] {{.msg}} traceId={{.traceId}} userId={{.userId}}\"",
+          "refId": "A"
+        }
+      ],
+      "options": {"dedupStrategy": "none", "enableLogDetails": true, "prettifyLogMessage": true, "showTime": true, "showLabels": true}
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["blips", "audit", "security", "compliance"],
+  "time": {"from": "now-24h", "to": "now"},
+  "timezone": "Asia/Jakarta",
+  "title": "BLIPS Audit Trail",
+  "uid": "blips-audit-trail",
+  "version": 1
+}

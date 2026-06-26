@@ -1,0 +1,122 @@
+{
+  "__inputs": [],
+  "__requires": [
+    {"type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0"},
+    {"type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0"},
+    {"type": "datasource", "id": "loki", "name": "Loki", "version": "1.0.0"}
+  ],
+  "annotations": {"list": []},
+  "description": "BLIPS ECL Engine — calc run status, staging transitions, EIR re-estimation",
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "ECL Calc Runs Today",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [{"expr": "increase(blips_ecl_calc_run_total[24h])", "legendFormat": "", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Currently Running Calc Runs",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [{"expr": "blips_ecl_calc_run_active_count", "legendFormat": "", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 2}]}}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Instruments in Stage 3 (credit impaired)",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [{"expr": "blips_ecl_instruments_by_stage{stage=\"3\"}", "legendFormat": "", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 5}, {"color": "red", "value": 20}]}}}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "SICR Transitions (24h)",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [{"expr": "increase(blips_ecl_sicr_transitions_total[24h])", "legendFormat": "", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "ECL Calc Run Duration (last 30 runs)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [
+        {
+          "expr": "blips_ecl_calc_run_duration_seconds",
+          "legendFormat": "Duration {{calc_run_id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Instruments by Stage",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [
+        {
+          "expr": "blips_ecl_instruments_by_stage by (stage)",
+          "legendFormat": "Stage {{stage}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "EIR Re-estimation Queue",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "datasource": {"type": "prometheus", "uid": "blips-prometheus"},
+      "targets": [
+        {
+          "expr": "asynq_queue_size{queue=\"eir-estimation\"}",
+          "legendFormat": "EIR Queue",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(blips_eir_reestimation_completed_total[1h])",
+          "legendFormat": "Completed/h",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 8,
+      "type": "logs",
+      "title": "ECL Engine Logs (errors only)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "datasource": {"type": "loki", "uid": "blips-loki"},
+      "targets": [
+        {
+          "expr": "{service=\"blips-worker\"} |= \"ecl\" | json | level=\"error\"",
+          "refId": "A"
+        }
+      ],
+      "options": {"dedupStrategy": "none", "enableLogDetails": true, "prettifyLogMessage": true, "showTime": true}
+    }
+  ],
+  "refresh": "60s",
+  "schemaVersion": 39,
+  "tags": ["blips", "ecl", "compliance"],
+  "time": {"from": "now-6h", "to": "now"},
+  "timezone": "Asia/Jakarta",
+  "title": "BLIPS ECL Engine",
+  "uid": "blips-ecl-engine",
+  "version": 1
+}

@@ -1,0 +1,1 @@
+export { JurnalTabNav } from "./JurnalTabNav";

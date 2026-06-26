@@ -1,117 +1,194 @@
 # ---------------------------------------------------------------------------
-# BLIPS IFRS9 — UAT environment
+# BLIPS IFRS9 — UAT environment (P5-M18 finalized)
 #
-# Stack LOCKED (DEC-001..006): PostgreSQL 18, Redis 7, MinIO, Go backend,
-# Next.js frontend, Keycloak 26 (DEC-006 SSO Hub SAML 2.0/OIDC + LDAP federation).
-# On-premise / single-tenant (DEC-002/DEC-008/DEC-023).
+# Stack LOCKED (DEC-001..009):
+#   PostgreSQL 18 primary + read replica, Redis 7+, MinIO, Go backend,
+#   Asynq worker, Next.js frontend (standalone), Keycloak 26,
+#   Traefik 3 (TLS 1.3 termination), golang-migrate init container.
+#   On-premise / single-tenant TUGURE (DEC-008/DEC-023).
 #
 # SEKURITI:
-#   - Kredensial TIDAK di-hardcode di file ini — wajib di-set via .env.uat
-#     pada UAT host (lihat deploy/docker/.env.uat.example).
-#   - JANGAN commit file .env.uat yang berisi password sesungguhnya.
+#   - Kredensial TIDAK di-hardcode — wajib via .env.uat (gitignored).
+#     Contoh: deploy/docker/.env.uat.example
 #   - Secrets management lanjut: HashiCorp Vault Phase 2 (DEC-008).
+#   - TLS 1.3 minimum per DEC-029. Sertifikat via file mount.
 #
 # Jalankan dari root repo:
-#   docker compose -f deploy/docker/docker-compose.uat.yml --env-file deploy/docker/.env.uat up -d
+#   docker compose -f deploy/docker/docker-compose.uat.yml \
+#     --env-file deploy/docker/.env.uat up -d
 #
-# Port assignment UAT (offset +100 dari dev — boleh coexist di host yang sama):
-#   PostgreSQL     : 5532
-#   Redis          : 6479
-#   MinIO S3 API   : 9100
-#   MinIO Console  : 9101
-#   Keycloak HTTP  : 8181
-#   Backend API    : 8081   (port forwarded dari host 8181 → container 8081)
-#   Frontend       : 3101
+# Ports UAT (offset +100 dari dev):
+#   PostgreSQL primary : 5532
+#   PostgreSQL replica : 5533
+#   Redis              : 6479
+#   MinIO S3 API       : 9100
+#   MinIO Console      : 9101
+#   Keycloak HTTP      : 8181
+#   Backend API        : 8081 (→ container 8080)
+#   Worker             : tidak expose (internal only)
+#   Frontend           : 3101
+#   Traefik HTTP       : 80
+#   Traefik HTTPS      : 443
+#   Traefik Dashboard  : 8180 (restricted)
 #
-# Schema migration: dikelola sepenuhnya oleh binary cmd/migrator (golang-migrate).
-# Tidak ada mount initdb.d. Jalankan migrator sebelum up backend:
-#   docker compose -f deploy/docker/docker-compose.uat.yml run --rm migrator up
-#
-# Path build context & mount bersifat relatif terhadap folder file ini (deploy/docker/),
-# sehingga root repo direferensikan sebagai ../../
+# Schema migration dikelola oleh migrator init-container:
+#   docker compose -f ... run --rm migrator up
 # ---------------------------------------------------------------------------
 
 name: blips-ifrs9-uat
 
 services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 18 — primary
+  # ---------------------------------------------------------------------------
   postgres:
-    image: postgres:18
+    image: postgres:18.0
     container_name: blips-uat-postgres
     restart: always
     environment:
       POSTGRES_DB: blips_db
       POSTGRES_USER: blips_admin
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      # Aktifkan WAL streaming untuk replica
+      POSTGRES_INITDB_ARGS: "--wal-segsize=64"
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=replica"
+      - "-c"
+      - "max_wal_senders=5"
+      - "-c"
+      - "wal_keep_size=512"
+      - "-c"
+      - "hot_standby=on"
+      - "-c"
+      - "log_statement=ddl"
+      - "-c"
+      - "log_min_duration_statement=1000"
+      - "-c"
+      - "shared_preload_libraries=pg_stat_statements"
     ports:
       - "5532:5432"
     volumes:
       - pgdata:/var/lib/postgresql
+      - ../../db/postgres/pg_hba.uat.conf:/etc/postgresql/pg_hba.conf:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U blips_admin -d blips_db"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 30s
+    mem_limit: 4g
+    cpus: "4"
+    networks:
+      - blips-internal
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 18 — read replica (streaming replication dari primary)
+  # ---------------------------------------------------------------------------
+  postgres-replica:
+    image: postgres:18.0
+    container_name: blips-uat-postgres-replica
+    restart: always
+    environment:
+      POSTGRES_USER: blips_admin
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      PGPASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_PRIMARY_HOST: postgres
+      POSTGRES_PRIMARY_PORT: "5432"
+    command: >
+      bash -c "
+        if [ ! -f /var/lib/postgresql/PG_VERSION ]; then
+          pg_basebackup -h postgres -U blips_admin -D /var/lib/postgresql -P -R --wal-method=stream
+        fi
+        postgres -c hot_standby=on -c wal_level=replica
+      "
+    ports:
+      - "5533:5432"
+    volumes:
+      - pgdata-replica:/var/lib/postgresql
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blips_admin"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
     mem_limit: 2g
     cpus: "2"
     networks:
-      - blips
+      - blips-internal
 
+  # ---------------------------------------------------------------------------
+  # Redis 7+ — Asynq job queue + cache
+  # ---------------------------------------------------------------------------
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
     container_name: blips-uat-redis
     restart: always
-    command: ["redis-server", "--appendonly", "yes"]
+    command:
+      - "redis-server"
+      - "--appendonly"
+      - "yes"
+      - "--requirepass"
+      - "${REDIS_PASSWORD}"
+      - "--maxmemory"
+      - "512mb"
+      - "--maxmemory-policy"
+      - "noeviction"
+      - "--loglevel"
+      - "warning"
     ports:
       - "6479:6379"
     volumes:
       - redisdata:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
-    mem_limit: 512m
-    cpus: "0.5"
+    mem_limit: 768m
+    cpus: "1"
     networks:
-      - blips
+      - blips-internal
 
+  # ---------------------------------------------------------------------------
+  # MinIO — single-node UAT (multi-node 4+ di prod via K8s StatefulSet)
+  # ---------------------------------------------------------------------------
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-01-20T14-49-07Z
     container_name: blips-uat-minio
     restart: always
     command: server /data --console-address ":9101"
     environment:
       MINIO_ROOT_USER: "${MINIO_ROOT_USER}"
       MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD}"
+      MINIO_SITE_NAME: "blips-uat"
+      MINIO_BROWSER_REDIRECT_URL: "https://${UAT_DOMAIN:-uat.blips.tugu-re.local}/minio"
     ports:
-      - "9100:9000"   # S3 API
-      - "9101:9101"   # Console
+      - "9100:9000"
+      - "9101:9101"
     volumes:
       - miniodata:/data
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 10s
+      test: ["CMD-SHELL", "curl -fs http://localhost:9000/minio/health/live || exit 1"]
+      interval: 15s
       timeout: 5s
       retries: 5
       start_period: 20s
-    mem_limit: 512m
-    cpus: "0.5"
+    mem_limit: 1g
+    cpus: "1"
     networks:
-      - blips
+      - blips-internal
 
   # ---------------------------------------------------------------------------
-  # Keycloak — DEC-006 SSO Hub (OIDC/SAML 2.0 + LDAP federation)
-  #
-  # UAT: masih start-dev (embedded H2) tapi dengan KC_PROXY=edge karena
-  # di UAT Keycloak berada di belakang Traefik (reverse proxy).
-  # KC_HOSTNAME_STRICT=false agar realm works dengan forward host header.
-  # KC_LOG_LEVEL=warn untuk mengurangi noise di log aggregator (Loki).
-  #
-  # PENTING: KC_BOOTSTRAP_ADMIN_PASSWORD wajib via .env.uat — tidak ada default.
+  # Keycloak 26 — SSO Hub SAML 2.0/OIDC + LDAP federation (DEC-006)
+  # UAT: start-dev (H2 embedded) di belakang Traefik (KC_PROXY=edge).
   # ---------------------------------------------------------------------------
   keycloak:
-    image: quay.io/keycloak/keycloak:26
+    image: quay.io/keycloak/keycloak:26.0
     container_name: blips-uat-keycloak
     restart: always
     command: ["start-dev", "--import-realm"]
@@ -123,6 +200,7 @@ services:
       KC_HOSTNAME_STRICT_HTTPS: "false"
       KC_HTTP_ENABLED: "true"
       KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
       KC_LOG_LEVEL: "warn"
       KC_PROXY: "edge"
     ports:
@@ -131,55 +209,70 @@ services:
       - ../../deploy/keycloak/realm-blips-dev.json:/opt/keycloak/data/import/realm-blips-dev.json:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -fs http://localhost:8080/health/ready || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 60s
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
     mem_limit: 1g
     cpus: "1"
     networks:
-      - blips
+      - blips-internal
 
   # ---------------------------------------------------------------------------
-  # Migrator — satu-kali jalankan golang-migrate up sebelum backend start.
-  # Gunakan: docker compose -f ... run --rm migrator up
-  # Atau panggil dari entrypoint CI sebelum up layanan utama.
+  # Migrator — golang-migrate (satu-kali / CI gate sebelum backend start)
+  # Jalankan: docker compose -f ... run --rm migrator up
   # ---------------------------------------------------------------------------
   migrator:
-    build:
-      context: ../../backend
-      dockerfile: Dockerfile.migrator
+    image: migrate/migrate:v4.18.1
     container_name: blips-uat-migrator
     restart: "no"
-    environment:
-      DATABASE_URL: "postgres://blips_admin:${POSTGRES_PASSWORD}@postgres:5432/blips_db?sslmode=disable"
+    command:
+      - "-path=/migrations"
+      - "-database"
+      - "postgres://blips_admin:${POSTGRES_PASSWORD}@postgres:5432/blips_db?sslmode=disable"
+      - "up"
+    volumes:
+      - ../../db/migrations:/migrations:ro
     depends_on:
       postgres:
         condition: service_healthy
     networks:
-      - blips
+      - blips-internal
 
+  # ---------------------------------------------------------------------------
+  # Backend — Go / Gin API (DEC-001)
+  # Image pinned via BLIPS_BACKEND_IMAGE di .env.uat (wajib SHA tag, bukan :latest)
+  # ---------------------------------------------------------------------------
   backend:
-    build:
-      context: ../../backend
-      dockerfile: Dockerfile
+    image: "${BLIPS_BACKEND_IMAGE:-registry.tugu-re.local/blips/backend:uat-latest}"
     container_name: blips-uat-backend
     restart: always
     environment:
-      DATABASE_URL: "${DATABASE_URL:-postgres://blips_admin:${POSTGRES_PASSWORD}@postgres:5432/blips_db?sslmode=disable}"
-      REDIS_URL: "${REDIS_URL:-redis://redis:6379/0}"
-      MINIO_ENDPOINT: "${MINIO_ENDPOINT:-minio:9000}"
+      DATABASE_URL: "postgres://blips_admin:${POSTGRES_PASSWORD}@postgres:5432/blips_db?sslmode=disable"
+      DATABASE_REPLICA_URL: "postgres://blips_admin:${POSTGRES_PASSWORD}@postgres-replica:5432/blips_db?sslmode=disable"
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      MINIO_ENDPOINT: "minio:9000"
       MINIO_ACCESS_KEY: "${MINIO_ROOT_USER}"
       MINIO_SECRET_KEY: "${MINIO_ROOT_PASSWORD}"
-      MINIO_USE_SSL: "${MINIO_USE_SSL:-false}"
-      SERVER_PORT: "8081"
-      CORS_ALLOWED_ORIGINS: "${BLIPS_WEB_ORIGIN:-http://localhost:3101}"
+      MINIO_USE_SSL: "false"
+      MINIO_BUCKET_DOCS: "blips-docs"
+      MINIO_BUCKET_EXPORTS: "blips-exports"
+      SERVER_PORT: "8080"
+      CORS_ALLOWED_ORIGINS: "${BLIPS_WEB_ORIGIN:-https://${UAT_DOMAIN:-uat.blips.tugu-re.local}}"
       JWT_ISSUER: "${JWT_ISSUER:-http://keycloak:8080/realms/blips}"
       JWT_PUBLIC_KEY_PEM: "${BLIPS_JWT_PUBLIC_KEY_PEM}"
       LOG_LEVEL: "${BLIPS_LOG_LEVEL:-info}"
+      LOG_FORMAT: "json"
       TENANT_ID: "${BLIPS_TENANT_ID:-TUGURE}"
-    ports:
-      - "8081:8081"
+      ENV: "uat"
+      # Asynq worker disabled di API process — worker container yang handle
+      ASYNQ_WORKER_ENABLED: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     depends_on:
       postgres:
         condition: service_healthy
@@ -189,52 +282,144 @@ services:
         condition: service_healthy
       keycloak:
         condition: service_healthy
+    mem_limit: 2g
+    cpus: "2"
+    networks:
+      - blips-internal
+      - blips-public
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=blips-uat-public"
+      - "traefik.http.routers.blips-api.rule=Host(`${UAT_DOMAIN:-uat.blips.tugu-re.local}`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.blips-api.entrypoints=websecure"
+      - "traefik.http.routers.blips-api.tls=true"
+      - "traefik.http.services.blips-api.loadbalancer.server.port=8080"
+
+  # ---------------------------------------------------------------------------
+  # Worker — Asynq job processor (DEC-007)
+  # ---------------------------------------------------------------------------
+  worker:
+    image: "${BLIPS_WORKER_IMAGE:-registry.tugu-re.local/blips/worker:uat-latest}"
+    container_name: blips-uat-worker
+    restart: always
+    environment:
+      DATABASE_URL: "postgres://blips_admin:${POSTGRES_PASSWORD}@postgres:5432/blips_db?sslmode=disable"
+      DATABASE_REPLICA_URL: "postgres://blips_admin:${POSTGRES_PASSWORD}@postgres-replica:5432/blips_db?sslmode=disable"
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      MINIO_ENDPOINT: "minio:9000"
+      MINIO_ACCESS_KEY: "${MINIO_ROOT_USER}"
+      MINIO_SECRET_KEY: "${MINIO_ROOT_PASSWORD}"
+      MINIO_USE_SSL: "false"
+      MINIO_BUCKET_DOCS: "blips-docs"
+      MINIO_BUCKET_EXPORTS: "blips-exports"
+      LOG_LEVEL: "${BLIPS_LOG_LEVEL:-info}"
+      LOG_FORMAT: "json"
+      TENANT_ID: "${BLIPS_TENANT_ID:-TUGURE}"
+      ENV: "uat"
+      ASYNQ_CONCURRENCY: "10"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fs http://localhost:8081/healthz || exit 1"]
-      interval: 10s
+      test: ["CMD-SHELL", "curl -fs http://localhost:9090/healthz || exit 1"]
+      interval: 15s
       timeout: 5s
       retries: 5
       start_period: 30s
-    mem_limit: 1g
-    cpus: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    mem_limit: 2g
+    cpus: "2"
     networks:
-      - blips
+      - blips-internal
 
+  # ---------------------------------------------------------------------------
+  # Frontend — Next.js standalone (DEC-002)
+  # ---------------------------------------------------------------------------
   frontend:
-    build:
-      context: ../../frontend
-      dockerfile: Dockerfile
-      args:
-        NEXT_PUBLIC_API_URL: "${NEXT_PUBLIC_API_URL:-http://localhost:8081}"
+    image: "${BLIPS_FRONTEND_IMAGE:-registry.tugu-re.local/blips/frontend:uat-latest}"
     container_name: blips-uat-frontend
     restart: always
     environment:
-      NEXT_PUBLIC_API_URL: "${NEXT_PUBLIC_API_URL:-http://localhost:8081}"
-    ports:
-      - "3101:3001"
-    depends_on:
-      backend:
-        condition: service_healthy
+      NEXT_PUBLIC_API_URL: "${NEXT_PUBLIC_API_URL:-https://${UAT_DOMAIN:-uat.blips.tugu-re.local}}"
+      NODE_ENV: "production"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fs http://localhost:3001 || exit 1"]
+      test: ["CMD-SHELL", "curl -fs http://localhost:3000/api/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 30s
-    mem_limit: 512m
+    depends_on:
+      backend:
+        condition: service_healthy
+    mem_limit: 1g
+    cpus: "1"
+    networks:
+      - blips-internal
+      - blips-public
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=blips-uat-public"
+      - "traefik.http.routers.blips-web.rule=Host(`${UAT_DOMAIN:-uat.blips.tugu-re.local}`)"
+      - "traefik.http.routers.blips-web.entrypoints=websecure"
+      - "traefik.http.routers.blips-web.tls=true"
+      - "traefik.http.services.blips-web.loadbalancer.server.port=3000"
+
+  # ---------------------------------------------------------------------------
+  # Traefik 3 — ingress + TLS 1.3 termination (DEC-029)
+  # ---------------------------------------------------------------------------
+  traefik:
+    image: traefik:v3.2
+    container_name: blips-uat-traefik
+    restart: always
+    command:
+      - "--api.dashboard=true"
+      - "--api.insecure=false"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=blips-uat-public"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.websecure.http.tls.options=tls13only@file"
+      - "--providers.file.filename=/etc/traefik/tls.yml"
+      - "--log.level=WARN"
+      - "--accesslog=true"
+      - "--accesslog.format=json"
+      - "--metrics.prometheus=true"
+      - "--metrics.prometheus.addentrypointslabels=true"
+      - "--metrics.prometheus.addserviceslabels=true"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8180:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ../../deploy/traefik/tls.yml:/etc/traefik/tls.yml:ro
+      - ../../deploy/traefik/certs:/certs:ro
+    mem_limit: 256m
     cpus: "0.5"
     networks:
-      - blips
+      - blips-public
 
 volumes:
   pgdata:
     name: blips-uat-pgdata
+  pgdata-replica:
+    name: blips-uat-pgdata-replica
   redisdata:
     name: blips-uat-redisdata
   miniodata:
     name: blips-uat-miniodata
 
 networks:
-  blips:
-    name: blips-uat
+  blips-internal:
+    name: blips-uat-internal
+    driver: bridge
+    internal: true
+  blips-public:
+    name: blips-uat-public
     driver: bridge

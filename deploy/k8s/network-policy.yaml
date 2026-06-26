@@ -1,0 +1,188 @@
+---
+# Default deny all ingress + egress dalam namespace blips
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: blips
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Allow API → Postgres (primary + replica)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-to-postgres
+  namespace: blips
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: blips-api
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: blips-worker
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: keycloak
+      ports:
+        - port: 5432
+  policyTypes:
+    - Ingress
+---
+# Allow API + Worker → Redis
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-app-to-redis
+  namespace: blips
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: blips-api
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: blips-worker
+      ports:
+        - port: 6379
+  policyTypes:
+    - Ingress
+---
+# Allow API + Worker → MinIO
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-app-to-minio
+  namespace: blips
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: blips-api
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: blips-worker
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: loki
+      ports:
+        - port: 9000
+  policyTypes:
+    - Ingress
+---
+# Allow Traefik → API + Frontend + Keycloak
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-traefik-to-services
+  namespace: blips
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: api
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+      ports:
+        - port: 8080
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-traefik-to-frontend
+  namespace: blips
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: blips-frontend
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+      ports:
+        - port: 3000
+  policyTypes:
+    - Ingress
+---
+# Allow Prometheus → all scrape targets
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: blips
+spec:
+  podSelector: {}
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - port: 8080
+        - port: 9090
+        - port: 9121
+        - port: 9187
+        - port: 8082
+        - port: 3100
+  policyTypes:
+    - Ingress
+---
+# Allow DNS egress (kube-dns)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: blips
+spec:
+  podSelector: {}
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+  policyTypes:
+    - Egress
+---
+# Allow within-namespace communication for services
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace
+  namespace: blips
+spec:
+  podSelector: {}
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: blips
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: blips
+  policyTypes:
+    - Ingress
+    - Egress

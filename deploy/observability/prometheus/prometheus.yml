@@ -1,0 +1,153 @@
+# ---------------------------------------------------------------------------
+# Prometheus scrape config — BLIPS IFRS9 Production
+# Scrape interval: 15s. Retention: 90d (configurable via --storage.tsdb.retention.time)
+# ---------------------------------------------------------------------------
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+  external_labels:
+    env: production
+    cluster: blips-prod-jkt
+    tenant: tugure
+
+rule_files:
+  - /etc/prometheus/rules/blips-sla.rules.yml
+  - /etc/prometheus/rules/blips-audit.rules.yml
+  - /etc/prometheus/rules/blips-business.rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+scrape_configs:
+  # -------------------------------------------------------------------------
+  # BLIPS API (Go / Gin) — /metrics standard Prometheus format
+  # Golden signals: latency P50/P95/P99, error rate, RPS, saturation
+  # -------------------------------------------------------------------------
+  - job_name: blips-api
+    static_configs:
+      - targets: ['blips-api:8080']
+        labels:
+          service: blips-api
+          env: production
+    metrics_path: /metrics
+    scrape_interval: 15s
+
+  # -------------------------------------------------------------------------
+  # BLIPS Worker (Asynq) — port 9090
+  # Queue depth, processing rate, failure rate per queue
+  # -------------------------------------------------------------------------
+  - job_name: blips-worker
+    static_configs:
+      - targets: ['blips-worker:9090']
+        labels:
+          service: blips-worker
+          env: production
+    metrics_path: /metrics
+    scrape_interval: 15s
+
+  # -------------------------------------------------------------------------
+  # PostgreSQL exporter (sidecar di postgres pod)
+  # -------------------------------------------------------------------------
+  - job_name: postgres
+    static_configs:
+      - targets: ['postgres:9187']
+        labels:
+          service: postgres
+          role: primary
+          env: production
+    scrape_interval: 30s
+
+  - job_name: postgres-replica
+    static_configs:
+      - targets: ['postgres-replica:9187']
+        labels:
+          service: postgres
+          role: replica
+          env: production
+    scrape_interval: 30s
+
+  # -------------------------------------------------------------------------
+  # Redis exporter (sidecar di redis pod)
+  # -------------------------------------------------------------------------
+  - job_name: redis
+    static_configs:
+      - targets: ['redis:9121']
+        labels:
+          service: redis
+          env: production
+    scrape_interval: 15s
+
+  # -------------------------------------------------------------------------
+  # MinIO cluster metrics
+  # -------------------------------------------------------------------------
+  - job_name: minio
+    static_configs:
+      - targets: ['minio:9000']
+        labels:
+          service: minio
+          env: production
+    metrics_path: /minio/v2/metrics/cluster
+    scrape_interval: 30s
+
+  # -------------------------------------------------------------------------
+  # Traefik ingress metrics
+  # -------------------------------------------------------------------------
+  - job_name: traefik
+    static_configs:
+      - targets: ['traefik:8082']
+        labels:
+          service: traefik
+          env: production
+    metrics_path: /metrics
+    scrape_interval: 15s
+
+  # -------------------------------------------------------------------------
+  # Keycloak metrics
+  # -------------------------------------------------------------------------
+  - job_name: keycloak
+    static_configs:
+      - targets: ['keycloak:9000']
+        labels:
+          service: keycloak
+          env: production
+    metrics_path: /metrics
+    scrape_interval: 30s
+
+  # -------------------------------------------------------------------------
+  # Loki metrics
+  # -------------------------------------------------------------------------
+  - job_name: loki
+    static_configs:
+      - targets: ['loki:3100']
+        labels:
+          service: loki
+          env: production
+    metrics_path: /metrics
+    scrape_interval: 30s
+
+  # -------------------------------------------------------------------------
+  # Blackbox exporter — endpoint probing dari luar
+  # -------------------------------------------------------------------------
+  - job_name: blackbox-http
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - https://blips.tugu-re.com/api/health
+          - https://api.blips.tugu-re.com/healthz
+          - https://api.blips.tugu-re.com/readyz
+          - https://auth.blips.tugu-re.com/health/ready
+        labels:
+          env: production
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115

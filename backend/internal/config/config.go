@@ -58,6 +58,11 @@ type Config struct {
 
 	// JWTIssuer adalah expected issuer URL dari Keycloak.
 	JWTIssuer string
+
+	// SkipIdleTimeout menonaktifkan idle-window enforcement (DEC-025).
+	// Set true HANYA di test environment (via env SKIP_IDLE_TIMEOUT=true).
+	// Di production WAJIB false (default).
+	SkipIdleTimeout bool
 }
 
 // Load membaca konfigurasi dari environment.
@@ -97,6 +102,7 @@ func Load() *Config {
 		CORSAllowedOrigins:        getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3001"),
 		JWTPublicKeyPEM:           getenv("JWT_PUBLIC_KEY_PEM", ""),
 		JWTIssuer:                 getenv("JWT_ISSUER", "http://localhost:8080/realms/blips"),
+		SkipIdleTimeout:           getenv("SKIP_IDLE_TIMEOUT", "false") == "true",
 	}
 }
 

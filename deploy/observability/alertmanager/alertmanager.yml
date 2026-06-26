@@ -1,0 +1,147 @@
+# ---------------------------------------------------------------------------
+# Alertmanager config — BLIPS IFRS9
+# Routing: critical → PagerDuty + email IT-Admin; warning → Slack + email
+# Compliance alerts → dedicated email to security-engineer + IT-Admin
+# ---------------------------------------------------------------------------
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: "${SMTP_HOST:-smtp.tugu-re.com:587}"
+  smtp_from: "blips-alerts@tugu-re.com"
+  smtp_auth_username: "${SMTP_USER}"
+  smtp_auth_password: "${SMTP_PASSWORD}"
+  smtp_require_tls: true
+
+route:
+  group_by: ["alertname", "service", "env"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: default-email
+
+  routes:
+    # Compliance-critical alerts → immediate page + email + dedicated compliance channel
+    - matchers:
+        - compliance = "true"
+      receiver: compliance-critical
+      group_wait: 0s
+      repeat_interval: 1h
+      continue: true
+
+    # Security alerts → security-engineer email + IT-Admin
+    - matchers:
+        - security = "true"
+      receiver: security-alert
+      group_wait: 0s
+      repeat_interval: 2h
+      continue: true
+
+    # General critical → IT-Admin email + Slack #blips-alerts-critical
+    - matchers:
+        - severity = "critical"
+      receiver: critical-alert
+      group_wait: 30s
+      repeat_interval: 2h
+
+    # Warning → Slack #blips-alerts-warning + email
+    - matchers:
+        - severity = "warning"
+      receiver: warning-alert
+      group_wait: 2m
+      repeat_interval: 8h
+
+    # Info → Slack only (no email)
+    - matchers:
+        - severity = "info"
+      receiver: info-slack
+      group_wait: 5m
+      repeat_interval: 24h
+
+receivers:
+  - name: default-email
+    email_configs:
+      - to: "it-admin@tugu-re.com"
+        send_resolved: true
+        headers:
+          Subject: "[BLIPS] {{ .GroupLabels.alertname }} — {{ .Status | toUpper }}"
+        html: "{{ range .Alerts }}<b>Alert:</b> {{ .Annotations.summary }}<br><b>Description:</b> {{ .Annotations.description }}<br><b>Runbook:</b> {{ .Annotations.runbook }}<br>{{ end }}"
+
+  - name: compliance-critical
+    email_configs:
+      - to: "it-admin@tugu-re.com,security-engineer@tugu-re.com,cfo@tugu-re.com"
+        send_resolved: true
+        headers:
+          Subject: "[BLIPS COMPLIANCE] {{ .GroupLabels.alertname }} — IMMEDIATE ACTION REQUIRED"
+        html: |
+          <h2 style="color:red">COMPLIANCE CRITICAL ALERT</h2>
+          {{ range .Alerts }}
+          <p><b>Alert:</b> {{ .Annotations.summary }}</p>
+          <p><b>Description:</b> {{ .Annotations.description }}</p>
+          <p><b>Runbook:</b> {{ .Annotations.runbook }}</p>
+          <p><b>Time:</b> {{ .StartsAt }}</p>
+          {{ end }}
+    slack_configs:
+      - api_url: "${SLACK_WEBHOOK_URL:-https://hooks.slack.com/services/PLACEHOLDER}"
+        channel: "#blips-compliance-alerts"
+        send_resolved: true
+        title: "COMPLIANCE CRITICAL: {{ .GroupLabels.alertname }}"
+        text: "{{ range .Alerts }}{{ .Annotations.description }}\nRunbook: {{ .Annotations.runbook }}{{ end }}"
+        color: "danger"
+
+  - name: security-alert
+    email_configs:
+      - to: "security-engineer@tugu-re.com,it-admin@tugu-re.com"
+        send_resolved: true
+        headers:
+          Subject: "[BLIPS SECURITY] {{ .GroupLabels.alertname }}"
+    slack_configs:
+      - api_url: "${SLACK_WEBHOOK_URL:-https://hooks.slack.com/services/PLACEHOLDER}"
+        channel: "#blips-security-alerts"
+        send_resolved: true
+        title: "SECURITY: {{ .GroupLabels.alertname }}"
+        text: "{{ range .Alerts }}{{ .Annotations.description }}\nRunbook: {{ .Annotations.runbook }}{{ end }}"
+        color: "warning"
+
+  - name: critical-alert
+    email_configs:
+      - to: "it-admin@tugu-re.com"
+        send_resolved: true
+        headers:
+          Subject: "[BLIPS CRITICAL] {{ .GroupLabels.alertname }}"
+    slack_configs:
+      - api_url: "${SLACK_WEBHOOK_URL:-https://hooks.slack.com/services/PLACEHOLDER}"
+        channel: "#blips-alerts-critical"
+        send_resolved: true
+        title: "{{ .Status | toUpper }}: {{ .GroupLabels.alertname }}"
+        text: "{{ range .Alerts }}{{ .Annotations.summary }}\n{{ .Annotations.description }}\nRunbook: {{ .Annotations.runbook }}{{ end }}"
+        color: '{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}'
+
+  - name: warning-alert
+    email_configs:
+      - to: "it-admin@tugu-re.com"
+        send_resolved: false
+        headers:
+          Subject: "[BLIPS WARNING] {{ .GroupLabels.alertname }}"
+    slack_configs:
+      - api_url: "${SLACK_WEBHOOK_URL:-https://hooks.slack.com/services/PLACEHOLDER}"
+        channel: "#blips-alerts-warning"
+        send_resolved: true
+        title: "{{ .GroupLabels.alertname }}"
+        text: "{{ range .Alerts }}{{ .Annotations.summary }}\n{{ .Annotations.description }}{{ end }}"
+        color: "warning"
+
+  - name: info-slack
+    slack_configs:
+      - api_url: "${SLACK_WEBHOOK_URL:-https://hooks.slack.com/services/PLACEHOLDER}"
+        channel: "#blips-alerts-info"
+        send_resolved: true
+        title: "{{ .GroupLabels.alertname }}"
+        text: "{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}"
+        color: "#439FE0"
+
+inhibit_rules:
+  # Jika critical firing, suppress warning dari service yang sama
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "warning"
+    equal: [service]

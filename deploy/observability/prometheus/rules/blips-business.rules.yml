@@ -1,0 +1,137 @@
+---
+# BLIPS Business process alert rules
+# ECL calc, MTM pipeline, jurnal posting, periode close
+groups:
+  - name: blips-ecl-engine
+    interval: 60s
+    rules:
+      # ECL calc run running > 60 minutes → warning (normal ≤ 30 min)
+      - alert: BlipsECLCalcRunSlow
+        expr: |
+          (time() - blips_ecl_calc_run_start_timestamp{status="running"}) > 3600
+        for: 5m
+        labels:
+          severity: warning
+          service: blips-worker
+        annotations:
+          summary: "ECL calc run running > 60 minutes"
+          description: "Calc run {{ $labels.calc_run_id }} has been running for {{ $value | humanizeDuration }}. Expected ≤ 30 min."
+          runbook: "docs/runbooks/p5-observability.md#ecl-calc-slow"
+
+      # ECL calc run failed
+      - alert: BlipsECLCalcRunFailed
+        expr: |
+          increase(blips_ecl_calc_run_total{status="failed"}[30m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          service: blips-worker
+        annotations:
+          summary: "ECL calc run failed"
+          description: "{{ $value }} ECL calc run failure(s) in last 30 minutes. Check worker logs."
+          runbook: "docs/runbooks/p5-observability.md#ecl-calc-failed"
+
+      # EIR re-estimation backlog (jobs stuck > 2h)
+      - alert: BlipsEIREstimationBacklog
+        expr: |
+          asynq_queue_size{queue="eir-estimation"} > 100
+        for: 30m
+        labels:
+          severity: warning
+          service: blips-worker
+        annotations:
+          summary: "EIR estimation queue backlog > 100 jobs"
+          description: "Queue size: {{ $value }}. Backlog may delay period close."
+          runbook: "docs/runbooks/p5-observability.md#eir-backlog"
+
+  - name: blips-mtm-pipeline
+    interval: 60s
+    rules:
+      # MTM pricing data stale > 24h (IBPA feed may have failed)
+      - alert: BlipsMTMPricingStale
+        expr: |
+          (time() - blips_mtm_last_pricing_import_timestamp) > 86400
+        for: 10m
+        labels:
+          severity: warning
+          service: blips-worker
+        annotations:
+          summary: "MTM bond pricing data stale > 24 hours"
+          description: "Last IBPA import: {{ $value | humanizeDuration }} ago. Check IBPA SFTP feed."
+          runbook: "docs/runbooks/p5-observability.md#mtm-stale"
+
+      # MTM pricing import failed
+      - alert: BlipsMTMImportFailed
+        expr: |
+          increase(blips_mtm_import_failures_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          service: blips-worker
+        annotations:
+          summary: "MTM pricing import failure"
+          description: "{{ $value }} import failure(s) in last hour. Bond valuations may be stale."
+          runbook: "docs/runbooks/p5-observability.md#mtm-import-failed"
+
+  - name: blips-jurnal-posting
+    interval: 60s
+    rules:
+      # Journal posting backlog > 500 → warning
+      - alert: BlipsJurnalPostingBacklog
+        expr: |
+          blips_jurnal_pending_posting_count > 500
+        for: 15m
+        labels:
+          severity: warning
+          service: blips-api
+        annotations:
+          summary: "Journal posting backlog > 500 entries"
+          description: "Pending journal posts: {{ $value }}. Period close may be delayed."
+          runbook: "docs/runbooks/p5-observability.md#jurnal-backlog"
+
+      # Journal posting failure (any) → page
+      - alert: BlipsJurnalPostingFailure
+        expr: |
+          increase(blips_jurnal_posting_failures_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          service: blips-api
+          compliance: true
+        annotations:
+          summary: "Journal posting failure detected"
+          description: "{{ $value }} journal posting failure(s). GL integrity at risk."
+          runbook: "docs/runbooks/p5-incident-response.md#jurnal-posting-failure"
+
+  - name: blips-periode-close
+    interval: 60s
+    rules:
+      # Periode buku approaching end-of-month without soft-close (remind)
+      - alert: BlipsPeriodeNotSoftClosed
+        expr: |
+          (day_of_month() >= 25)
+          and
+          blips_periode_status{status="open"} > 0
+        for: 24h
+        labels:
+          severity: info
+          service: blips-api
+        annotations:
+          summary: "Periode buku masih open — approaching month end"
+          description: "Periode {{ $labels.period_code }} belum soft-closed. CFO approval deadline approaching."
+          runbook: "docs/runbooks/p5-observability.md#periode-close"
+
+      # Materialized view refresh lag > 2h after hard-close
+      - alert: BlipsMVRefreshLag
+        expr: |
+          (time() - blips_mv_last_refresh_timestamp) > 7200
+          and
+          blips_periode_status{status="hard_closed"} > 0
+        for: 15m
+        labels:
+          severity: warning
+          service: blips-worker
+        annotations:
+          summary: "Materialized view refresh lag > 2 hours post hard-close"
+          description: "Reports may be stale. Last MV refresh: {{ $value | humanizeDuration }} ago."
+          runbook: "docs/runbooks/p5-observability.md#mv-refresh"

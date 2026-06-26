@@ -721,9 +721,9 @@ func scanHeader(row *sql.Row) (*Header, error) {
 	h := &Header{}
 	var (
 		wfStatus  string
-		createdBy *uuid.UUID
-		updatedAt *time.Time
-		updatedBy *uuid.UUID
+		createdBy uuid.UUID
+		updatedAt time.Time
+		updatedBy uuid.UUID
 		deletedAt *time.Time
 		deletedBy *uuid.UUID
 	)
@@ -756,9 +756,9 @@ func scanHeaderRow(rows *sql.Rows) (*Header, error) {
 	h := &Header{}
 	var (
 		wfStatus  string
-		createdBy *uuid.UUID
-		updatedAt *time.Time
-		updatedBy *uuid.UUID
+		createdBy uuid.UUID
+		updatedAt time.Time
+		updatedBy uuid.UUID
 		deletedAt *time.Time
 		deletedBy *uuid.UUID
 	)
@@ -791,9 +791,9 @@ func scanDetailRow(rows *sql.Rows) (*Detail, error) {
 	d := &Detail{}
 	var (
 		multiplierStr string
-		createdBy     *uuid.UUID
-		updatedAt     *time.Time
-		updatedBy     *uuid.UUID
+		createdBy     uuid.UUID
+		updatedAt     time.Time
+		updatedBy     uuid.UUID
 		deletedAt     *time.Time
 		deletedBy     *uuid.UUID
 	)
