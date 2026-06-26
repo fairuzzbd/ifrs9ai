@@ -456,14 +456,13 @@ func (s *Service) processUploadRow(ctx context.Context, tx *sql.Tx, row UploadFi
 	}
 	var devWarn *DeviationWarning
 	if devFlag {
-		f64, _ := deltaPct.Abs().Float64()
-		thr64, _ := thresholdPct.Float64()
+		absDelta := deltaPct.Abs()
 		devWarn = &DeviationWarning{
 			InstrumenKode: row.KodeInstrumen,
-			DeltaPct:      f64,
-			ThresholdPct:  thr64,
-			Message: fmt.Sprintf("Delta %.2f%% melebihi threshold %.2f%%.",
-				f64, thr64),
+			DeltaPct:      absDelta,
+			ThresholdPct:  thresholdPct,
+			Message: fmt.Sprintf("Delta %s%% melebihi threshold %s%%.",
+				absDelta.StringFixed(2), thresholdPct.StringFixed(2)),
 		}
 	}
 	return m, staleWarn, devWarn, nil

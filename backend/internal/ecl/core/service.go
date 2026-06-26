@@ -610,6 +610,34 @@ func (o *ECLOrchestrator) applyFormulaAndPersist(
 		stage,
 	)
 
+	// F#3 fix — Stage 3 first-run net carrying (PSAK 71 §5.4.1(b)).
+	//
+	// When priorSealedECL == nil (first calc run for this Stage 3 instrument),
+	// ComputeFormula sets netCarrying = EAD (ECL allowance treated as zero).
+	// This overstates interest revenue for Stage 3: per PSAK 71 §5.4.1(b), interest
+	// must accrue on Net Carrying = Gross − ECL.
+	//
+	// Two-pass correction (within same calc run):
+	//   1. Pass 1: ComputeFormula above already computed ECLWeighted using EAD and PD=1.
+	//   2. Pass 2 (here): recalculate NetCarrying = EAD − inRunECL (the just-computed ECL).
+	//
+	// This is correct: the ECL value is unchanged (still EAD × 1.0 × LGD weighted),
+	// but the NetCarryingIDR field — used only for interest accrual by the EIR amortisation
+	// schedule — is corrected from EAD to (EAD − ECLWeighted).
+	//
+	// Audit: WarnStage3NetCarryingFirstRun was already appended above (line ~582).
+	// This correction is additive; it does NOT re-run the formula or change ECL amounts.
+	if stage == Stage3 && priorSealedECL == nil && fr.NetCarryingIDR != nil {
+		inRunNetCarrying := eadIDR.Sub(fr.ECLWeightedIDR).RoundBank(4)
+		fr.NetCarryingIDR = &inRunNetCarrying
+		o.logger.InfoContext(ctx, "core.applyFormula: Stage3 first-run two-pass net carrying correction applied (PSAK 71 §5.4.1(b))",
+			"instrumen_id", req.InstrumenID,
+			"ead_idr", eadIDR.StringFixed(4),
+			"ecl_weighted_idr", fr.ECLWeightedIDR.StringFixed(4),
+			"net_carrying_corrected", inRunNetCarrying.StringFixed(4),
+		)
+	}
+
 	// Build result.
 	pdScenarios := &ScenarioValues{Good: fr.PDGood, Normal: fr.PDNormal, Bad: fr.PDBad}
 	eclScenarios := &ScenarioValues{Good: fr.ECLGoodIDR, Normal: fr.ECLNormalIDR, Bad: fr.ECLBadIDR}

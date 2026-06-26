@@ -403,11 +403,36 @@ type UploadRowCreated struct {
 }
 
 // DeviationWarning describes a row whose delta_pct exceeds the threshold.
+//
+// DeltaPct and ThresholdPct are shopspring/decimal.Decimal (DEC-016 — no float64
+// for financial values). The custom MarshalJSON emits them as JSON numbers (not
+// strings) so the existing frontend consumer (MtmDeviationBadge.tsx) which reads
+// deltaPct/thresholdPct as JavaScript number continues to work without change.
 type DeviationWarning struct {
-	InstrumenKode string  `json:"instrumenKode"`
-	DeltaPct      float64 `json:"deltaPct"`
-	ThresholdPct  float64 `json:"thresholdPct"`
-	Message       string  `json:"message"`
+	InstrumenKode string          `json:"-"`
+	DeltaPct      decimal.Decimal `json:"-"`
+	ThresholdPct  decimal.Decimal `json:"-"`
+	Message       string          `json:"-"`
+}
+
+// MarshalJSON serialises DeviationWarning with deltaPct / thresholdPct as JSON
+// numbers so the FE (MtmDeviationBadge.tsx) can call .toFixed() directly.
+// Internal representation uses decimal.Decimal (DEC-016), wire format is float.
+func (d DeviationWarning) MarshalJSON() ([]byte, error) {
+	deltaPctF, _ := d.DeltaPct.Float64()
+	thresholdPctF, _ := d.ThresholdPct.Float64()
+	type wire struct {
+		InstrumenKode string  `json:"instrumenKode"`
+		DeltaPct      float64 `json:"deltaPct"`
+		ThresholdPct  float64 `json:"thresholdPct"`
+		Message       string  `json:"message"`
+	}
+	return json.Marshal(wire{
+		InstrumenKode: d.InstrumenKode,
+		DeltaPct:      deltaPctF,
+		ThresholdPct:  thresholdPctF,
+		Message:       d.Message,
+	})
 }
 
 // UploadBatchDetail is returned by GET /trx/mtm/upload/batch/{batch_id}.

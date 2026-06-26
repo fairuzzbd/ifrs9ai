@@ -184,6 +184,11 @@ func main() {
 		v1.Use(auth.Middleware(jwtVerifier))
 	}
 
+	// H-02 fix: Idle-window enforcement (DEC-025).
+	// Mounted AFTER auth.Middleware so Claims are available in context.
+	// skip=true when cfg.SkipIdleTimeout (test mode) or when rdb is nil (dev without Redis).
+	v1.Use(auth.IdleTimeoutMiddleware(rdb, cfg.SkipIdleTimeout))
+
 	// Auth endpoints (tidak butuh permission, tapi butuh idempotency untuk POST).
 	authGroup := v1.Group("/auth")
 	{
